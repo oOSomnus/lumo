@@ -1,28 +1,12 @@
-# Lumo · PDF 阅读与逐页翻译
+# Lumo
 
-本地 PDF 阅读器。视觉模型读取每页图像后生成结构化 Markdown（标题、段落、公式、表格、图片占位），保存在本地 SQLite 中，重新打开可继续阅读。
-
-AI 服务、模型、推理强度与凭证全部在页面内的“设置”中管理。界面语言支持 English 与简体中文；切换后重新加载页面。
+本地 PDF 阅读器，用视觉模型翻译每一页。页面图像会被读取为 Markdown（标题、段落、公式、表格、图片占位），保存在本地 SQLite 中，重新打开该页时恢复。
 
 [English](README.md) · 简体中文
 
-## 主要能力
-
-- **Markdown 与公式** — 标题、列表、表格和 GFM 正常渲染。行内公式使用 `$$...$$`，独立公式使用单独一行 `$$`，单个 `$` 保持为普通金额文本。
-- **逐页与批量翻译** — 流式预览、已保存译文、保存后的“重新生成译文”，以及 Markdown 导出。
-- **术语原文标注** — 专有名词与领域术语在每页首次出现时附准确原文，之后只使用一致译名。
-- **按书保存阅读视图** — 缩放或适合模式、旋转、滚动方式与跨页方式在翻页、重新打开书籍、刷新页面和重启服务后保持。
-- **模型与推理强度** — 设置按模型列出支持的推理强度；默认不覆盖模型自身行为。
-
-详见：[设置](docs/manual.zh-CN.md#设置) · [阅读与翻译](docs/manual.zh-CN.md#阅读与翻译)。
-
-## 演示
-
-真实模型将英文 PDF 逐步生成为简体中文译文，从流式输出到保存完成。示例是一页原创双栏技术文档，包含公式、对比表、示意图图注和脚注；其中数据仅用于演示，不是性能基准。
-
 ![页面生成演示：原始 PDF、流式 Markdown 与已保存的中文译文](docs/assets/page-generation-demo.gif)
 
-[下载示例 PDF](docs/assets/page-generation-demo.pdf)。动图已加速，不代表实际生成耗时；译文中的图片以占位说明呈现。
+[示例 PDF](docs/assets/page-generation-demo.pdf)。动图已加速播放，译文中的图片以占位说明呈现。
 
 ## 快速开始
 
@@ -33,16 +17,13 @@ bun install
 bun run dev
 ```
 
-终端会打印带访问码的地址，例如 `http://127.0.0.1:12345/?token=...`。服务只监听 `127.0.0.1`，请从本机浏览器打开该地址。首次打开后点“设置”，选择支持图像输入的 provider 与模型，可选推理强度，再配置 API key 或 OAuth 登录。
+终端会打印带访问码的地址，例如 `http://127.0.0.1:12345/?token=...`。服务只监听 `127.0.0.1`，请在同一台机器的浏览器中打开该地址。首次打开后在“设置”中选择支持图像输入的模型，再配置 API key 或 OAuth 登录。
 
-首次运行或 PDF.js 版本变化时会下载官方 viewer 包并解压到 `vendor/pdfjs/`，之后直接复用；系统需安装 `unzip`。
+首次运行会把固定版本的 PDF.js viewer 下载到 `vendor/pdfjs/`，需要系统安装 `unzip`。
 
 ## 文档
 
-- [设置](docs/manual.zh-CN.md#设置) — provider、模型、推理强度、凭证与目标语言。
-- [阅读与翻译](docs/manual.zh-CN.md#阅读与翻译) — Markdown 渲染、公式、逐页与批量翻译、重新生成。
-- [单文件构建](docs/manual.zh-CN.md#单文件构建)
-- [数据与安全](docs/manual.zh-CN.md#数据与安全)
+[docs/manual.zh-CN.md](docs/manual.zh-CN.md) 涵盖[设置与凭证](docs/manual.zh-CN.md#设置)、[阅读与翻译](docs/manual.zh-CN.md#阅读与翻译)、[单文件构建](docs/manual.zh-CN.md#单文件构建)和[数据与安全](docs/manual.zh-CN.md#数据与安全)。
 
 AI 凭证在本机明文保存，备份时请妥善保护。
 
@@ -54,4 +35,4 @@ bun test
 bun run build
 ```
 
-面向编码 Agent 的说明与源码级约束见 [AGENTS.md](AGENTS.md)。`bun run update:pi` 可更新 Pi 及其模型目录。
+源码结构与约束见 [AGENTS.md](AGENTS.md)。

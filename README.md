@@ -1,50 +1,31 @@
-# Lumo · PDF reading and page-by-page translation
+# Lumo
 
-A local PDF reader. A vision model reads each page image and produces structured Markdown (headings, paragraphs, formulas, tables, image placeholders) that is stored in local SQLite and restored when you reopen the page.
-
-AI providers, models, reasoning effort and credentials are managed entirely in the in-app **Settings**. The interface is available in English and Simplified Chinese; switching the interface language reloads the page.
+A local PDF reader that translates pages with a vision model. Each page image is read into Markdown (headings, paragraphs, formulas, tables, image placeholders), saved in SQLite, and restored when you reopen the page.
 
 English · [简体中文](README.zh-CN.md)
 
-## What you get
-
-- **Markdown and formulas** — headings, lists, tables and GFM render normally. Inline math uses `$$...$$`, display math uses its own `$$` lines, and a single `$` stays ordinary currency text.
-- **Page and batch translation** — streaming preview, saved translations, **Regenerate translation** after a page is saved, and Markdown export.
-- **Terminology in context** — a specialised term or proper noun is glossed with its source spelling on first use on each page, then continues as the plain translation.
-- **Per-book reading view** — zoom or fit mode, rotation, scroll mode and spread mode survive page turns, reopening the book, reloads and server restarts.
-- **Model and reasoning effort** — Settings lists the effort levels each model supports; the default leaves the model's behavior unchanged.
-
-Details: [Settings](docs/manual.md#settings) · [Reading and translation](docs/manual.md#reading-and-translation).
-
-## Demo
-
-A real page translation from English to Simplified Chinese, from the first streamed text to the saved result. The source is an original two-column technical note with equations, a comparison table, a diagram caption and a footnote. Its data is illustrative, not a performance benchmark.
-
 ![Page translation demo: original PDF, streaming Markdown and saved Chinese translation](docs/assets/page-generation-demo.gif)
 
-[Download the example PDF](docs/assets/page-generation-demo.pdf). Playback is accelerated and does not represent actual generation time. Figures appear as placeholders in the translation.
+[Example PDF](docs/assets/page-generation-demo.pdf). The recording is sped up; figures show as placeholders.
 
 ## Quick start
 
-Requires Bun 1.4.2 or newer.
+Bun 1.4.2 or newer.
 
 ```bash
 bun install
 bun run dev
 ```
 
-The terminal prints a URL containing an access code, for example `http://127.0.0.1:12345/?token=...`. The server listens on `127.0.0.1` only; open that URL in a browser on the same machine. On first use, open **Settings**, choose a provider and a model that accepts image input, optionally choose a reasoning effort, then add an API key or sign in through OAuth.
+The terminal prints a URL containing an access code, for example `http://127.0.0.1:12345/?token=...`. The server listens on `127.0.0.1` only, so open that URL in a browser on the same machine. In **Settings**, pick a model that accepts image input, then add an API key or sign in with OAuth.
 
-The first run, or a change to the pinned PDF.js version, downloads and extracts the official viewer into `vendor/pdfjs/`; later runs reuse it. `unzip` must be installed.
+The first run downloads the pinned PDF.js viewer into `vendor/pdfjs/`; this needs `unzip`.
 
 ## Documentation
 
-- [Settings](docs/manual.md#settings) — providers, models, reasoning effort, credentials and target language.
-- [Reading and translation](docs/manual.md#reading-and-translation) — Markdown rendering, formulas, current-page and batch translation, regeneration.
-- [Standalone build](docs/manual.md#standalone-build)
-- [Data and security](docs/manual.md#data-and-security)
+[docs/manual.md](docs/manual.md) covers [settings and credentials](docs/manual.md#settings), [reading and translation](docs/manual.md#reading-and-translation), the [standalone build](docs/manual.md#standalone-build) and [data and security](docs/manual.md#data-and-security).
 
-AI credentials are stored in plaintext on this machine; protect backups accordingly.
+Credentials are stored in plaintext on this machine; protect backups.
 
 ## Development
 
@@ -54,4 +35,4 @@ bun test
 bun run build
 ```
 
-Coding-agent instructions and source-level invariants live in [AGENTS.md](AGENTS.md). `bun run update:pi` updates Pi and its model catalog.
+Source layout and invariants: [AGENTS.md](AGENTS.md).
