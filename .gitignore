@@ -1,0 +1,8 @@
+node_modules/
+dist/
+vendor/
+.env.local
+.env
+pdf-reader-layout.png
+*.log
+/test-results/
