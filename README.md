@@ -16,6 +16,14 @@ English · [简体中文](README.zh-CN.md)
 
 Details: [Settings](docs/manual.md#settings) · [Reading and translation](docs/manual.md#reading-and-translation).
 
+## Demo
+
+A real page translation from English to Simplified Chinese, from the first streamed text to the saved result. The source is an original two-column technical note with equations, a comparison table, a diagram caption and a footnote. Its data is illustrative, not a performance benchmark.
+
+![Page translation demo: original PDF, streaming Markdown and saved Chinese translation](docs/assets/page-generation-demo.gif)
+
+[Download the example PDF](docs/assets/page-generation-demo.pdf). Playback is accelerated and does not represent actual generation time. Figures appear as placeholders in the translation.
+
 ## Quick start
 
 Requires Bun 1.4.2 or newer.

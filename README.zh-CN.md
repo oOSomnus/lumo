@@ -16,6 +16,14 @@ AI 服务、模型、推理强度与凭证全部在页面内的“设置”中�
 
 详见：[设置](docs/manual.zh-CN.md#设置) · [阅读与翻译](docs/manual.zh-CN.md#阅读与翻译)。
 
+## 演示
+
+真实模型将英文 PDF 逐步生成为简体中文译文，从流式输出到保存完成。示例是一页原创双栏技术文档，包含公式、对比表、示意图图注和脚注；其中数据仅用于演示，不是性能基准。
+
+![页面生成演示：原始 PDF、流式 Markdown 与已保存的中文译文](docs/assets/page-generation-demo.gif)
+
+[下载示例 PDF](docs/assets/page-generation-demo.pdf)。动图已加速，不代表实际生成耗时；译文中的图片以占位说明呈现。
+
 ## 快速开始
 
 要求 Bun 1.4.2 或更新版本。
