@@ -94,7 +94,7 @@ const server = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
   idleTimeout: 150,
-  maxRequestBodySize: 101 * 1024 * 1024,
+  maxRequestBodySize: Infinity,
   development: isDevelopment,
   routes: {
     "/": indexHtml,

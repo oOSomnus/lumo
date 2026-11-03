@@ -19,7 +19,6 @@ import {
   contentDispositionInline,
   HttpError,
   jsonResponse,
-  readBody,
   readJson,
 } from "./http";
 import {
@@ -41,7 +40,6 @@ import {
   updateReaderSettings,
 } from "./storage";
 
-export const MAX_PDF_BYTES = 100 * 1024 * 1024;
 const MAX_TRANSLATION_BYTES = 1024 * 1024;
 const MAX_READER_BYTES = 64 * 1024;
 const MAX_READER_VIEW_BYTES = 1024;
@@ -163,7 +161,7 @@ export async function handleLibrary(
     }
     assertContentEncoding(request);
     assertPdfContentType(request);
-    const bytes = await readBody(request, MAX_PDF_BYTES);
+    const bytes = await request.bytes();
     if (bytes.byteLength === 0) {
       throw new HttpError(400, "INVALID_REQUEST", "PDF file is empty");
     }

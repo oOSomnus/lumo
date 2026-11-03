@@ -21,6 +21,8 @@ The terminal prints a URL containing an access code, for example `http://127.0.0
 
 The first run downloads the pinned PDF.js viewer into `vendor/pdfjs/`; this needs `unzip`.
 
+PDF files have no application-imposed size limit; available memory and disk space still constrain large files.
+
 ## Documentation
 
 [docs/manual.md](docs/manual.md) covers [settings and credentials](docs/manual.md#settings), [reading and translation](docs/manual.md#reading-and-translation), the [standalone build](docs/manual.md#standalone-build) and [data and security](docs/manual.md#data-and-security).

@@ -180,7 +180,6 @@ export const zhCN: Messages = {
     PDF_OPEN_FAILED: () => "无法打开 PDF。",
     INVALID_PDF_FILE: () => "请选择 PDF 文件。",
     EMPTY_PDF_FILE: () => "PDF 文件为空。",
-    PDF_FILE_TOO_LARGE: () => "PDF 超过 100 MiB 上限。",
     COPY_CHANGED_DURING_SAVE: () =>
       "保存期间又有新的修改；副本已保存，但当前编辑未切换，请再次保存。",
     PDF_NOT_SAVED: () => "文件尚未加入书库。",

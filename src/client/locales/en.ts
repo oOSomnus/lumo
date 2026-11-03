@@ -191,7 +191,6 @@ export const en = {
     PDF_OPEN_FAILED: () => "The PDF could not be opened.",
     INVALID_PDF_FILE: () => "Choose a PDF file.",
     EMPTY_PDF_FILE: () => "The PDF file is empty.",
-    PDF_FILE_TOO_LARGE: () => "The PDF exceeds the 100 MiB limit.",
     COPY_CHANGED_DURING_SAVE: () =>
       "New edits arrived while saving. The copy was stored, but the current editor was not switched; save again.",
     PDF_NOT_SAVED: () => "The PDF has not been added to the library yet.",

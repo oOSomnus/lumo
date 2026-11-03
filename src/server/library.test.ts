@@ -76,6 +76,23 @@ describe("handleLibrary", () => {
     ).rejects.toMatchObject({ status: 404, code: "DOCUMENT_NOT_FOUND" });
   });
 
+  test("uploads and retrieves a PDF larger than 100 MiB without truncation", async () => {
+    const ctx = setup();
+    const bytes = new Uint8Array(100 * 1024 * 1024 + 1);
+    bytes.set(pdfBytes);
+    bytes[bytes.length - 1] = 0x7f;
+    const upload = await call(
+      ctx,
+      "/api/documents?name=large.pdf&pageCount=1",
+      { method: "POST", headers: { "content-type": "application/pdf" }, body: bytes },
+    );
+    expect(upload.status).toBe(200);
+    const document = (await upload.json()) as { id: string };
+    const file = await call(ctx, `/api/documents/${document.id}/file`);
+    expect(file.status).toBe(200);
+    expect(Buffer.from(await file.arrayBuffer()).equals(Buffer.from(bytes.buffer))).toBe(true);
+  });
+
   test("rejects non-PDF bodies and invalid upload metadata", async () => {
     const ctx = setup();
     await expect(

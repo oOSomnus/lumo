@@ -60,8 +60,6 @@ import { PdfViewerFrame } from "./PdfViewerFrame";
 import { SettingsDialog } from "./SettingsDialog";
 import { TranslationView } from "./TranslationView";
 
-const MAX_PDF_BYTES = 100 * 1024 * 1024;
-
 type PendingLoad =
   | { kind: "library"; document: DocumentRecord; page: number }
   | { kind: "preview"; file: File; blobUrl: string };
@@ -99,7 +97,6 @@ function fileValidationError(file: File): UiError | null {
     return { code: "INVALID_PDF_FILE" };
   }
   if (file.size === 0) return { code: "EMPTY_PDF_FILE" };
-  if (file.size > MAX_PDF_BYTES) return { code: "PDF_FILE_TOO_LARGE" };
   return null;
 }
 

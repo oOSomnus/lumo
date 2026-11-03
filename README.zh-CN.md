@@ -21,6 +21,8 @@ bun run dev
 
 首次运行会把固定版本的 PDF.js viewer 下载到 `vendor/pdfjs/`，需要系统安装 `unzip`。
 
+PDF 文件不设应用层大小上限；大文件仍受可用内存和磁盘空间限制。
+
 ## 文档
 
 [docs/manual.zh-CN.md](docs/manual.zh-CN.md) 涵盖[设置与凭证](docs/manual.zh-CN.md#设置)、[阅读与翻译](docs/manual.zh-CN.md#阅读与翻译)、[单文件构建](docs/manual.zh-CN.md#单文件构建)和[数据与安全](docs/manual.zh-CN.md#数据与安全)。
