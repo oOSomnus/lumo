@@ -10,6 +10,21 @@
 
 ## 快速开始
 
+### Linux x64 下载
+
+从 [v0.1.0 Release](https://github.com/oOSomnus/lumo/releases/tag/v0.1.0) 下载 `lumo-v0.1.0-linux-x64.tar.gz` 和 `SHA256SUMS`，然后运行：
+
+```bash
+sha256sum --check SHA256SUMS
+tar -xzf lumo-v0.1.0-linux-x64.tar.gz
+cd lumo-v0.1.0-linux-x64
+./lumo
+```
+
+可执行文件已内置 Bun 和 PDF.js，无需单独安装。
+
+### 从源码运行
+
 要求 Bun 1.4.2 或更新版本。
 
 ```bash
@@ -38,3 +53,7 @@ bun run build
 ```
 
 源码结构与约束见 [AGENTS.md](AGENTS.md)。
+
+## 许可证
+
+[MIT](LICENSE) © 2026 Yihang Zhu。内置的第三方组件保留各自的许可证，Release 压缩包附带其许可声明。

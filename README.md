@@ -10,6 +10,21 @@ English · [简体中文](README.zh-CN.md)
 
 ## Quick start
 
+### Linux x64 download
+
+Download `lumo-v0.1.0-linux-x64.tar.gz` and `SHA256SUMS` from the [v0.1.0 release](https://github.com/oOSomnus/lumo/releases/tag/v0.1.0), then run:
+
+```bash
+sha256sum --check SHA256SUMS
+tar -xzf lumo-v0.1.0-linux-x64.tar.gz
+cd lumo-v0.1.0-linux-x64
+./lumo
+```
+
+The executable includes Bun and PDF.js; no separate installation is needed.
+
+### Run from source
+
 Bun 1.4.2 or newer.
 
 ```bash
@@ -38,3 +53,7 @@ bun run build
 ```
 
 Source layout and invariants: [AGENTS.md](AGENTS.md).
+
+## License
+
+[MIT](LICENSE) © 2026 Yihang Zhu. Bundled third-party components retain their own licenses; the release archive includes their notices.
