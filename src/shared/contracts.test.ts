@@ -1,8 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import {
   AI_REASONING_EFFORTS,
+  MAX_OUTLINE_ENTRIES,
+  MAX_OUTLINE_HEADINGS_PER_PAGE,
   TARGET_LANGUAGES,
   aiConfigSchema,
+  outlineEntriesSchema,
+  outlineHeadingSchema,
+  outlinePageInputSchema,
+  outlinePageResultSchema,
   readerUpdateSchema,
   readerViewSchema,
   translatePageInputSchema,
@@ -163,5 +169,108 @@ describe("readerViewSchema", () => {
     expect(() => readerViewSchema.parse({ ...view, scrollMode: 4 })).toThrow();
     expect(() => readerViewSchema.parse({ ...view, spreadMode: 3 })).toThrow();
     expect(() => readerViewSchema.parse({ ...view, extra: true })).toThrow();
+  });
+});
+
+describe("outline schemas", () => {
+  const entry = { title: "Chapter 1", level: 1, pageNumber: 1 };
+
+  test("accepts headings, entries and page results at their boundaries", () => {
+    expect(outlineHeadingSchema.parse({ title: "  Intro  ", level: 10_000 })).toEqual({
+      title: "Intro",
+      level: 10_000,
+    });
+    expect(outlineEntriesSchema.parse([entry])).toEqual([entry]);
+    expect(
+      outlineEntriesSchema.parse([
+        entry,
+        { title: "Chapter 1", level: 1, pageNumber: 1 },
+        { title: "Section 1.1", level: 2, pageNumber: 3 },
+      ]),
+    ).toHaveLength(3);
+    expect(outlinePageResultSchema.parse({ headings: [] })).toEqual({ headings: [] });
+    expect(
+      outlinePageResultSchema.parse({
+        headings: Array.from({ length: MAX_OUTLINE_HEADINGS_PER_PAGE }, () => ({
+          title: "Heading",
+          level: 1,
+        })),
+      }).headings,
+    ).toHaveLength(MAX_OUTLINE_HEADINGS_PER_PAGE);
+  });
+
+  test("rejects invalid titles, levels, skipped levels and decreasing pages", () => {
+    for (const title of ["", "   ", "x".repeat(501), "bad\u0000title"]) {
+      expect(() => outlineHeadingSchema.parse({ title, level: 1 })).toThrow();
+    }
+    for (const level of [0, -1, 1.5, 10_001, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => outlineHeadingSchema.parse({ title: "Heading", level })).toThrow();
+    }
+    expect(() => outlineEntriesSchema.parse([])).toThrow();
+    expect(() =>
+      outlineEntriesSchema.parse([{ ...entry, level: 2 }]),
+    ).toThrow();
+    expect(() =>
+      outlineEntriesSchema.parse([
+        entry,
+        { title: "Deep", level: 3, pageNumber: 2 },
+      ]),
+    ).toThrow();
+    expect(() =>
+      outlineEntriesSchema.parse([
+        entry,
+        { title: "Later", level: 2, pageNumber: 3 },
+        { title: "Back", level: 2, pageNumber: 2 },
+      ]),
+    ).toThrow();
+    expect(() =>
+      outlineEntriesSchema.parse(
+        Array.from({ length: MAX_OUTLINE_ENTRIES + 1 }, () => entry),
+      ),
+    ).toThrow();
+  });
+
+  test("reuses the page input limits and bounds previous headings", () => {
+    const input = {
+      documentId: "a".repeat(64),
+      pageNumber: 3,
+      text: "Text",
+      imageBase64: "/9j/AAAA",
+      previousHeadings: [
+        { title: "A", level: 1, pageNumber: 1 },
+        { title: "A.1", level: 2, pageNumber: 2 },
+      ],
+    };
+    expect(outlinePageInputSchema.parse(input)).toEqual(input);
+    expect(() =>
+      outlinePageInputSchema.parse({ ...input, extra: true }),
+    ).toThrow();
+    expect(() =>
+      outlinePageInputSchema.parse({ ...input, imageBase64: "iVBORw0KGgo=" }),
+    ).toThrow();
+    expect(() =>
+      outlinePageInputSchema.parse({
+        ...input,
+        previousHeadings: [
+          { title: "Later", level: 1, pageNumber: 4 },
+        ],
+      }),
+    ).toThrow();
+    expect(() =>
+      outlinePageInputSchema.parse({
+        ...input,
+        previousHeadings: Array.from({ length: 33 }, () => ({
+          title: "A",
+          level: 1,
+          pageNumber: 1,
+        })),
+      }),
+    ).toThrow();
+  });
+
+  test("rejects extra page result fields", () => {
+    expect(() =>
+      outlinePageResultSchema.parse({ headings: [], extra: true }),
+    ).toThrow();
   });
 });

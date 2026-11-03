@@ -5,12 +5,14 @@ import { isAbsolute, join } from "node:path";
 import {
   aiConfigSchema,
   documentNameSchema,
+  outlineEntriesSchema,
   pageNumberSchema,
   readerViewSchema,
   targetLanguageSchema,
   uiLocaleSchema,
   type AiConfig,
   type DocumentRecord,
+  type OutlineEntry,
   type ReaderSettings,
   type ReaderView,
   type TargetLanguage,
@@ -20,7 +22,7 @@ import {
 } from "../shared/contracts";
 
 export const DB_FILENAME = "reader.sqlite";
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 const BUSINESS_TABLES = [
   "documents",
@@ -90,7 +92,8 @@ CREATE TABLE documents (
   currentPage INTEGER NOT NULL,
   createdAt INTEGER NOT NULL,
   lastOpenedAt INTEGER NOT NULL,
-  readerView TEXT
+  readerView TEXT,
+  generatedOutline TEXT
 ) STRICT;
 CREATE INDEX documents_last_opened_at ON documents(lastOpenedAt);
 
@@ -231,6 +234,59 @@ export function saveReaderView(
     .run(JSON.stringify(parsed), documentId);
   if (result.changes === 0) throw new DocumentNotFoundError(documentId);
   return parsed;
+}
+
+export function getGeneratedOutline(
+  db: Database,
+  documentId: string,
+): OutlineEntry[] | null {
+  const row = db
+    .query("SELECT pageCount, generatedOutline FROM documents WHERE id = ?")
+    .get(documentId) as {
+    pageCount: number;
+    generatedOutline: string | null;
+  } | null;
+  if (!row) throw new DocumentNotFoundError(documentId);
+  if (row.generatedOutline === null) return null;
+
+  let value: unknown;
+  try {
+    value = JSON.parse(row.generatedOutline);
+  } catch {
+    throw new Error("stored generated outline is invalid");
+  }
+  const parsed = outlineEntriesSchema.safeParse(value);
+  if (
+    !parsed.success ||
+    parsed.data.some((entry) => entry.pageNumber > row.pageCount)
+  ) {
+    throw new Error("stored generated outline is invalid");
+  }
+  return parsed.data;
+}
+
+export function saveGeneratedOutline(
+  db: Database,
+  documentId: string,
+  entries: OutlineEntry[],
+): OutlineEntry[] {
+  const parsed = outlineEntriesSchema.parse(entries);
+  const write = db.transaction(() => {
+    const document = getDocument(db, documentId);
+    if (!document) throw new DocumentNotFoundError(documentId);
+    const outside = parsed.find(
+      (entry) => entry.pageNumber > document.pageCount,
+    );
+    if (outside) {
+      throw new PageOutOfRangeError(outside.pageNumber, document.pageCount);
+    }
+    db.query("UPDATE documents SET generatedOutline = ? WHERE id = ?").run(
+      JSON.stringify(parsed),
+      documentId,
+    );
+    return parsed;
+  });
+  return write.immediate();
 }
 
 export function getDocumentFile(

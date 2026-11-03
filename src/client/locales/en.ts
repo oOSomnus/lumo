@@ -114,6 +114,8 @@ export const en = {
       noPdf: "Open a PDF first.",
       loading: "The PDF is still loading.",
       modified: "The PDF has unsaved edits. Save an edited copy or discard them before generating new translations.",
+      outlineBusy:
+        "An outline is being generated or saved. Wait for it to finish before translating.",
     },
     unsaved: {
       title: "Unsaved",
@@ -199,6 +201,10 @@ export const en = {
     PAGE_RENDER_FAILED: () => "The page could not be rendered.",
     PAGE_IMAGE_TOO_LARGE: () =>
       "The page image exceeds the 6000000 character limit.",
+    OUTLINE_INVALID: () =>
+      "The PDF outline could not be used. Select pages manually.",
+    OUTLINE_EMPTY: () =>
+      "No headings were identified. Select pages manually.",
     UNKNOWN: () => "Something went wrong.",
   } satisfies Record<string, ErrorMessage>,
   confirm: {
@@ -211,6 +217,8 @@ export const en = {
       } not saved`,
     switchModified: "the PDF has unsaved edits",
     switchPreview: "the current PDF is not in the library",
+    switchOutlineActive: "an outline is being generated or saved",
+    switchOutlineUnsaved: "a generated outline is not saved",
     switchBody: (reasons: string) =>
       `${reasons}. Continuing stops tasks and discards unsaved new text; saved translations are kept.`,
     switchConfirm: "Switch anyway",
@@ -306,6 +314,41 @@ export const en = {
     noTasks: "No tasks yet. Select pages and start translating.",
     existing: "used saved translation",
   },
+  outline: {
+    sectionTitle: "Select by outline",
+    loading: "Reading the outline…",
+    loadFailed: (detail: string) => `Could not read the outline: ${detail}`,
+    reload: "Reload outline",
+    sourceNative: "PDF outline",
+    sourceGenerated: "AI-generated outline",
+    skipped: (count: number) =>
+      `${count} outline item${count === 1 ? "" : "s"} without a page ${
+        count === 1 ? "was" : "were"
+      } skipped.`,
+    note: "Translation uses whole PDF pages; sections that start on the same page may overlap.",
+    generate: "Generate outline with AI",
+    retryGenerate: "Try again",
+    generateTitle: "Generate an outline with AI?",
+    generateBody: (pages: number) =>
+      `This sends the text and image of each of the ${pages} pages to the configured vision model, one page at a time. It can take a while and may incur charges. Review the generated headings before translating.`,
+    generateConfirm: "Generate outline",
+    disabledActive:
+      "Finish or cancel running translation tasks before generating an outline.",
+    generating: (processed: number, total: number) =>
+      `Identifying headings: page ${processed} / ${total}`,
+    cancelGeneration: "Cancel generation",
+    saving: "Saving the outline…",
+    unsavedTitle: "Outline not saved",
+    unsavedBody:
+      "The generated outline is still in memory and can be used for selection. Retry saving it or discard it.",
+    retrySave: "Retry saving outline",
+    discard: "Discard outline",
+    pageRange: (start: number, end: number) =>
+      start === end ? `Page ${start}` : `Pages ${start}–${end}`,
+    toggle: (title: string) => `Expand or collapse ${title}`,
+    selectRange: (start: number, end: number) =>
+      start === end ? `Select page ${start}` : `Select pages ${start}–${end}`,
+  },
   settings: {
     title: "Settings",
     open: "Settings",
@@ -327,6 +370,10 @@ export const en = {
     languageBlockedModified: "Save an edited copy, export, or discard the PDF edits.",
     languageBlockedPreview: "Add the current PDF to the library first.",
     languageBlockedSaving: "Wait for the edited copy to finish saving.",
+    languageBlockedOutline:
+      "Finish or cancel the outline generation and save or discard the outline first.",
+    languageBlockedOutlineUnsaved:
+      "Retry saving the outline or discard it first.",
     languageBlockedAuth: "Finish or cancel the AI sign-in first.",
     languageBlockedDirty: "Save or discard the AI form changes first.",
     aiSection: "AI provider and model",

@@ -110,6 +110,7 @@ export const zhCN: Messages = {
       noPdf: "请先打开 PDF。",
       loading: "PDF 正在加载，请稍候。",
       modified: "PDF 有未保存修改，保存副本或放弃修改前不能产生新译文。",
+      outlineBusy: "目录正在生成或保存，完成前不能开始翻译。",
     },
     unsaved: {
       title: "未保存",
@@ -188,6 +189,8 @@ export const zhCN: Messages = {
       `这一页提取出 ${params.length ?? "?"} 个字符，超过 100000 上限。`,
     PAGE_RENDER_FAILED: () => "无法渲染这一页。",
     PAGE_IMAGE_TOO_LARGE: () => "页面图像超过 6000000 字符上限。",
+    OUTLINE_INVALID: () => "无法使用 PDF 目录，请手动选择页码。",
+    OUTLINE_EMPTY: () => "没有识别到标题，请手动选择页码。",
     UNKNOWN: () => "出现未知错误。",
   },
   confirm: {
@@ -197,6 +200,8 @@ export const zhCN: Messages = {
     switchDrafts: (count) => `${count} 页译文已生成但尚未保存`,
     switchModified: "PDF 有未保存的修改",
     switchPreview: "当前 PDF 尚未加入书库",
+    switchOutlineActive: "目录正在生成或保存",
+    switchOutlineUnsaved: "生成的目录尚未保存",
     switchBody: (reasons) =>
       `${reasons}。继续会停止任务并丢弃未保存的新正文；已保存译文不受影响。`,
     switchConfirm: "仍然切换",
@@ -284,6 +289,37 @@ export const zhCN: Messages = {
     noTasks: "还没有任务。选择页码后开始翻译。",
     existing: "已有译文",
   },
+  outline: {
+    sectionTitle: "按目录选择",
+    loading: "正在读取目录…",
+    loadFailed: (detail) => `无法读取目录：${detail}`,
+    reload: "重新读取目录",
+    sourceNative: "PDF 原生目录",
+    sourceGenerated: "AI 生成的目录",
+    skipped: (count) => `有 ${count} 个目录项无法定位页码，已跳过。`,
+    note: "翻译按完整 PDF 页进行；同页开始的章/节可能重叠。",
+    generate: "用 AI 生成目录",
+    retryGenerate: "重新尝试",
+    generateTitle: "用 AI 生成目录？",
+    generateBody: (pages) =>
+      `会把全部 ${pages} 页的文字和图像逐页发送给当前视觉模型，可能需要一些时间，并可能产生费用。生成后请先核对标题再翻译。`,
+    generateConfirm: "生成目录",
+    disabledActive: "请先完成或取消正在进行的翻译任务，再生成目录。",
+    generating: (processed, total) =>
+      `正在识别标题：第 ${processed} / ${total} 页`,
+    cancelGeneration: "取消生成",
+    saving: "正在保存目录…",
+    unsavedTitle: "目录未保存",
+    unsavedBody:
+      "生成的目录仍在内存中，可用于选择页码。可以重试保存或丢弃。",
+    retrySave: "重试保存目录",
+    discard: "丢弃目录",
+    pageRange: (start, end) =>
+      start === end ? `第 ${start} 页` : `第 ${start}–${end} 页`,
+    toggle: (title) => `展开或收起 ${title}`,
+    selectRange: (start, end) =>
+      start === end ? `选择第 ${start} 页` : `选择第 ${start}–${end} 页`,
+  },
   settings: {
     title: "设置",
     open: "设置",
@@ -305,6 +341,8 @@ export const zhCN: Messages = {
     languageBlockedModified: "请保存修改副本、导出或放弃 PDF 修改。",
     languageBlockedPreview: "请先把当前 PDF 加入书库。",
     languageBlockedSaving: "请等待修改副本保存完成。",
+    languageBlockedOutline: "请先完成或取消目录生成，并保存或丢弃目录。",
+    languageBlockedOutlineUnsaved: "请先重试保存目录或丢弃它。",
     languageBlockedAuth: "请先完成或取消 AI 登录。",
     languageBlockedDirty: "请先保存或放弃 AI 表单的修改。",
     aiSection: "AI 服务与模型",

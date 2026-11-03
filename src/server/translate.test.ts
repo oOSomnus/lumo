@@ -63,6 +63,9 @@ function ai(
   return {
     checkConfigured: async () => configured,
     translatePage: translate,
+    extractOutlinePage: async () => {
+      throw new Error("unexpected outline request");
+    },
   };
 }
 

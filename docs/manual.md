@@ -21,6 +21,7 @@ Settings are stored in the local database. Provider secrets exported in the shel
 - Translation Markdown supports headings, paragraphs, lists, tables, GFM and formulas. Inline math uses `$$...$$`, display math uses its own `$$` lines, and a single `$` is ordinary text so currency such as `$5` stays readable. Formulas saved with the old `$...$` syntax appear literally until the page is regenerated.
 - **Current page translation** — translate, follow the streaming preview, or export the page as Markdown. Once a page has a saved translation, the main button becomes **Regenerate translation**; it asks for confirmation and calls the AI service with the current settings. The previous translation stays readable and is only replaced after the new one is saved.
 - **Batch translation** — select pages by page expression or shortcut buttons; up to three pages run in parallel. Stop, retry failures, or regenerate saved pages.
+- **Outline selection** — when the PDF has no usable outline, the Batch panel can generate one with the configured vision model. It sends each page image and text, one page at a time, so the call count equals the page count and may incur charges. The generated outline is saved in `reader.sqlite` and reused when you reopen the document; it does not modify the PDF bytes or the PDF.js sidebar. Tick a chapter or section to add its whole physical page range to the same selection. Parent sections include their children, and sections that start on the same page may overlap; translation still uses whole PDF pages. Treat the generated headings as a suggestion and verify them before translating. A PDF with a usable native outline shows that outline instead.
 - Translations are persisted to SQLite; reopening the same page prefers the saved result. All translations can be exported as Markdown.
 - If you edit forms or annotations, **Save edited copy** stores a new document and keeps the original. While modifications are unsaved, new translations are blocked.
 
@@ -43,7 +44,7 @@ LUMO_DATA_DIR=/absolute/path/to/lumo-data bun run dev
 
 | File | Contents |
 | --- | --- |
-| `reader.sqlite` | PDF bytes, library, reading progress and per-book reading view, interface language, AI configuration and all translations. |
+| `reader.sqlite` | PDF bytes, library, reading progress and per-book reading view, generated outlines, interface language, AI configuration and all translations. |
 | `ai-credentials.sqlite` | API keys and OAuth credentials. |
 
 - The directory is created with mode `0700`; both database files use mode `0600`.

@@ -16,6 +16,7 @@ import {
   type GateConfig,
 } from "./http";
 import { handleLibrary } from "./library";
+import { handleOutlinePage } from "./outline";
 import { handleSettings } from "./settings";
 import { openReaderDb, resolveDataDirectory } from "./storage";
 import { handleTranslate } from "./translate";
@@ -75,6 +76,9 @@ async function apiHandler(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/api/translate") {
       return await handleTranslate(request, ctx);
+    }
+    if (url.pathname === "/api/outline-page") {
+      return await handleOutlinePage(request, ctx);
     }
     const settings = await handleSettings(request, url, ctx);
     if (settings) return settings;

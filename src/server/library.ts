@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 import {
   DOCUMENT_UPLOAD_QUERY_SCHEMA,
   documentIdSchema,
+  outlineEntriesSchema,
   pageNumberSchema,
   readerUpdateSchema,
   readerViewSchema,
@@ -24,6 +25,7 @@ import {
 import {
   getDocument,
   getDocumentFile,
+  getGeneratedOutline,
   getReaderView,
   getSettings,
   getTranslation,
@@ -32,6 +34,7 @@ import {
   listTranslatedPages,
   listTranslations,
   removeDocument,
+  saveGeneratedOutline,
   saveReaderView,
   saveTranslation,
   storeDocument,
@@ -42,6 +45,7 @@ export const MAX_PDF_BYTES = 100 * 1024 * 1024;
 const MAX_TRANSLATION_BYTES = 1024 * 1024;
 const MAX_READER_BYTES = 64 * 1024;
 const MAX_READER_VIEW_BYTES = 1024;
+const MAX_OUTLINE_BYTES = 32 * 1024 * 1024;
 
 const languageQuerySchema = z.strictObject({
   targetLanguage: targetLanguageSchema,
@@ -199,6 +203,25 @@ export async function handleLibrary(
       );
       return jsonResponse({
         view: saveReaderView(ctx.db, documentId, view),
+      });
+    }
+    throw new HttpError(405, "METHOD_NOT_ALLOWED", "method not allowed");
+  }
+
+  if (segments.length === 4 && segments[3] === "outline") {
+    if (method === "GET") {
+      return jsonResponse({
+        outline: getGeneratedOutline(ctx.db, documentId),
+      });
+    }
+    if (method === "PUT") {
+      const entries = await readJson(
+        request,
+        MAX_OUTLINE_BYTES,
+        outlineEntriesSchema,
+      );
+      return jsonResponse({
+        outline: saveGeneratedOutline(ctx.db, documentId, entries),
       });
     }
     throw new HttpError(405, "METHOD_NOT_ALLOWED", "method not allowed");

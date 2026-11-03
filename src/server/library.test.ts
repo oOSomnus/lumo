@@ -4,7 +4,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleLibrary } from "./library";
-import { DocumentNotFoundError, openReaderDb } from "./storage";
+import {
+  DocumentNotFoundError,
+  openReaderDb,
+  PageOutOfRangeError,
+} from "./storage";
 
 const directories: string[] = [];
 const databases: Database[] = [];
@@ -224,5 +228,68 @@ describe("handleLibrary", () => {
     expect(
       await (await call(ctx, `/api/documents/${second.id}/view`)).json(),
     ).toEqual({ view: secondView });
+  });
+});
+
+describe("generated outline route", () => {
+  const outline = [
+    { title: "A", level: 1, pageNumber: 1 },
+    { title: "A.1", level: 2, pageNumber: 2 },
+    { title: "B", level: 1, pageNumber: 3 },
+  ];
+
+  test("reads, saves and removes an outline with its document", async () => {
+    const ctx = setup();
+    const upload = await call(
+      ctx,
+      "/api/documents?name=outline.pdf&pageCount=3",
+      { method: "POST", headers: { "content-type": "application/pdf" }, body: pdfBytes },
+    );
+    const document = (await upload.json()) as { id: string };
+
+    const empty = await call(ctx, `/api/documents/${document.id}/outline`);
+    expect(empty.status).toBe(200);
+    expect(await empty.json()).toEqual({ outline: null });
+
+    const put = await call(ctx, `/api/documents/${document.id}/outline`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(outline),
+    });
+    expect(put.status).toBe(200);
+    expect(await put.json()).toEqual({ outline });
+
+    const read = await call(ctx, `/api/documents/${document.id}/outline`);
+    expect(await read.json()).toEqual({ outline });
+
+    await expect(
+      call(ctx, `/api/documents/${document.id}/outline`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify([]),
+      }),
+    ).rejects.toMatchObject({ status: 400, code: "INVALID_REQUEST" });
+    await expect(
+      call(ctx, `/api/documents/${document.id}/outline`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify([{ title: "Outside", level: 1, pageNumber: 4 }]),
+      }),
+    ).rejects.toBeInstanceOf(PageOutOfRangeError);
+    expect(
+      await (await call(ctx, `/api/documents/${document.id}/outline`)).json(),
+    ).toEqual({ outline });
+
+    await expect(
+      call(ctx, `/api/documents/${document.id}/outline`, { method: "DELETE" }),
+    ).rejects.toMatchObject({ status: 405, code: "METHOD_NOT_ALLOWED" });
+    await expect(
+      call(ctx, `/api/documents/${"c".repeat(64)}/outline`),
+    ).rejects.toBeInstanceOf(DocumentNotFoundError);
+
+    await call(ctx, `/api/documents/${document.id}`, { method: "DELETE" });
+    await expect(
+      call(ctx, `/api/documents/${document.id}/outline`),
+    ).rejects.toBeInstanceOf(DocumentNotFoundError);
   });
 });

@@ -1,6 +1,6 @@
 # Lumo
 
-A local PDF reader that translates pages with a vision model. Each page image is read into Markdown (headings, paragraphs, formulas, tables, image placeholders), saved in SQLite, and restored when you reopen the page.
+A local PDF reader that translates pages with a vision model. Each page image is read into Markdown (headings, paragraphs, formulas, tables, image placeholders), saved in SQLite, and restored when you reopen the page. If a PDF has no usable outline, Lumo can generate one with the same vision model and use it to select page ranges for batch translation.
 
 English · [简体中文](README.zh-CN.md)
 

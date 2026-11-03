@@ -1,10 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type {
+  AssistantMessage,
+  Context,
+  MutableModels,
+} from "@earendil-works/pi-ai";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import type { AiConfig } from "../shared/contracts";
 import {
   AiError,
   assembleFinalMarkdown,
+  assembleOutlineHeadings,
+  buildOutlineContext,
   buildTranslationContext,
   createAiRuntime,
   registerCustomProvider,
@@ -109,5 +115,106 @@ describe("createAiRuntime", () => {
       registerCustomProvider(builtinModels(), config),
     );
     await expect(runtime.checkConfigured()).resolves.toEqual({ ok: true });
+  });
+});
+
+describe("outline extraction", () => {
+  const input = {
+    documentId: "a".repeat(64),
+    pageNumber: 2,
+    text: "1. Introduction\nBody",
+    imageBase64: "/9j/AAAA",
+    previousHeadings: [
+      { title: "Preface", level: 1, pageNumber: 1 },
+    ],
+  };
+
+  test("builds a JSON-only vision request with the previous headings", () => {
+    const context = buildOutlineContext(input);
+    const content = context.messages[0]!.content;
+    expect(content).toContainEqual(
+      expect.objectContaining({ type: "image", mimeType: "image/jpeg" }),
+    );
+    expect(content).toContainEqual(
+      expect.objectContaining({
+        type: "text",
+        text: expect.stringContaining("Preface (page 1, level 1)"),
+      }),
+    );
+    expect(context.systemPrompt).toContain('"headings"');
+    expect(context.systemPrompt).not.toContain("Target language");
+  });
+
+  test("accepts valid JSON and enforces level continuity", () => {
+    expect(
+      assembleOutlineHeadings(
+        assistant([{ type: "text", text: '{"headings":[{"title":" Chapter 1 ","level":2}]}' }]),
+        input.previousHeadings,
+      ),
+    ).toEqual([{ title: "Chapter 1", level: 2 }]);
+    expect(() =>
+      assembleOutlineHeadings(
+        assistant([{ type: "text", text: '{"headings":[{"title":"Too deep","level":3}]}' }]),
+        input.previousHeadings,
+      ),
+    ).toThrow(AiError);
+    expect(() =>
+      assembleOutlineHeadings(
+        assistant([{ type: "text", text: '{"headings":[{"title":"Starts deep","level":2}]}' }]),
+        [],
+      ),
+    ).toThrow(AiError);
+  });
+
+  test("rejects fences, invalid JSON, tools, truncation and empty text", () => {
+    for (const content of [
+      [{ type: "text" as const, text: '```json\n{"headings":[]}\n```' }],
+      [{ type: "text" as const, text: '{"headings":' }],
+      [{ type: "text" as const, text: "   " }],
+      [{ type: "toolCall" as const, id: "1", name: "x", arguments: {} }],
+    ]) {
+      expect(() => assembleOutlineHeadings(assistant(content), [])).toThrow(AiError);
+    }
+    expect(() =>
+      assembleOutlineHeadings(
+        assistant([{ type: "text", text: '{"headings":[]}' }], "length"),
+        [],
+      ),
+    ).toThrow(AiError);
+  });
+
+  test("extracts headings through the runtime with a synthetic provider stream", async () => {
+    const message = assistant([
+      { type: "text", text: '{"headings":[{"title":"Chapter 1","level":1}]}' },
+    ]);
+    const model = {
+      id: "mock-vision",
+      name: "mock",
+      provider: "mock",
+      api: "openai-completions",
+      input: ["text", "image"],
+      maxTokens: 4096,
+    };
+    let receivedContext: Context | undefined;
+    const models = {
+      getModel: () => model,
+      getAuth: async () => ({ apiKey: "test" }),
+      streamSimple: (_model: unknown, context: Context) => {
+        receivedContext = context;
+        return {
+          async *[Symbol.asyncIterator]() {},
+          result: async () => message,
+        };
+      },
+    };
+    const runtime = createAiRuntime(
+      { provider: "mock", model: "mock-vision" },
+      models as unknown as MutableModels,
+    );
+
+    await expect(
+      runtime.extractOutlinePage(input, new AbortController().signal),
+    ).resolves.toEqual([{ title: "Chapter 1", level: 1 }]);
+    expect(receivedContext?.systemPrompt).toContain('"headings"');
   });
 });

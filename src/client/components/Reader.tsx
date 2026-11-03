@@ -8,10 +8,15 @@ import {
 } from "react";
 import {
   DEFAULT_READER_VIEW,
+  MAX_OUTLINE_ENTRIES,
+  outlineEntriesSchema,
+  outlinePageResultSchema,
   readerViewSchema,
   TARGET_LANGUAGE_LABELS,
   type DocumentRecord,
   type LibrarySnapshot,
+  type OutlineEntry,
+  type OutlinePageInput,
   type ReaderUpdate,
   type ReaderView,
   type TargetLanguage,
@@ -38,7 +43,12 @@ import {
   type UiError,
 } from "../i18n";
 import { PagePreparationError, preparePageForTranslation, validatePdfCopy } from "../pdf";
-import type { ViewerBridge } from "../pdfBridge";
+import { ViewerBridgeError, type ViewerBridge } from "../pdfBridge";
+import {
+  emptyOutlineState,
+  OutlineError,
+  type DocumentOutlineState,
+} from "../outline";
 import {
   TranslationQueue,
   translationKey,
@@ -256,6 +266,17 @@ export function Reader() {
     status: "idle",
   });
 
+  const [selection, setSelection] = useState<Set<number>>(new Set());
+  const [outline, setOutline] = useState<DocumentOutlineState>(emptyOutlineState);
+  const outlineRef = useRef(outline);
+  const outlineAttemptRef = useRef(0);
+  const outlineControllerRef = useRef<AbortController | null>(null);
+  const outlineLoadedSessionRef = useRef(-1);
+
+  useEffect(() => {
+    outlineRef.current = outline;
+  }, [outline]);
+
   const queueRef = useRef<TranslationQueue | null>(null);
   if (!queueRef.current) {
     queueRef.current = new TranslationQueue({
@@ -313,6 +334,17 @@ export function Reader() {
   useEffect(() => queue.subscribe(bumpQueue), [queue]);
   useEffect(() => () => queue.cancelAll(), [queue]);
 
+  useEffect(() => {
+    setSelection(new Set());
+    const nextOutline = emptyOutlineState();
+    outlineRef.current = nextOutline;
+    setOutline(nextOutline);
+    outlineLoadedSessionRef.current = -1;
+    outlineAttemptRef.current += 1;
+    outlineControllerRef.current?.abort();
+    outlineControllerRef.current = null;
+  }, [session]);
+
   const tasks = useMemo(() => queue.getTasks(), [queue, queueVersion]);
   const currentKey = currentDocument
     ? translationKey(currentDocument.id, page, language)
@@ -332,6 +364,21 @@ export function Reader() {
   useEffect(() => {
     if (!modified) return;
     queue.cancelAll();
+    if (outlineRef.current.stage !== "generating") return;
+    outlineAttemptRef.current += 1;
+    outlineControllerRef.current?.abort();
+    outlineControllerRef.current = null;
+    setOutline((previous) =>
+      previous.stage === "generating"
+        ? {
+            ...previous,
+            entries: [],
+            stage: "idle",
+            processedPages: 0,
+            error: null,
+          }
+        : previous,
+    );
   }, [modified, queue]);
 
   useEffect(() => {
@@ -359,6 +406,15 @@ export function Reader() {
   }, []);
 
   const selectDocument = useCallback((document: DocumentRecord | null) => {
+    const previousId = currentDocumentRef.current?.id ?? null;
+    const nextId = document?.id ?? null;
+    if (previousId !== nextId) {
+      setSelection(new Set());
+      const nextOutline = emptyOutlineState();
+      outlineRef.current = nextOutline;
+      setOutline(nextOutline);
+      outlineLoadedSessionRef.current = -1;
+    }
     currentDocumentRef.current = document;
     if (document) deletedViewsRef.current.delete(document.id);
     setCurrentDocument(document);
@@ -665,6 +721,429 @@ export function Reader() {
     resolve?.(confirmed);
   }, []);
 
+  const abortOutlineWork = useCallback(() => {
+    outlineAttemptRef.current += 1;
+    outlineControllerRef.current?.abort();
+    outlineControllerRef.current = null;
+  }, []);
+
+  const loadOutline = useCallback(
+    async (
+      bridge: ViewerBridge,
+      documentId: string,
+      sessionAtStart: number,
+      force = false,
+    ): Promise<void> => {
+      if (!force && outlineLoadedSessionRef.current === sessionAtStart) return;
+      outlineLoadedSessionRef.current = sessionAtStart;
+      const attempt = ++outlineAttemptRef.current;
+      outlineControllerRef.current?.abort();
+      const controller = new AbortController();
+      outlineControllerRef.current = controller;
+      setOutline({ ...emptyOutlineState(), loadStatus: "loading" });
+
+      try {
+        let native: { entries: OutlineEntry[]; skipped: number } | null = null;
+        try {
+          native = await bridge.getOutline();
+        } catch (error) {
+          if (
+            !(error instanceof ViewerBridgeError) ||
+            error.code !== "OUTLINE_INVALID"
+          ) {
+            throw error;
+          }
+        }
+        if (
+          attempt !== outlineAttemptRef.current ||
+          sessionRef.current !== sessionAtStart ||
+          bridgeRef.current !== bridge
+        ) {
+          return;
+        }
+        if (native && native.entries.length > 0) {
+          setOutline({
+            entries: native.entries,
+            source: "native",
+            loadStatus: "ready",
+            stage: "idle",
+            processedPages: 0,
+            skipped: native.skipped,
+            error: null,
+          });
+          return;
+        }
+
+        const result = await apiJson<{ outline: OutlineEntry[] | null }>(
+          `/api/documents/${documentId}/outline`,
+          { signal: controller.signal },
+        );
+        if (
+          attempt !== outlineAttemptRef.current ||
+          sessionRef.current !== sessionAtStart ||
+          bridgeRef.current !== bridge
+        ) {
+          return;
+        }
+        if (result.outline && result.outline.length > 0) {
+          setOutline({
+            entries: outlineEntriesSchema.parse(result.outline),
+            source: "generated",
+            loadStatus: "ready",
+            stage: "idle",
+            processedPages: 0,
+            skipped: 0,
+            error: null,
+          });
+          return;
+        }
+        setOutline({
+          ...emptyOutlineState(),
+          loadStatus: "ready",
+        });
+      } catch (error) {
+        if (
+          attempt !== outlineAttemptRef.current ||
+          controller.signal.aborted
+        ) {
+          return;
+        }
+        setOutline({
+          ...emptyOutlineState(),
+          loadStatus: "error",
+          error: toUiError(error),
+        });
+      } finally {
+        if (outlineControllerRef.current === controller) {
+          outlineControllerRef.current = null;
+        }
+      }
+    },
+    [],
+  );
+
+  const cancelOutlineGeneration = useCallback(() => {
+    outlineAttemptRef.current += 1;
+    outlineControllerRef.current?.abort();
+    outlineControllerRef.current = null;
+    setOutline((previous) =>
+      previous.stage === "generating"
+        ? {
+            ...previous,
+            entries: [],
+            stage: "idle",
+            processedPages: 0,
+            error: null,
+          }
+        : previous,
+    );
+  }, []);
+
+  const generateOutline = useCallback(async (): Promise<void> => {
+    const bridge = bridgeRef.current;
+    const document = currentDocumentRef.current;
+    const state = outlineRef.current;
+    if (
+      !bridge ||
+      !document ||
+      !viewerReadyRef.current ||
+      previewOnlyRef.current ||
+      modified ||
+      bridge.hasEdits ||
+      state.loadStatus !== "ready" ||
+      state.stage !== "idle" ||
+      state.entries.length > 0
+    ) {
+      return;
+    }
+    if (
+      tasks.some(
+        (task) =>
+          task.documentId === document.id &&
+          ["queued", "preparing", "generating", "saving"].includes(task.stage),
+      )
+    ) {
+      return;
+    }
+
+    const sessionAtStart = sessionRef.current;
+    const pageCount = bridge.pageCount;
+    const confirmed = await ask({
+      title: t.outline.generateTitle,
+      body: t.outline.generateBody(pageCount),
+      confirmLabel: t.outline.generateConfirm,
+    });
+    if (!confirmed) return;
+    if (
+      currentDocumentRef.current?.id !== document.id ||
+      sessionRef.current !== sessionAtStart ||
+      bridgeRef.current !== bridge ||
+      !viewerReadyRef.current ||
+      previewOnlyRef.current ||
+      modified ||
+      bridge.hasEdits ||
+      outlineRef.current.stage !== "idle" ||
+      outlineRef.current.entries.length > 0
+    ) {
+      return;
+    }
+
+    const attempt = ++outlineAttemptRef.current;
+    const controller = new AbortController();
+    outlineControllerRef.current = controller;
+    setOutline({
+      entries: [],
+      source: null,
+      loadStatus: "ready",
+      stage: "generating",
+      processedPages: 0,
+      skipped: 0,
+      error: null,
+    });
+
+    const entries: OutlineEntry[] = [];
+    let saving = false;
+    try {
+      for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+        if (
+          attempt !== outlineAttemptRef.current ||
+          controller.signal.aborted ||
+          sessionRef.current !== sessionAtStart ||
+          bridgeRef.current !== bridge ||
+          currentDocumentRef.current?.id !== document.id
+        ) {
+          return;
+        }
+
+        const pageProxy = await bridge.getPage(pageNumber);
+        let prepared: { text: string; imageBase64: string };
+        try {
+          prepared = await preparePageForTranslation(
+            pageProxy,
+            bridge.document,
+            controller.signal,
+          );
+        } finally {
+          if (pageNumber !== bridge.page) pageProxy.cleanup();
+        }
+
+        if (
+          attempt !== outlineAttemptRef.current ||
+          controller.signal.aborted ||
+          sessionRef.current !== sessionAtStart ||
+          bridgeRef.current !== bridge
+        ) {
+          return;
+        }
+
+        const previousHeadings = entries.slice(-32);
+        const input: OutlinePageInput = {
+          documentId: document.id,
+          pageNumber,
+          text: prepared.text,
+          imageBase64: prepared.imageBase64,
+          previousHeadings,
+        };
+        const response = await apiJson<{ headings: unknown }>(
+          "/api/outline-page",
+          { ...jsonInit("POST", input), signal: controller.signal },
+        );
+        if (
+          attempt !== outlineAttemptRef.current ||
+          controller.signal.aborted ||
+          sessionRef.current !== sessionAtStart ||
+          bridgeRef.current !== bridge
+        ) {
+          return;
+        }
+
+        const result = outlinePageResultSchema.parse(response);
+        let previousLevel = previousHeadings.at(-1)?.level ?? 0;
+        for (const heading of result.headings) {
+          if (heading.level > previousLevel + 1) {
+            throw new OutlineError(
+              "OUTLINE_INVALID",
+              "the model returned headings that skip a level",
+            );
+          }
+          previousLevel = heading.level;
+          entries.push({ ...heading, pageNumber });
+        }
+        if (entries.length > MAX_OUTLINE_ENTRIES) {
+          throw new OutlineError("OUTLINE_INVALID", "the outline is too long");
+        }
+
+        setOutline((previous) =>
+          previous.stage === "generating"
+            ? { ...previous, processedPages: pageNumber }
+            : previous,
+        );
+      }
+
+      if (entries.length === 0) {
+        setOutline((previous) => ({
+          ...previous,
+          entries: [],
+          stage: "idle",
+          processedPages: pageCount,
+          error: { code: "OUTLINE_EMPTY" },
+        }));
+        return;
+      }
+      const complete = outlineEntriesSchema.parse(entries);
+
+      saving = true;
+      setOutline((previous) => ({
+        ...previous,
+        entries: complete,
+        source: "generated",
+        stage: "saving",
+        processedPages: pageCount,
+        error: null,
+      }));
+      const saved = await apiJson<{ outline: OutlineEntry[] }>(
+        `/api/documents/${document.id}/outline`,
+        { ...jsonInit("PUT", complete), signal: controller.signal },
+      );
+      if (
+        attempt !== outlineAttemptRef.current ||
+        sessionRef.current !== sessionAtStart ||
+        currentDocumentRef.current?.id !== document.id
+      ) {
+        return;
+      }
+      const parsed = outlineEntriesSchema.parse(saved.outline);
+      if (parsed.some((entry) => entry.pageNumber > pageCount)) {
+        throw new OutlineError(
+          "OUTLINE_INVALID",
+          "the saved outline is outside the document",
+        );
+      }
+      setOutline({
+        entries: parsed,
+        source: "generated",
+        loadStatus: "ready",
+        stage: "idle",
+        processedPages: pageCount,
+        skipped: 0,
+        error: null,
+      });
+    } catch (error) {
+      if (attempt !== outlineAttemptRef.current) return;
+      if (controller.signal.aborted) return;
+      const uiError = toUiError(error);
+      setOutline((previous) =>
+        saving
+          ? { ...previous, stage: "unsaved", error: uiError }
+          : {
+              ...previous,
+              entries: [],
+              stage: "idle",
+              processedPages: 0,
+              error: uiError,
+            },
+      );
+    } finally {
+      if (outlineControllerRef.current === controller) {
+        outlineControllerRef.current = null;
+      }
+    }
+  }, [ask, modified, t, tasks]);
+
+  const retrySaveOutline = useCallback(async (): Promise<void> => {
+    const document = currentDocumentRef.current;
+    const state = outlineRef.current;
+    if (
+      !document ||
+      state.stage !== "unsaved" ||
+      state.entries.length === 0
+    ) {
+      return;
+    }
+    const attempt = ++outlineAttemptRef.current;
+    const controller = new AbortController();
+    outlineControllerRef.current = controller;
+    const sessionAtStart = sessionRef.current;
+    const pageCount = bridgeRef.current?.pageCount ?? document.pageCount;
+    setOutline((previous) => ({
+      ...previous,
+      stage: "saving",
+      error: null,
+    }));
+
+    try {
+      const saved = await apiJson<{ outline: OutlineEntry[] }>(
+        `/api/documents/${document.id}/outline`,
+        { ...jsonInit("PUT", state.entries), signal: controller.signal },
+      );
+      if (
+        attempt !== outlineAttemptRef.current ||
+        sessionRef.current !== sessionAtStart ||
+        currentDocumentRef.current?.id !== document.id
+      ) {
+        return;
+      }
+      const parsed = outlineEntriesSchema.parse(saved.outline);
+      if (parsed.some((entry) => entry.pageNumber > pageCount)) {
+        throw new OutlineError(
+          "OUTLINE_INVALID",
+          "the saved outline is outside the document",
+        );
+      }
+      setOutline({
+        entries: parsed,
+        source: "generated",
+        loadStatus: "ready",
+        stage: "idle",
+        processedPages: state.processedPages,
+        skipped: 0,
+        error: null,
+      });
+    } catch (error) {
+      if (attempt !== outlineAttemptRef.current) return;
+      if (controller.signal.aborted) return;
+      setOutline((previous) =>
+        previous.stage === "saving"
+          ? { ...previous, stage: "unsaved", error: toUiError(error) }
+          : previous,
+      );
+    } finally {
+      if (outlineControllerRef.current === controller) {
+        outlineControllerRef.current = null;
+      }
+    }
+  }, []);
+
+  const discardOutline = useCallback(() => {
+    outlineAttemptRef.current += 1;
+    outlineControllerRef.current?.abort();
+    outlineControllerRef.current = null;
+    setOutline({ ...emptyOutlineState(), loadStatus: "ready" });
+  }, []);
+
+  const reloadOutline = useCallback(() => {
+    const bridge = bridgeRef.current;
+    const document = currentDocumentRef.current;
+    if (!bridge || !document || !viewerReadyRef.current) return;
+    void loadOutline(bridge, document.id, sessionRef.current, true);
+  }, [loadOutline]);
+
+  const openOutlinePage = useCallback(
+    (pageNumber: number) => {
+      const document = currentDocumentRef.current;
+      if (!document) return;
+      const total = bridgeRef.current?.pageCount ?? pageCount;
+      const target = total > 0 ? clamp(pageNumber, 1, total) : pageNumber;
+      if (bridgeRef.current && viewerReadyRef.current) {
+        bridgeRef.current.setPage(target);
+      }
+      setPageValue(target);
+      if (narrow) setNarrowTab("pdf");
+      saveProgress(document.id, target, languageRef.current);
+    },
+    [narrow, pageCount, saveProgress, setPageValue],
+  );
+
   const currentHasWork = useCallback(
     (documentId: string | null): { active: boolean; drafts: TranslationTask[] } => {
       const relevant = tasks.filter(
@@ -683,10 +1162,24 @@ export function Reader() {
   const confirmSwitch = useCallback(async (): Promise<boolean> => {
     const document = currentDocumentRef.current;
     const { active, drafts } = currentHasWork(document?.id ?? null);
-    if (!active && !modified && !previewOnly && drafts.length === 0) return true;
+    const outlineActive =
+      outline.stage === "generating" || outline.stage === "saving";
+    const outlineUnsaved = outline.stage === "unsaved";
+    if (
+      !active &&
+      !modified &&
+      !previewOnly &&
+      drafts.length === 0 &&
+      !outlineActive &&
+      !outlineUnsaved
+    ) {
+      return true;
+    }
     const reasons = [
       active ? t.confirm.switchActive : null,
       drafts.length > 0 ? t.confirm.switchDrafts(drafts.length) : null,
+      outlineActive ? t.confirm.switchOutlineActive : null,
+      outlineUnsaved ? t.confirm.switchOutlineUnsaved : null,
       modified ? t.confirm.switchModified : null,
       previewOnly ? t.confirm.switchPreview : null,
     ].filter((value): value is string => value !== null);
@@ -697,13 +1190,14 @@ export function Reader() {
       extraLabel: drafts.length > 0 ? t.confirm.exportDrafts : undefined,
       onExtra: () => exportDraftMarkdown(),
     });
-  }, [ask, currentHasWork, modified, previewOnly, t]);
+  }, [ask, currentHasWork, modified, outline.stage, previewOnly, t]);
 
   const stopCurrentWork = useCallback(() => {
     queue.cancelAll();
+    abortOutlineWork();
     watchCleanupRef.current?.();
     watchCleanupRef.current = null;
-  }, [queue]);
+  }, [abortOutlineWork, queue]);
 
   const openDocument = useCallback(
     (document: DocumentRecord, targetPage: number, initial = false) => {
@@ -877,6 +1371,7 @@ export function Reader() {
         setPageCount(record.pageCount);
         setPageValue(clamp(pageRef.current, 1, record.pageCount));
         saveProgress(record.id, pageRef.current, languageRef.current);
+        void loadOutline(bridge, record.id, sessionAtStart);
         if (viewTouchedRef.current && captureCurrentView(record.id)) {
           scheduleViewSave();
           return;
@@ -901,6 +1396,7 @@ export function Reader() {
     },
     [
       captureCurrentView,
+      loadOutline,
       resolveInitialView,
       saveProgress,
       scheduleViewSave,
@@ -913,9 +1409,13 @@ export function Reader() {
   const handleBridge = useCallback(
     (bridge: ViewerBridge | null) => {
       bridgeRef.current = bridge;
-      if (bridge) void loadPendingIntoViewer(bridge);
+      if (bridge) {
+        void loadPendingIntoViewer(bridge);
+      } else {
+        abortOutlineWork();
+      }
     },
-    [loadPendingIntoViewer],
+    [abortOutlineWork, loadPendingIntoViewer],
   );
 
   const handleDocumentInit = useCallback(
@@ -963,8 +1463,14 @@ export function Reader() {
       } else {
         setPageValue(target);
       }
+
+      const outlineDocumentId = currentDocumentRef.current?.id;
+      if (outlineDocumentId && !previewOnlyRef.current) {
+        void loadOutline(bridge, outlineDocumentId, sessionRef.current);
+      }
     },
     [
+      loadOutline,
       saveProgress,
       selectDocument,
       setPageCount,
@@ -1018,6 +1524,12 @@ export function Reader() {
     async (force: boolean) => {
       const document = currentDocumentRef.current;
       if (!document || modified || previewOnlyRef.current) return;
+      if (
+        outlineRef.current.stage === "generating" ||
+        outlineRef.current.stage === "saving"
+      ) {
+        return;
+      }
       if (force) {
         const confirmed = await ask({
           title: t.confirm.retranslateTitle,
@@ -1333,6 +1845,7 @@ export function Reader() {
         queue.cancelDocument(document.id);
         if (currentDocumentRef.current?.id === document.id) {
           openAttemptRef.current += 1;
+          abortOutlineWork();
           selectDocument(null);
           setPageCount(0);
           setPageValue(1);
@@ -1355,6 +1868,7 @@ export function Reader() {
       }
     },
     [
+      abortOutlineWork,
       ask,
       currentHasWork,
       exportDraftMarkdown,
@@ -1371,6 +1885,7 @@ export function Reader() {
     const busy =
       modified ||
       previewOnly ||
+      outline.stage !== "idle" ||
       tasks.some((task) =>
         ["queued", "preparing", "generating", "saving", "unsaved"].includes(task.stage),
       );
@@ -1381,7 +1896,7 @@ export function Reader() {
     };
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
-  }, [modified, previewOnly, tasks]);
+  }, [modified, outline.stage, previewOnly, tasks]);
 
   useEffect(() => {
     const handler = (): void => {
@@ -1409,6 +1924,9 @@ export function Reader() {
         viewTimerRef.current = null;
       }
       watchCleanupRef.current?.();
+      outlineAttemptRef.current += 1;
+      outlineControllerRef.current?.abort();
+      outlineControllerRef.current = null;
     };
   }, []);
 
@@ -1457,15 +1975,30 @@ export function Reader() {
     }
   };
 
+  const outlineBusy =
+    outline.stage === "generating" || outline.stage === "saving";
   const translationDisabledReason = !currentDocument
     ? previewOnly
       ? t.page.disabled.previewOnly
       : t.page.disabled.noPdf
     : !viewerReady || pageCount === 0
       ? t.page.disabled.loading
-      : modified
-        ? t.page.disabled.modified
-        : null;
+      : outlineBusy
+        ? t.page.disabled.outlineBusy
+        : modified
+          ? t.page.disabled.modified
+          : null;
+
+  const outlineGenerationDisabledReason = !currentDocument
+    ? null
+    : translationDisabledReason ??
+      (tasks.some(
+        (task) =>
+          task.documentId === currentDocument.id &&
+          ["queued", "preparing", "generating", "saving"].includes(task.stage),
+      )
+        ? t.outline.disabledActive
+        : null);
 
   const savedRecord =
     currentTask?.saved?.markdown
@@ -1536,6 +2069,12 @@ export function Reader() {
     if (tasks.some((task) => task.stage === "unsaved")) {
       return t.settings.languageBlockedUnsaved;
     }
+    if (outline.stage === "generating" || outline.stage === "saving") {
+      return t.settings.languageBlockedOutline;
+    }
+    if (outline.stage === "unsaved") {
+      return t.settings.languageBlockedOutlineUnsaved;
+    }
     if (modified || bridgeRef.current?.hasEdits) {
       return t.settings.languageBlockedModified;
     }
@@ -1556,6 +2095,7 @@ export function Reader() {
         ) ||
         modified ||
         previewOnly ||
+        outline.stage !== "idle" ||
         savingCopy ||
         previewUploadCount > 0 ||
         Boolean(bridgeRef.current?.hasEdits);
@@ -1583,7 +2123,7 @@ export function Reader() {
       await saveUiLocale(next);
       location.reload();
     },
-    [commitCurrentView, modified, previewOnly, previewUploadCount, savingCopy, tasks],
+    [commitCurrentView, modified, outline.stage, previewOnly, previewUploadCount, savingCopy, tasks],
   );
 
   if (!token) {
@@ -1897,6 +2437,16 @@ export function Reader() {
                 onOpenTaskPage={openTaskPage}
                 onConfirm={ask}
                 disabledReason={translationDisabledReason}
+                selection={selection}
+                onSelectionChange={setSelection}
+                outline={outline}
+                outlineGenerationDisabledReason={outlineGenerationDisabledReason}
+                onGenerateOutline={() => void generateOutline()}
+                onCancelOutline={cancelOutlineGeneration}
+                onReloadOutline={reloadOutline}
+                onRetrySaveOutline={() => void retrySaveOutline()}
+                onDiscardOutline={discardOutline}
+                onOpenOutlinePage={openOutlinePage}
               />
             ) : (
               <div className="pane-placeholder">

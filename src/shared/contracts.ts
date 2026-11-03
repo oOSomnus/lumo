@@ -83,6 +83,101 @@ export const translationContentSchema = z.strictObject({
 
 export type TranslationContent = z.infer<typeof translationContentSchema>;
 
+export const MAX_OUTLINE_ENTRIES = 10_000;
+export const MAX_OUTLINE_HEADINGS_PER_PAGE = 128;
+export const MAX_OUTLINE_PREVIOUS_HEADINGS = 32;
+export const MAX_OUTLINE_TITLE_CHARS = 500;
+export const MAX_OUTLINE_LEVEL = 10_000;
+
+const outlineTitleSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(MAX_OUTLINE_TITLE_CHARS)
+  .refine((value) => !value.includes("\u0000"), "title must not contain NUL");
+
+const outlineLevelSchema = z
+  .number()
+  .int()
+  .safe()
+  .min(1)
+  .max(MAX_OUTLINE_LEVEL);
+
+export const outlineHeadingSchema = z.strictObject({
+  title: outlineTitleSchema,
+  level: outlineLevelSchema,
+});
+
+export type OutlineHeading = z.infer<typeof outlineHeadingSchema>;
+
+export const outlineEntrySchema = outlineHeadingSchema.extend({
+  pageNumber: pageNumberSchema,
+});
+
+export type OutlineEntry = z.infer<typeof outlineEntrySchema>;
+
+export const outlineEntriesSchema = z
+  .array(outlineEntrySchema)
+  .min(1)
+  .max(MAX_OUTLINE_ENTRIES)
+  .superRefine((entries, ctx) => {
+    const first = entries[0];
+    if (first && first.level !== 1) {
+      ctx.addIssue({
+        code: "custom",
+        path: [0, "level"],
+        message: "the first outline entry must start at level 1",
+      });
+    }
+    for (let index = 1; index < entries.length; index += 1) {
+      const previous = entries[index - 1]!;
+      const entry = entries[index]!;
+      if (entry.level > previous.level + 1) {
+        ctx.addIssue({
+          code: "custom",
+          path: [index, "level"],
+          message: "outline levels must not skip more than one level",
+        });
+      }
+      if (entry.pageNumber < previous.pageNumber) {
+        ctx.addIssue({
+          code: "custom",
+          path: [index, "pageNumber"],
+          message: "outline page numbers must not decrease",
+        });
+      }
+    }
+  });
+
+const outlinePageContentSchema = translatePageInputSchema.pick({
+  text: true,
+  imageBase64: true,
+});
+
+export const outlinePageInputSchema = outlinePageContentSchema
+  .extend({
+    documentId: documentIdSchema,
+    pageNumber: pageNumberSchema,
+    previousHeadings: z
+      .array(outlineEntrySchema)
+      .max(MAX_OUTLINE_PREVIOUS_HEADINGS),
+  })
+  .refine(
+    (value) =>
+      value.previousHeadings.every(
+        (heading) => heading.pageNumber <= value.pageNumber,
+      ),
+    "previous headings must not be after the current page",
+  );
+
+export type OutlinePageInput = z.infer<typeof outlinePageInputSchema>;
+
+export const outlinePageResultSchema = z.strictObject({
+  headings: z.array(outlineHeadingSchema).max(MAX_OUTLINE_HEADINGS_PER_PAGE),
+});
+
+export type OutlinePageResult = z.infer<typeof outlinePageResultSchema>;
+
 export const readerUpdateSchema = z
   .strictObject({
     documentId: documentIdSchema.nullable(),

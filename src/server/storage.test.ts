@@ -5,15 +5,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
   AiConfig,
+  OutlineEntry,
   ReaderView,
   TargetLanguage,
   TranslationContent,
 } from "../shared/contracts";
 import {
   DB_FILENAME,
+  DocumentNotFoundError,
   getAppSettings,
   getDocument,
   getDocumentFile,
+  getGeneratedOutline,
   getReaderView,
   getSettings,
   getTranslation,
@@ -25,6 +28,7 @@ import {
   removeDocument,
   resolveDataDirectory,
   saveAiConfig,
+  saveGeneratedOutline,
   saveReaderView,
   saveTranslation,
   saveUiLocale,
@@ -120,9 +124,9 @@ describe("storage", () => {
     expect(() => openReaderDb(directory)).toThrow();
   });
 
-  test("refuses unsupported schema versions without touching their data", () => {
+  test("refuses schema version 3 and unknown versions without touching their data", () => {
     const bytes = new TextEncoder().encode("%PDF-1.7 kept intact");
-    for (const version of [SCHEMA_VERSION - 1, SCHEMA_VERSION + 1]) {
+    for (const version of [3, SCHEMA_VERSION + 1]) {
       const directory = mkdtempSync(join(tmpdir(), "lumo-storage-"));
       directories.push(directory);
       const path = join(directory, DB_FILENAME);
@@ -345,5 +349,106 @@ describe("storage", () => {
     expect(getDocument(db, document.id)).toBeNull();
     expect(getTranslation(db, { documentId: document.id, pageNumber: 1, targetLanguage: "ja" })).toBeNull();
     expect(getSettings(db)).toEqual({ lastDocumentId: null, targetLanguage: "ja" });
+  });
+});
+
+describe("generated outline storage", () => {
+  const outline: OutlineEntry[] = [
+    { title: "A", level: 1, pageNumber: 2 },
+    { title: "A.1", level: 2, pageNumber: 2 },
+    { title: "B", level: 1, pageNumber: 4 },
+  ];
+
+  test("stores a generated outline across reopen and removes it with the document", () => {
+    const directory = mkdtempSync(join(tmpdir(), "lumo-storage-"));
+    directories.push(directory);
+    const db = openReaderDb(directory);
+    databases.push(db);
+    const document = storeDocument(
+      db,
+      { name: "outline.pdf", pageCount: 5 },
+      new TextEncoder().encode("%PDF-1.7 generated outline"),
+    );
+    expect(getGeneratedOutline(db, document.id)).toBeNull();
+    expect(saveGeneratedOutline(db, document.id, outline)).toEqual(outline);
+
+    db.close();
+    databases.splice(databases.indexOf(db), 1);
+    const reopened = openReaderDb(directory);
+    databases.push(reopened);
+    expect(getGeneratedOutline(reopened, document.id)).toEqual(outline);
+    expect(removeDocument(reopened, document.id)).toBe(true);
+    expect(() => getGeneratedOutline(reopened, document.id)).toThrow(
+      DocumentNotFoundError,
+    );
+  });
+
+  test("rejects invalid or failed writes without replacing the stored outline", () => {
+    const db = tempDb();
+    const document = storeDocument(
+      db,
+      { name: "outline.pdf", pageCount: 5 },
+      new TextEncoder().encode("%PDF-1.7 outline failures"),
+    );
+    saveGeneratedOutline(db, document.id, outline);
+
+    expect(() => saveGeneratedOutline(db, document.id, [])).toThrow();
+    expect(() =>
+      saveGeneratedOutline(db, document.id, [
+        { title: "Outside", level: 1, pageNumber: 6 },
+      ]),
+    ).toThrow();
+    expect(() =>
+      saveGeneratedOutline(db, document.id, [
+        { title: "Skip", level: 2, pageNumber: 1 },
+      ]),
+    ).toThrow();
+    expect(() =>
+      saveGeneratedOutline(db, "b".repeat(64), outline),
+    ).toThrow(DocumentNotFoundError);
+
+    db.exec("PRAGMA query_only = ON");
+    try {
+      expect(() =>
+        saveGeneratedOutline(db, document.id, [
+          { title: "Changed", level: 1, pageNumber: 1 },
+        ]),
+      ).toThrow();
+    } finally {
+      db.exec("PRAGMA query_only = OFF");
+    }
+    expect(getGeneratedOutline(db, document.id)).toEqual(outline);
+  });
+
+  test("rejects a corrupted stored outline without rewriting it", () => {
+    const db = tempDb();
+    const document = storeDocument(
+      db,
+      { name: "outline.pdf", pageCount: 5 },
+      new TextEncoder().encode("%PDF-1.7 corrupted outline"),
+    );
+    const stored = [
+      "{broken",
+      JSON.stringify({ headings: [] }),
+      JSON.stringify([{ title: "Outside", level: 1, pageNumber: 6 }]),
+      JSON.stringify([
+        { title: "A", level: 1, pageNumber: 2 },
+        { title: "Back", level: 1, pageNumber: 1 },
+      ]),
+    ];
+    for (const value of stored) {
+      db.query("UPDATE documents SET generatedOutline = ? WHERE id = ?").run(
+        value,
+        document.id,
+      );
+      expect(() => getGeneratedOutline(db, document.id)).toThrow(
+        "stored generated outline is invalid",
+      );
+      expect(
+        db
+          .query("SELECT generatedOutline FROM documents WHERE id = ?")
+          .get(document.id),
+      ).toEqual({ generatedOutline: value });
+    }
   });
 });
