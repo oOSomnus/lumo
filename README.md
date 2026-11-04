@@ -12,12 +12,12 @@ English · [简体中文](README.zh-CN.md)
 
 ### Linux x64 download
 
-Download `lumo-v0.1.0-linux-x64.tar.gz` and `SHA256SUMS` from the [v0.1.0 release](https://github.com/oOSomnus/lumo/releases/tag/v0.1.0), then run:
+Download `lumo-v0.2.0-linux-x64.tar.gz` and `SHA256SUMS` from the [v0.2.0 release](https://github.com/oOSomnus/lumo/releases/tag/v0.2.0), then run:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf lumo-v0.1.0-linux-x64.tar.gz
-cd lumo-v0.1.0-linux-x64
+tar -xzf lumo-v0.2.0-linux-x64.tar.gz
+cd lumo-v0.2.0-linux-x64
 ./lumo
 ```
 
