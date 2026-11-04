@@ -129,7 +129,8 @@ test("R2 language reload unblocks after saving a copy", async ({ page, lumo }) =
   await expect(apply).toBeEnabled();
   await apply.click();
 
-  await expect(page.getByRole("button", { name: "书库", exact: true })).toBeVisible();
+  await expect(page.getByRole("main", { name: "书库" })).toBeVisible();
+  await openFromLibrary(page, "single (edited copy).pdf");
   const reloaded = page.frameLocator("iframe.pdf-frame");
   await expect(reloaded.locator("#pageNumber")).toHaveValue("2");
   await expect(reloaded.locator("#scaleSelect")).toHaveValue("1.5");
@@ -155,6 +156,9 @@ test("R2 language reload unblocks after saving a copy", async ({ page, lumo }) =
 
   await page.getByRole("button", { name: "设置", exact: true }).click();
   const unblockedSettings = page.getByRole("dialog", { name: "设置" });
+  await unblockedSettings
+    .getByRole("combobox", { name: /^界面语言/ })
+    .selectOption("en");
   await expect(
     unblockedSettings.getByRole("button", { name: "保存语言并重新加载" }),
   ).toBeEnabled();

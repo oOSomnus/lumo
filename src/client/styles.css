@@ -120,6 +120,172 @@ input:not([type]) {
   min-height: 0;
 }
 
+.app-content {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.app-content > .workspace {
+  position: absolute;
+  inset: 0;
+}
+
+.workspace.is-hidden {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.library-screen {
+  position: absolute;
+  inset: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 32px;
+  background: var(--surface);
+}
+
+.library-screen[aria-hidden="true"] {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.library-content {
+  max-width: 1280px;
+  margin: 0 auto;
+}
+
+.library-content h1 {
+  display: inline-block;
+  margin: 0 0 24px;
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.library-content h1:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+}
+
+.book-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  align-items: start;
+  column-gap: 24px;
+  row-gap: 32px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.book-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.book-open {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  text-align: left;
+}
+
+.book-open:hover:not(:disabled) {
+  background: transparent;
+}
+
+.book-open:hover:not(:disabled) .book-cover {
+  border-color: var(--accent);
+}
+
+.book-cover {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 3 / 4;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: var(--paper);
+  box-shadow: 0 1px 3px rgb(20 26 32 / 10%);
+}
+
+.book-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: var(--paper);
+}
+
+.book-cover-note {
+  padding: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.book-cover-note.pending {
+  display: none;
+}
+
+.book-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.book-meta {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.book-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.book-actions button {
+  min-height: 32px;
+  padding: 0 8px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.book-actions button:hover:not(:disabled) {
+  border-color: var(--border);
+  background: var(--chrome);
+  color: var(--fg);
+}
+
+.book-actions button.danger {
+  color: var(--error);
+}
+
+.library-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 48px 0;
+  color: var(--muted);
+}
+
 .app-bar {
   display: flex;
   flex-wrap: wrap;
@@ -948,10 +1114,6 @@ input:not([type]) {
   align-items: stretch;
 }
 
-.library-dialog {
-  max-width: min(860px, 94vw);
-}
-
 .settings-dialog {
   max-width: min(760px, 94vw);
 }
@@ -1067,38 +1229,6 @@ input:not([type]) {
   background: var(--accent-soft);
   color: var(--accent-strong);
   font-weight: 600;
-}
-
-.library-list {
-  list-style: none;
-  margin: 12px 0 0;
-  padding: 0;
-}
-
-.library-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--border);
-}
-
-.library-open {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  min-height: 52px;
-  padding: 6px 4px;
-  border-color: transparent;
-  background: transparent;
-  text-align: left;
-}
-
-.library-actions {
-  display: flex;
-  gap: 6px;
 }
 
 .sr-only {
@@ -1239,5 +1369,32 @@ input:not([type]) {
 
   .task-actions {
     margin-left: 0;
+  }
+}
+
+@media (max-width: 640px) {
+  .library-screen {
+    padding: 16px;
+  }
+
+  .library-content h1 {
+    margin-bottom: 16px;
+    font-size: 20px;
+  }
+
+  .book-grid {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    column-gap: 16px;
+    row-gap: 24px;
+  }
+
+  .book-actions button {
+    min-height: 44px;
+  }
+}
+
+@media (max-width: 339px) {
+  .book-grid {
+    grid-template-columns: 1fr;
   }
 }

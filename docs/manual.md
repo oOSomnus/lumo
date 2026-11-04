@@ -16,6 +16,7 @@ Settings are stored in the local database. Provider secrets exported in the shel
 
 ## Reading and translation
 
+- Lumo opens on a bookshelf: each book shows a cover rendered from its first page, its title, current page and last-read time. Selecting a book resumes its saved page and reading view. **Library** in the top bar returns to the shelf without ending the session, so running translations, drafts and unsaved edits are kept.
 - The official PDF.js viewer handles rendering, outlines, thumbnails, text selection, forms, annotations and the native toolbar. The active zoom or fit mode, rotation, scroll mode and spread mode belong to the open book: turning pages keeps them, and reopening the book, reloading the page or restarting the server restores them.
 - Specialised terms and proper nouns are glossed with the source spelling the first time they appear on each page, for example `费用（Expenses）`; later occurrences use the translation alone. Recognition depends on the selected model, and saved translations keep their original wording until regenerated.
 - Translation Markdown supports headings, paragraphs, lists, tables, GFM and formulas. Inline math uses `$$...$$`, display math uses its own `$$` lines, and a single `$` is ordinary text so currency such as `$5` stays readable. Formulas saved with the old `$...$` syntax appear literally until the page is regenerated.

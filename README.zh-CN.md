@@ -38,6 +38,8 @@ bun run dev
 
 PDF 文件不设应用层大小上限；大文件仍受可用内存和磁盘空间限制。
 
+Lumo 启动后先显示书架，每本书以 PDF 首页作为封面。选择书籍会恢复上次的页码与阅读视图；顶栏的“书库”可返回书架，当前会话不会结束。
+
 ## 文档
 
 [docs/manual.zh-CN.md](docs/manual.zh-CN.md) 涵盖[设置与凭证](docs/manual.zh-CN.md#设置)、[阅读与翻译](docs/manual.zh-CN.md#阅读与翻译)、[单文件构建](docs/manual.zh-CN.md#单文件构建)和[数据与安全](docs/manual.zh-CN.md#数据与安全)。

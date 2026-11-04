@@ -266,10 +266,10 @@ export const en = {
   },
   library: {
     title: "Library",
-    dataDirectory: "Data directory:",
     empty: "The library is empty. Open a PDF to start.",
-    pageCount: (count: number) => `${count} page${count === 1 ? "" : "s"}`,
     recentlyRead: (date: string) => `last read ${date}`,
+    returnToReader: "Return to reading",
+    coverUnavailable: "Cover unavailable",
     loadFailed: (detail: string) => `Could not load the library: ${detail}`,
     deleteFailed: (detail: string) => `Delete failed: ${detail}`,
     downloadFailed: (detail: string) => `Download failed: ${detail}`,

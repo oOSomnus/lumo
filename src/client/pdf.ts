@@ -1,5 +1,6 @@
 import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist";
 import { MAX_IMAGE_BASE64_CHARS, MAX_PAGE_TEXT_CHARS } from "../shared/contracts";
+import { accessToken } from "./api";
 
 export class PagePreparationError extends Error {
   constructor(
@@ -178,5 +179,123 @@ export async function validatePdfCopy(
     throw error;
   } finally {
     await task.destroy().catch(() => {});
+  }
+}
+
+const COVER_LONG_EDGE = 480;
+
+/**
+ * Renders page 1 of a stored PDF into a small JPEG for the shelf. The PDF is
+ * fetched by PDF.js from the authenticated app route, so the access code only
+ * ever travels in a header and the full file never sits in app memory.
+ */
+export async function renderDocumentCover(
+  documentId: string,
+  signal: AbortSignal,
+): Promise<Blob> {
+  signal.throwIfAborted();
+  const token = accessToken();
+  if (!token) {
+    throw new PagePreparationError(
+      "LOCAL_ACCESS_REQUIRED",
+      "missing access code; open the link printed in the terminal",
+    );
+  }
+  const pdfjs = await loadPdfjsRuntime();
+  signal.throwIfAborted();
+  pdfjs.GlobalWorkerOptions.workerSrc = "/pdfjs/build/pdf.worker.mjs";
+
+  const task = pdfjs.getDocument({
+    url: `${location.origin}/api/documents/${encodeURIComponent(documentId)}/file`,
+    httpHeaders: { Authorization: `Bearer ${token}` },
+    disableRange: true,
+    disableStream: true,
+    withCredentials: false,
+    cMapUrl: "/pdfjs/web/cmaps/",
+    cMapPacked: true,
+    standardFontDataUrl: "/pdfjs/web/standard_fonts/",
+    wasmUrl: "/pdfjs/web/wasm/",
+    iccUrl: "/pdfjs/web/iccs/",
+  });
+
+  let destroyed = false;
+  const destroy = async (): Promise<void> => {
+    if (destroyed) return;
+    destroyed = true;
+    await task.destroy().catch(() => {});
+  };
+  const onAbort = (): void => {
+    void destroy();
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+
+  try {
+    const pdf = await task.promise;
+    signal.throwIfAborted();
+    const page = await pdf.getPage(1);
+    try {
+      signal.throwIfAborted();
+      const base = page.getViewport({ scale: 1 });
+      const scale = Math.min(
+        1,
+        COVER_LONG_EDGE / Math.max(base.width, base.height),
+      );
+      const viewport = page.getViewport({ scale });
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.ceil(viewport.width));
+      canvas.height = Math.max(1, Math.ceil(viewport.height));
+      const context = canvas.getContext("2d", { alpha: false });
+      if (!context) {
+        throw new PagePreparationError(
+          "COVER_RENDER_FAILED",
+          "the browser could not create a canvas",
+        );
+      }
+
+      const renderTask = page.render({
+        canvas,
+        viewport,
+        background: "#ffffff",
+      });
+      const cancelRender = (): void => renderTask.cancel();
+      signal.addEventListener("abort", cancelRender, { once: true });
+      try {
+        await renderTask.promise;
+        signal.throwIfAborted();
+        const encoded = Promise.withResolvers<Blob | null>();
+        canvas.toBlob(encoded.resolve, "image/jpeg", 0.85);
+        const blob = await encoded.promise;
+        if (!blob) {
+          throw new PagePreparationError(
+            "COVER_RENDER_FAILED",
+            "the browser could not encode the cover",
+          );
+        }
+        return blob;
+      } catch (error) {
+        if (signal.aborted) throw new DOMException("aborted", "AbortError");
+        if (error instanceof PagePreparationError) throw error;
+        throw new PagePreparationError(
+          "COVER_RENDER_FAILED",
+          error instanceof Error ? error.message : "the cover could not be rendered",
+        );
+      } finally {
+        signal.removeEventListener("abort", cancelRender);
+        canvas.width = 0;
+        canvas.height = 0;
+      }
+    } finally {
+      page.cleanup();
+    }
+  } catch (error) {
+    if (signal.aborted) throw new DOMException("aborted", "AbortError");
+    if (error instanceof PagePreparationError) throw error;
+    throw new PagePreparationError(
+      "COVER_RENDER_FAILED",
+      error instanceof Error ? error.message : "the cover could not be rendered",
+    );
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+    await destroy();
   }
 }

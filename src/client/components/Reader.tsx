@@ -55,6 +55,7 @@ import {
   type TranslationTask,
 } from "../translation-queue";
 import { BatchTranslationPanel } from "./BatchTranslationPanel";
+import { Library } from "./Library";
 import { ModalDialog } from "./ModalDialog";
 import { PdfViewerFrame } from "./PdfViewerFrame";
 import { SettingsDialog } from "./SettingsDialog";
@@ -197,6 +198,8 @@ export function Reader() {
   const [library, setLibrary] = useState<LibrarySnapshot | null>(null);
   const [libraryLoading, setLibraryLoading] = useState(Boolean(token));
   const [libraryError, setLibraryError] = useState<UiError | null>(null);
+  const [screen, setScreen] = useState<"library" | "reader">("library");
+  const screenRef = useRef<"library" | "reader">("library");
 
   const [currentDocument, setCurrentDocument] = useState<DocumentRecord | null>(null);
   const currentDocumentRef = useRef<DocumentRecord | null>(null);
@@ -231,8 +234,8 @@ export function Reader() {
   const [rightTab, setRightTab] = useState<"page" | "batch">("page");
   const [narrowTab, setNarrowTab] = useState<"pdf" | "translation" | "batch">("translation");
   const [splitRatio, setSplitRatio] = useState(0.5);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [drawerError, setDrawerError] = useState<UiError | null>(null);
+  const [libraryActionError, setLibraryActionError] = useState<UiError | null>(null);
+  const libraryRefreshRef = useRef<AbortController | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportError, setExportError] = useState<UiError | null>(null);
@@ -539,6 +542,7 @@ export function Reader() {
 
   const handleViewChange = useCallback(
     (view: ReaderView) => {
+      if (screenRef.current !== "reader") return;
       // PDF.js applies its own initial zoom while opening; the saved view is
       // restored synchronously at documentinit, so ignore events until then.
       if (!viewerReadyRef.current) return;
@@ -606,6 +610,64 @@ export function Reader() {
     }
   }, []);
 
+  const showReader = useCallback(() => {
+    libraryRefreshRef.current?.abort();
+    libraryRefreshRef.current = null;
+    if (screenRef.current === "reader") return;
+    screenRef.current = "reader";
+    setScreen("reader");
+    const bridge = bridgeRef.current;
+    if (bridge && viewerReadyRef.current) {
+      bridge.setPage(pageRef.current);
+      if (lastViewRef.current) bridge.restoreView(lastViewRef.current);
+    }
+    requestAnimationFrame(() => workspaceRef.current?.focus());
+  }, []);
+
+  const openLibrary = useCallback(() => {
+    if (screenRef.current === "library") return;
+    const document = currentDocumentRef.current;
+    if (document) captureCurrentView(document.id);
+    screenRef.current = "library";
+    setScreen("library");
+    libraryRefreshRef.current?.abort();
+    const controller = new AbortController();
+    libraryRefreshRef.current = controller;
+    const attempt = openAttemptRef.current;
+    void (async () => {
+      try {
+        await saveChainRef.current;
+        await flushViewSaves();
+      } catch {
+        // Progress and view failures already surface through their banners.
+      }
+      if (
+        controller.signal.aborted ||
+        screenRef.current !== "library" ||
+        attempt !== openAttemptRef.current
+      ) {
+        return;
+      }
+      try {
+        const snapshot = await apiJson<LibrarySnapshot>("/api/library", {
+          signal: controller.signal,
+        });
+        if (
+          controller.signal.aborted ||
+          screenRef.current !== "library" ||
+          attempt !== openAttemptRef.current
+        ) {
+          return;
+        }
+        setLibrary(snapshot);
+        setLibraryActionError(null);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        setLibraryActionError(toUiError(error));
+      }
+    })();
+  }, [captureCurrentView, flushViewSaves]);
+
   const drainProgress = useCallback((): Promise<void> => {
     if (progressDrainRef.current) return progressDrainRef.current;
     const run = (async () => {
@@ -660,13 +722,6 @@ export function Reader() {
         setLibraryError(null);
         setLanguage(snapshot.settings.targetLanguage);
         languageRef.current = snapshot.settings.targetLanguage;
-        const lastId = snapshot.settings.lastDocumentId;
-        const last = lastId
-          ? snapshot.documents.find((document) => document.id === lastId)
-          : undefined;
-        if (last) {
-          openDocument(last, last.currentPage, true);
-        }
       } catch (error) {
         if (!cancelled) setLibraryError(toUiError(error));
       } finally {
@@ -1197,7 +1252,7 @@ export function Reader() {
   }, [abortOutlineWork, queue]);
 
   const openDocument = useCallback(
-    (document: DocumentRecord, targetPage: number, initial = false) => {
+    (document: DocumentRecord, targetPage: number) => {
       const attempt = ++openAttemptRef.current;
       const run = async (): Promise<void> => {
         const clamped = clamp(targetPage, 1, document.pageCount);
@@ -1206,19 +1261,20 @@ export function Reader() {
           bridgeRef.current &&
           viewerReadyRef.current
         ) {
-          bridgeRef.current.setPage(clamped);
-          setPageValue(clamped);
-          saveProgress(document.id, clamped, languageRef.current);
+          const current = pageRef.current;
+          if (bridgeRef.current.page !== current) bridgeRef.current.setPage(current);
+          setPageValue(current);
+          saveProgress(document.id, current, languageRef.current);
+          showReader();
           return;
         }
-        if (!initial) {
-          const confirmed = await confirmSwitch();
-          if (!confirmed) return;
-        }
+        const confirmed = await confirmSwitch();
+        if (!confirmed) return;
         if (attempt !== openAttemptRef.current) return;
 
         await commitCurrentView();
         if (attempt !== openAttemptRef.current) return;
+        showReader();
         stopCurrentWork();
         const pending = pendingRef.current;
         if (pending?.kind === "preview") URL.revokeObjectURL(pending.blobUrl);
@@ -1246,7 +1302,7 @@ export function Reader() {
       };
       void run();
     },
-    [commitCurrentView, confirmSwitch, saveProgress, selectDocument, setPageCount, setPageValue, stopCurrentWork],
+    [commitCurrentView, confirmSwitch, saveProgress, selectDocument, setPageCount, setPageValue, showReader, stopCurrentWork],
   );
 
   const openPreview = useCallback(
@@ -1263,6 +1319,7 @@ export function Reader() {
 
       await commitCurrentView();
       if (attempt !== openAttemptRef.current) return;
+      showReader();
       const blobUrl = URL.createObjectURL(file);
       stopCurrentWork();
       const previous = pendingRef.current;
@@ -1289,7 +1346,7 @@ export function Reader() {
       viewerReadyRef.current = false;
       setViewerReady(false);
     },
-    [commitCurrentView, confirmSwitch, selectDocument, setPageCount, setPageValue, stopCurrentWork],
+    [commitCurrentView, confirmSwitch, selectDocument, setPageCount, setPageValue, showReader, stopCurrentWork],
   );
 
   const loadPendingIntoViewer = useCallback(
@@ -1781,6 +1838,7 @@ export function Reader() {
   }, [uploadPreview]);
 
   const downloadDocument = useCallback(async (document: DocumentRecord) => {
+    setLibraryActionError(null);
     try {
       const response = await apiFetch(
         `/api/documents/${document.id}/file`,
@@ -1788,12 +1846,14 @@ export function Reader() {
       const blob = await response.blob();
       triggerDownload(blob, document.name);
     } catch (error) {
-      setDrawerError(toUiError(error));
+      setLibraryActionError(toUiError(error));
     }
   }, []);
 
   const deleteDocument = useCallback(
     async (document: DocumentRecord) => {
+      setLibraryActionError(null);
+      libraryRefreshRef.current?.abort();
       const deletingCurrent = currentDocumentRef.current?.id === document.id;
       const { active, drafts } = currentHasWork(document.id);
       const warnings = [
@@ -1861,7 +1921,7 @@ export function Reader() {
           setViewerReady(false);
         }
       } catch (error) {
-        setDrawerError(toUiError(error));
+        setLibraryActionError(toUiError(error));
       }
     },
     [
@@ -2176,10 +2236,8 @@ export function Reader() {
         <button
           type="button"
           className="app-button"
-          onClick={() => {
-            setDrawerError(null);
-            setDrawerOpen(true);
-          }}
+          aria-current={screen === "library" ? "page" : undefined}
+          onClick={openLibrary}
         >
           {t.appBar.library}
         </button>
@@ -2201,17 +2259,19 @@ export function Reader() {
             if (file) void openPreview(file);
           }}
         />
-        <span
-          className="file-name"
-          title={currentDocument?.name ?? t.appBar.noPdf}
-        >
-          {currentDocument?.name ??
-            (previewOnly && pendingRef.current?.kind === "preview"
-              ? pendingRef.current.file.name
-              : t.appBar.noPdf)}
-        </span>
+        {screen === "reader" && (
+          <span
+            className="file-name"
+            title={currentDocument?.name ?? t.appBar.noPdf}
+          >
+            {currentDocument?.name ??
+              (previewOnly && pendingRef.current?.kind === "preview"
+                ? pendingRef.current.file.name
+                : t.appBar.noPdf)}
+          </span>
+        )}
         <span className="app-bar-spacer" />
-        {modified && (
+        {screen === "reader" && modified && (
           <button
             type="button"
             className="app-button warning"
@@ -2223,7 +2283,7 @@ export function Reader() {
               : t.appBar.saveModifiedCopy}
           </button>
         )}
-        {modified && (
+        {screen === "reader" && modified && (
           <button
             type="button"
             className="app-button"
@@ -2233,13 +2293,20 @@ export function Reader() {
             {t.appBar.discardChanges}
           </button>
         )}
-        <button
-          type="button"
-          className="app-button fullscreen-button"
-          onClick={toggleFullscreen}
-        >
-          {t.appBar.fullscreen}
-        </button>
+        {screen === "library" && (currentDocument || previewOnly) && (
+          <button type="button" className="app-button" onClick={showReader}>
+            {t.library.returnToReader}
+          </button>
+        )}
+        {screen === "reader" && (
+          <button
+            type="button"
+            className="app-button fullscreen-button"
+            onClick={toggleFullscreen}
+          >
+            {t.appBar.fullscreen}
+          </button>
+        )}
         <button
           type="button"
           className="app-button settings-button"
@@ -2286,17 +2353,34 @@ export function Reader() {
         </div>
       )}
 
-      <main
-        ref={workspaceRef}
-        className={`workspace${narrow ? " narrow" : ""}`}
-        style={workspaceStyle}
-        onDragOver={(event) => event.preventDefault()}
-        onDrop={(event) => {
-          event.preventDefault();
-          const file = event.dataTransfer.files?.[0];
-          if (file) void openPreview(file);
-        }}
-      >
+      <div className="app-content">
+        <Library
+          documents={library.documents}
+          active={screen === "library"}
+          currentDocumentId={currentDocument?.id ?? null}
+          currentPage={page}
+          error={libraryActionError}
+          onOpen={(document) => openDocument(document, document.currentPage)}
+          onDownload={(document) => void downloadDocument(document)}
+          onDelete={(document) => void deleteDocument(document)}
+          onOpenPdf={() => fileInputRef.current?.click()}
+          onDropPdf={(file) => void openPreview(file)}
+        />
+        {session > 0 && (
+          <main
+            ref={workspaceRef}
+            className={`workspace${narrow ? " narrow" : ""}${screen === "library" ? " is-hidden" : ""}`}
+            style={workspaceStyle}
+            tabIndex={-1}
+            inert={screen === "library"}
+            aria-hidden={screen === "library"}
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={(event) => {
+              event.preventDefault();
+              const file = event.dataTransfer.files?.[0];
+              if (file) void openPreview(file);
+            }}
+          >
         {narrow && (
           <nav
             className="mobile-tabs"
@@ -2700,73 +2784,8 @@ export function Reader() {
           )}
         </section>
       </main>
-
-      <ModalDialog
-        open={drawerOpen}
-        onClose={() => setDrawerOpen(false)}
-        label={t.library.title}
-        className="library-dialog"
-      >
-        {drawerOpen && (
-          <>
-        <div className="dialog-heading">
-          <h2>{t.library.title}</h2>
-          <button type="button" onClick={() => setDrawerOpen(false)}>
-            {t.common.close}
-          </button>
-        </div>
-        <p className="muted">
-          {t.library.dataDirectory} {library.dataDirectory}
-        </p>
-        {drawerError && (
-          <p className="field-error" role="alert">
-            {errorText(drawerError, locale)}
-          </p>
         )}
-        <ul className="library-list">
-          {library.documents.length === 0 && (
-            <li className="muted">{t.library.empty}</li>
-          )}
-          {library.documents.map((document) => (
-            <li key={document.id} className="library-row">
-              <button
-                type="button"
-                className="library-open"
-                onClick={() => {
-                  setDrawerOpen(false);
-                  openDocument(document, document.currentPage);
-                }}
-              >
-                <strong>{document.name}</strong>
-                <span className="muted">
-                  {t.library.pageCount(document.pageCount)}
-                  {" · "}
-                  {t.library.recentlyRead(
-                    formatDateTime(locale, document.lastOpenedAt),
-                  )}
-                </span>
-              </button>
-              <div className="library-actions">
-                <button
-                  type="button"
-                  onClick={() => void downloadDocument(document)}
-                >
-                  {t.common.download}
-                </button>
-                <button
-                  type="button"
-                  className="danger"
-                  onClick={() => void deleteDocument(document)}
-                >
-                  {t.common.delete}
-                </button>
-              </div>
-            </li>
-          ))}
-        </ul>
-          </>
-        )}
-      </ModalDialog>
+      </div>
 
       <ModalDialog
         open={exportOpen}

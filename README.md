@@ -38,6 +38,8 @@ The first run downloads the pinned PDF.js viewer into `vendor/pdfjs/`; this need
 
 PDF files have no application-imposed size limit; available memory and disk space still constrain large files.
 
+Lumo opens on a bookshelf that renders each PDF's first page as its cover. Selecting a book resumes its saved page and reading view; **Library** in the top bar returns to the shelf without ending the current session.
+
 ## Documentation
 
 [docs/manual.md](docs/manual.md) covers [settings and credentials](docs/manual.md#settings), [reading and translation](docs/manual.md#reading-and-translation), the [standalone build](docs/manual.md#standalone-build) and [data and security](docs/manual.md#data-and-security).

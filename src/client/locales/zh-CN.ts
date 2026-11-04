@@ -248,10 +248,10 @@ export const zhCN: Messages = {
   },
   library: {
     title: "书库",
-    dataDirectory: "数据目录：",
     empty: "书库为空。打开一个 PDF 开始。",
-    pageCount: (count) => `${count} 页`,
     recentlyRead: (date) => `最近阅读 ${date}`,
+    returnToReader: "返回阅读",
+    coverUnavailable: "暂无封面",
     loadFailed: (detail) => `无法读取书库：${detail}`,
     deleteFailed: (detail) => `删除失败：${detail}`,
     downloadFailed: (detail) => `下载失败：${detail}`,

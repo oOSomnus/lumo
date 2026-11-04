@@ -96,9 +96,16 @@ export function saveCopyButton(page: Page): Locator {
 }
 
 export async function openFromLibrary(page: Page, name: string): Promise<void> {
-  await page.getByRole("button", { name: "Library", exact: true }).click();
-  const library = page.getByRole("dialog", { name: "Library" });
-  await library.getByRole("button").filter({ hasText: name }).first().click();
+  const library = page.getByRole("main", { name: /^(?:Library|书库)$/ });
+  if (!(await library.isVisible())) {
+    await page
+      .getByRole("button", { name: /^(?:Library|书库)$/, exact: true })
+      .click();
+  }
+  await library
+    .getByRole("button", { name, exact: true })
+    .first()
+    .click();
 }
 
 export const test = base.extend<{ lumo: LumoApp }>({
