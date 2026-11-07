@@ -14,12 +14,12 @@ The page is p. 248 of [*Introductory Statistics*](https://openstax.org/details/b
 
 ### Linux x64 download
 
-Download `lumo-v0.2.0-linux-x64.tar.gz` and `SHA256SUMS` from the [v0.2.0 release](https://github.com/oOSomnus/lumo/releases/tag/v0.2.0), then run:
+Download `lumo-v0.3.0-linux-x64.tar.gz` and `SHA256SUMS` from the [v0.3.0 release](https://github.com/oOSomnus/lumo/releases/tag/v0.3.0), then run:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf lumo-v0.2.0-linux-x64.tar.gz
-cd lumo-v0.2.0-linux-x64
+tar -xzf lumo-v0.3.0-linux-x64.tar.gz
+cd lumo-v0.3.0-linux-x64
 ./lumo
 ```
 

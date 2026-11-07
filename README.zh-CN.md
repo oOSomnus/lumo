@@ -14,12 +14,12 @@
 
 ### Linux x64 下载
 
-从 [v0.2.0 Release](https://github.com/oOSomnus/lumo/releases/tag/v0.2.0) 下载 `lumo-v0.2.0-linux-x64.tar.gz` 和 `SHA256SUMS`，然后运行：
+从 [v0.3.0 Release](https://github.com/oOSomnus/lumo/releases/tag/v0.3.0) 下载 `lumo-v0.3.0-linux-x64.tar.gz` 和 `SHA256SUMS`，然后运行：
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf lumo-v0.2.0-linux-x64.tar.gz
-cd lumo-v0.2.0-linux-x64
+tar -xzf lumo-v0.3.0-linux-x64.tar.gz
+cd lumo-v0.3.0-linux-x64
 ./lumo
 ```
 
