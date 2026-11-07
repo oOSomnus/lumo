@@ -15,34 +15,22 @@ const MIME_TYPES: Record<string, string> = {
   ".pdf": "application/pdf",
   ".ttf": "font/ttf",
   ".otf": "font/otf",
+  ".ttc": "font/collection",
   ".pfb": "application/octet-stream",
   ".bcmap": "application/octet-stream",
   ".icc": "application/octet-stream",
   ".txt": "text/plain; charset=utf-8",
 };
 
-const REQUIRED_FILES = [
-  "web/viewer.html",
-  "web/viewer.mjs",
-  "web/viewer.css",
-  "build/pdf.mjs",
-  "build/pdf.worker.mjs",
-];
+export interface StaticAssets {
+  serve(url: URL): Response | null;
+}
 
-const REQUIRED_DIRECTORIES = [
-  "web/cmaps",
-  "web/standard_fonts",
-  "web/wasm",
-  "web/iccs",
-  "web/images",
-  "web/locale",
-];
-
-export function resolvePdfjsDirectory(): string {
+function resolveVendorDirectory(name: string): string {
   if (Bun.isStandaloneExecutable) {
-    return join(import.meta.dir, "pdfjs");
+    return join(import.meta.dir, name);
   }
-  return normalize(join(import.meta.dir, "..", "..", "vendor", "pdfjs"));
+  return normalize(join(import.meta.dir, "..", "..", "vendor", name));
 }
 
 function listFiles(root: string): Map<string, string> {
@@ -62,45 +50,48 @@ function listFiles(root: string): Map<string, string> {
   return files;
 }
 
-export interface PdfjsAssets {
-  serve(url: URL): Response | null;
-}
-
-export function loadPdfjsAssets(): PdfjsAssets {
-  const root = resolvePdfjsDirectory();
-
-  for (const file of REQUIRED_FILES) {
-    const fullPath = join(root, file);
+function loadStaticAssets(options: {
+  root: string;
+  prefix: string;
+  requiredFiles: string[];
+  requiredDirectories: string[];
+  label: string;
+  prepareCommand: string;
+}): StaticAssets {
+  for (const file of options.requiredFiles) {
+    const fullPath = join(options.root, file);
     try {
       if (!statSync(fullPath).isFile()) {
         throw new Error(`${file} is not a file`);
       }
     } catch {
       throw new Error(
-        `PDF.js asset ${file} is missing under ${root}; run "bun run prepare:pdfjs"`,
+        `${options.label} asset ${file} is missing under ${options.root}; run "bun run prepare:${options.prepareCommand}"`,
       );
     }
   }
-  for (const directory of REQUIRED_DIRECTORIES) {
-    const fullPath = join(root, directory);
+  for (const directory of options.requiredDirectories) {
+    const fullPath = join(options.root, directory);
     let entries: string[];
     try {
       entries = readdirSync(fullPath);
     } catch {
       throw new Error(
-        `PDF.js asset directory ${directory} is missing under ${root}; run "bun run prepare:pdfjs"`,
+        `${options.label} asset directory ${directory} is missing under ${options.root}; run "bun run prepare:${options.prepareCommand}"`,
       );
     }
     if (entries.length === 0) {
-      throw new Error(`PDF.js asset directory ${directory} is empty under ${root}`);
+      throw new Error(
+        `${options.label} asset directory ${directory} is empty under ${options.root}`,
+      );
     }
   }
 
-  const files = listFiles(root);
+  const files = listFiles(options.root);
 
   return {
     serve(url: URL): Response | null {
-      const relative = url.pathname.slice("/pdfjs/".length);
+      const relative = url.pathname.slice(options.prefix.length);
       if (!relative) return null;
       let decoded: string;
       try {
@@ -111,9 +102,9 @@ export function loadPdfjsAssets(): PdfjsAssets {
       const fullPath = files.get(decoded);
       if (!fullPath) return null;
 
-      const type = MIME_TYPES[extname(decoded).toLowerCase()] ??
-        "application/octet-stream";
-      const response = new Response(Bun.file(fullPath), {
+      const type =
+        MIME_TYPES[extname(decoded).toLowerCase()] ?? "application/octet-stream";
+      return new Response(Bun.file(fullPath), {
         headers: {
           "Content-Type": type,
           "X-Content-Type-Options": "nosniff",
@@ -121,7 +112,61 @@ export function loadPdfjsAssets(): PdfjsAssets {
           "Cache-Control": "public, max-age=3600",
         },
       });
-      return response;
     },
   };
+}
+
+export function resolvePdfjsDirectory(): string {
+  return resolveVendorDirectory("pdfjs");
+}
+
+export function loadPdfjsAssets(): StaticAssets {
+  return loadStaticAssets({
+    root: resolvePdfjsDirectory(),
+    prefix: "/pdfjs/",
+    requiredFiles: [
+      "web/viewer.html",
+      "web/viewer.mjs",
+      "web/viewer.css",
+      "build/pdf.mjs",
+      "build/pdf.worker.mjs",
+    ],
+    requiredDirectories: [
+      "web/cmaps",
+      "web/standard_fonts",
+      "web/wasm",
+      "web/iccs",
+      "web/images",
+      "web/locale",
+    ],
+    label: "PDF.js",
+    prepareCommand: "pdfjs",
+  });
+}
+
+export function resolveTypstDirectory(): string {
+  return resolveVendorDirectory("typst");
+}
+
+export function loadTypstAssets(): StaticAssets {
+  return loadStaticAssets({
+    root: resolveTypstDirectory(),
+    prefix: "/typst/",
+    requiredFiles: [
+      "worker.js",
+      "jszip.min.js",
+      "epub.min.js",
+      "epub-viewer.html",
+      "epub-viewer.js",
+      "compiler.wasm",
+      "renderer.wasm",
+      "fonts/LibertinusSerif-Regular.otf",
+      "fonts/NewCMMath-Regular.otf",
+      "fonts/DejaVuSansMono.ttf",
+      "fonts/NotoSerifCJK.ttc",
+    ],
+    requiredDirectories: ["fonts", "licenses"],
+    label: "Typst",
+    prepareCommand: "typst",
+  });
 }

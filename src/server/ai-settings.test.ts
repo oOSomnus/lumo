@@ -339,6 +339,7 @@ describe("createAiManager", () => {
           documentId: "a".repeat(64),
           pageNumber: 1,
           targetLanguage: "en",
+          format: "pdf",
           text: "Hello",
           imageBase64: "/9j/AAAA",
           force: false,
@@ -347,7 +348,7 @@ describe("createAiManager", () => {
         () => undefined,
       );
       expect(authorization ?? "missing").toBe("Bearer app-key");
-      expect(translation.markdown).toBe("# Native");
+      expect(translation.typst).toBe("# Native");
     } finally {
       await server.stop(true);
       if (previous === undefined) delete process.env.DEEPSEEK_API_KEY;
@@ -402,6 +403,7 @@ describe("createAiManager", () => {
         documentId: "a".repeat(64),
         pageNumber: 1,
         targetLanguage: "en" as const,
+        format: "pdf" as const,
         text: "Hello",
         imageBase64: "/9j/AAAA",
         force: false,
@@ -432,8 +434,8 @@ describe("createAiManager", () => {
         reasoning_effort: "high",
       });
       expect(bodies[1]?.messages?.[0]?.role).toBe("system");
-      expect(plain.markdown).toBe("# Native");
-      expect(high.markdown).toBe("# Native");
+      expect(plain.typst).toBe("# Native");
+      expect(high.typst).toBe("# Native");
       expect(high).toMatchObject({ provider: "custom", model: "vision-a" });
     } finally {
       await server.stop(true);
@@ -490,6 +492,7 @@ describe("createAiManager", () => {
         documentId: "a".repeat(64),
         pageNumber: 1,
         targetLanguage: "en" as const,
+        format: "pdf" as const,
         text: "Hello",
         imageBase64: "/9j/AAAA",
         force: false,
@@ -517,9 +520,9 @@ describe("createAiManager", () => {
       );
 
       expect(received).toEqual(["high", "low", "high"]);
-      expect(high.markdown).toBe("# high");
-      expect(low.markdown).toBe("# low");
-      expect(highAgain.markdown).toBe("# high");
+      expect(high.typst).toBe("# high");
+      expect(low.typst).toBe("# low");
+      expect(highAgain.typst).toBe("# high");
     } finally {
       await server.stop(true);
     }

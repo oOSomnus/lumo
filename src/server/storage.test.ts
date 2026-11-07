@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -12,7 +12,9 @@ import type {
 } from "../shared/contracts";
 import {
   DB_FILENAME,
+  DocumentMetadataConflictError,
   DocumentNotFoundError,
+  ReaderViewFormatError,
   getAppSettings,
   getDocument,
   getDocumentFile,
@@ -22,7 +24,7 @@ import {
   getTranslation,
   getUiLocale,
   listDocuments,
-  listTranslatedPages,
+  listTranslationLocations,
   listTranslations,
   openReaderDb,
   removeDocument,
@@ -49,8 +51,40 @@ function tempDb(): Database {
   return db;
 }
 
-function content(markdown: string): TranslationContent {
-  return { markdown, provider: "mock", model: "vision" };
+function content(typst: string): TranslationContent {
+  return { typst, provider: "mock", model: "vision" };
+}
+
+/** Every file of a data directory by name, except SQLite's shared-memory index, which is rebuilt on every open. */
+function snapshot(directory: string): Map<string, Buffer> {
+  return new Map(
+    readdirSync(directory)
+      .filter((name) => !name.endsWith("-shm"))
+      .sort()
+      .map((name) => [name, readFileSync(join(directory, name))]),
+  );
+}
+
+/** A copy of the data directory of an instance that was still running: its newest pages exist only in the WAL file. */
+function liveWalCopy(version: number): string {
+  const live = mkdtempSync(join(tmpdir(), "lumo-storage-"));
+  const copy = mkdtempSync(join(tmpdir(), "lumo-storage-"));
+  directories.push(live, copy);
+  const db = openReaderDb(live);
+  try {
+    db.exec("PRAGMA wal_autocheckpoint = 0");
+    storeDocument(
+      db,
+      { name: "kept.pdf", pageCount: 1, format: "pdf" },
+      new TextEncoder().encode("%PDF-1.7 kept intact"),
+    );
+    db.exec(`PRAGMA user_version = ${version}`);
+    for (const name of readdirSync(live)) copyFileSync(join(live, name), join(copy, name));
+  } finally {
+    db.close();
+  }
+  expect(readdirSync(copy)).toContain(`${DB_FILENAME}-wal`);
+  return copy;
 }
 
 afterEach(() => {
@@ -83,21 +117,57 @@ describe("storage", () => {
   test("stores documents once, deduplicating identical bytes", () => {
     const db = tempDb();
     const bytes = new TextEncoder().encode("%PDF-1.7 sample");
-    const first = storeDocument(db, { name: "first.pdf", pageCount: 2 }, bytes);
-    const second = storeDocument(db, { name: "renamed.pdf", pageCount: 2 }, bytes);
+    const first = storeDocument(db, { name: "first.pdf", pageCount: 2, format: "pdf" }, bytes);
+    const second = storeDocument(db, { name: "renamed.pdf", pageCount: 2, format: "pdf" }, bytes);
 
     expect(second.id).toBe(first.id);
     expect(second.name).toBe("first.pdf");
     expect(second.size).toBe(bytes.byteLength);
     expect(listDocuments(db)).toHaveLength(1);
-    expect(getDocumentFile(db, first.id)).toEqual({ name: "first.pdf", data: bytes });
+    expect(getDocumentFile(db, first.id)).toEqual({ name: "first.pdf", data: bytes, format: "pdf" });
+  });
+
+  test("stores EPUB documents and rejects conflicting metadata for the same bytes", () => {
+    const db = tempDb();
+    const bytes = new TextEncoder().encode("PK-epub-sample");
+    const first = storeDocument(
+      db,
+      { name: "book.epub", pageCount: 3, format: "epub" },
+      bytes,
+    );
+    expect(first.format).toBe("epub");
+    expect(getDocumentFile(db, first.id)).toEqual({
+      name: "book.epub",
+      data: bytes,
+      format: "epub",
+    });
+
+    expect(() =>
+      storeDocument(
+        db,
+        { name: "book.pdf", pageCount: 3, format: "pdf" },
+        bytes,
+      ),
+    ).toThrow(DocumentMetadataConflictError);
+    expect(() =>
+      storeDocument(
+        db,
+        { name: "book.epub", pageCount: 4, format: "epub" },
+        bytes,
+      ),
+    ).toThrow(DocumentMetadataConflictError);
+
+    expect(getDocument(db, first.id)).toMatchObject({
+      format: "epub",
+      pageCount: 3,
+    });
   });
 
   test("saves translations and rejects pages outside the document", () => {
     const db = tempDb();
     const document = storeDocument(
       db,
-      { name: "doc.pdf", pageCount: 2 },
+      { name: "doc.pdf", pageCount: 2, format: "pdf" },
       new TextEncoder().encode("%PDF-1.7 two pages"),
     );
 
@@ -105,13 +175,75 @@ describe("storage", () => {
     saveTranslation(db, { documentId: document.id, pageNumber: 2, targetLanguage: "en" }, content("# two"));
     saveTranslation(db, { documentId: document.id, pageNumber: 1, targetLanguage: "ja" }, content("# 一"));
 
-    expect(getTranslation(db, { documentId: document.id, pageNumber: 1, targetLanguage: "en" })?.markdown).toBe("# one");
+    expect(getTranslation(db, { documentId: document.id, pageNumber: 1, targetLanguage: "en" })?.typst).toBe("# one");
     expect(listTranslations(db, document.id, "en").map((item) => item.pageNumber)).toEqual([1, 2]);
-    expect(listTranslatedPages(db, document.id, "ja")).toEqual([1]);
+    expect(listTranslationLocations(db, document.id, "ja")).toEqual([{ pageNumber: 1, unit: "" }]);
 
     expect(() =>
       saveTranslation(db, { documentId: document.id, pageNumber: 3, targetLanguage: "en" }, content("# three")),
     ).toThrow();
+  });
+
+  test("stores section and selection translations for the same page separately", () => {
+    const db = tempDb();
+    const document = storeDocument(
+      db,
+      { name: "book.epub", pageCount: 2, format: "epub" },
+      new TextEncoder().encode("PK\u0003\u0004fixture"),
+    );
+    const section = { documentId: document.id, pageNumber: 1, targetLanguage: "en" as const };
+    saveTranslation(db, { ...section, unit: "" }, content("# section"));
+    saveTranslation(db, { ...section, unit: "sel-a1" }, content("# selection"));
+
+    expect(getTranslation(db, { ...section, unit: "" })?.typst).toBe("# section");
+    expect(getTranslation(db, { ...section, unit: "sel-a1" })?.typst).toBe(
+      "# selection",
+    );
+    expect(listTranslations(db, document.id, "en")).toHaveLength(2);
+    expect(listTranslationLocations(db, document.id, "en")).toEqual([
+      { pageNumber: 1, unit: "" },
+      { pageNumber: 1, unit: "sel-a1" },
+    ]);
+  });
+
+  test("keeps an EPUB translation's source range across reopen", () => {
+    const directory = mkdtempSync(join(tmpdir(), "lumo-storage-"));
+    directories.push(directory);
+    const db = openReaderDb(directory);
+    databases.push(db);
+    const epub = storeDocument(
+      db,
+      { name: "book.epub", pageCount: 2, format: "epub" },
+      new TextEncoder().encode("PK\u0003\u0004range"),
+    );
+    const pdf = storeDocument(
+      db,
+      { name: "doc.pdf", pageCount: 1, format: "pdf" },
+      new TextEncoder().encode("%PDF-1.7 range"),
+    );
+    const unit = `page-${"a".repeat(64)}`;
+    const sourceCfi = "epubcfi(/6/4!/4/2,/1:0,/1:9)";
+    saveTranslation(
+      db,
+      { documentId: epub.id, pageNumber: 2, targetLanguage: "en", unit, sourceCfi },
+      content("# range"),
+    );
+    saveTranslation(db, { documentId: pdf.id, pageNumber: 1, targetLanguage: "en" }, content("# page"));
+
+    db.close();
+    databases.splice(databases.indexOf(db), 1);
+    const reopened = openReaderDb(directory);
+    databases.push(reopened);
+    expect(
+      getTranslation(reopened, { documentId: epub.id, pageNumber: 2, targetLanguage: "en", unit }),
+    ).toMatchObject({ sourceCfi });
+    expect(listTranslationLocations(reopened, epub.id, "en")).toEqual([
+      { pageNumber: 2, unit, sourceCfi },
+    ]);
+    expect(
+      getTranslation(reopened, { documentId: pdf.id, pageNumber: 1, targetLanguage: "en" })?.sourceCfi,
+    ).toBeUndefined();
+    expect(listTranslationLocations(reopened, pdf.id, "en")).toEqual([{ pageNumber: 1, unit: "" }]);
   });
 
   test("refuses foreign tables without a schema version", () => {
@@ -124,16 +256,16 @@ describe("storage", () => {
     expect(() => openReaderDb(directory)).toThrow();
   });
 
-  test("refuses schema version 3 and unknown versions without touching their data", () => {
+  test("refuses older and unknown schema versions without touching their data", () => {
     const bytes = new TextEncoder().encode("%PDF-1.7 kept intact");
-    for (const version of [3, SCHEMA_VERSION + 1]) {
+    for (const version of [3, 4, 5, 6, SCHEMA_VERSION + 1]) {
       const directory = mkdtempSync(join(tmpdir(), "lumo-storage-"));
       directories.push(directory);
       const path = join(directory, DB_FILENAME);
       const db = openReaderDb(directory);
       const document = storeDocument(
         db,
-        { name: "kept.pdf", pageCount: 1 },
+        { name: "kept.pdf", pageCount: 1, format: "pdf" },
         bytes,
       );
       db.close();
@@ -142,7 +274,9 @@ describe("storage", () => {
       raw.exec(`PRAGMA user_version = ${version}`);
       raw.close();
 
+      const before = snapshot(directory);
       expect(() => openReaderDb(directory)).toThrow();
+      expect(snapshot(directory)).toEqual(before);
 
       const check = new Database(path);
       expect(check.query("PRAGMA user_version").get()).toEqual({
@@ -157,6 +291,31 @@ describe("storage", () => {
       });
       check.close();
     }
+  });
+
+  test("refuses an older database byte for byte untouched when its newest pages are still in the WAL", () => {
+    const copy = liveWalCopy(SCHEMA_VERSION - 1);
+    const before = snapshot(copy);
+
+    expect(() => openReaderDb(copy)).toThrow();
+    expect(snapshot(copy)).toEqual(before);
+  });
+
+  test("recovers the pages a current database still has in its WAL", () => {
+    const db = openReaderDb(liveWalCopy(SCHEMA_VERSION));
+    databases.push(db);
+
+    expect(listDocuments(db).map((document) => document.name)).toEqual(["kept.pdf"]);
+  });
+
+  test("starts a fresh database when a stale WAL is all that is left of a deleted one", () => {
+    const copy = liveWalCopy(SCHEMA_VERSION - 1);
+    rmSync(join(copy, DB_FILENAME));
+
+    const db = openReaderDb(copy);
+    databases.push(db);
+
+    expect(listDocuments(db)).toEqual([]);
   });
 
   test("keeps the device id stable after reopening a current-format database", () => {
@@ -224,7 +383,7 @@ describe("storage", () => {
     databases.push(second);
     const document = storeDocument(
       db,
-      { name: "doc.pdf", pageCount: 1 },
+      { name: "doc.pdf", pageCount: 1, format: "pdf" },
       new TextEncoder().encode("%PDF-1.7 locked writer"),
     );
     second.exec("PRAGMA busy_timeout = 20");
@@ -256,12 +415,13 @@ describe("storage", () => {
     databases.push(db);
     const document = storeDocument(
       db,
-      { name: "doc.pdf", pageCount: 2 },
+      { name: "doc.pdf", pageCount: 2, format: "pdf" },
       new TextEncoder().encode("%PDF-1.7 view persistence"),
     );
     expect(getReaderView(db, document.id)).toBeNull();
 
     const view: ReaderView = {
+      format: "pdf",
       scaleValue: "page-width",
       rotation: 90,
       scrollMode: 0,
@@ -280,10 +440,11 @@ describe("storage", () => {
     const db = tempDb();
     const document = storeDocument(
       db,
-      { name: "doc.pdf", pageCount: 2 },
+      { name: "doc.pdf", pageCount: 2, format: "pdf" },
       new TextEncoder().encode("%PDF-1.7 view failures"),
     );
     const view: ReaderView = {
+      format: "pdf",
       scaleValue: "page-width",
       rotation: 90,
       scrollMode: 0,
@@ -294,6 +455,16 @@ describe("storage", () => {
     expect(() =>
       saveReaderView(db, document.id, { ...view, scaleValue: "125" }),
     ).toThrow();
+    expect(() =>
+      saveReaderView(db, document.id, {
+        format: "epub",
+        cfi: null,
+        fontSize: 18,
+        fontFamily: "serif",
+        lineHeight: 1.6,
+        theme: "light",
+      }),
+    ).toThrow(ReaderViewFormatError);
     db.exec("PRAGMA query_only = ON");
     try {
       expect(() =>
@@ -309,7 +480,7 @@ describe("storage", () => {
     const db = tempDb();
     const document = storeDocument(
       db,
-      { name: "doc.pdf", pageCount: 2 },
+      { name: "doc.pdf", pageCount: 2, format: "pdf" },
       new TextEncoder().encode("%PDF-1.7 corrupted view"),
     );
     for (const stored of ["{broken", JSON.stringify({ rotation: 0 })]) {
@@ -332,7 +503,7 @@ describe("storage", () => {
     const db = tempDb();
     const document = storeDocument(
       db,
-      { name: "doc.pdf", pageCount: 3 },
+      { name: "doc.pdf", pageCount: 3, format: "pdf" },
       new TextEncoder().encode("%PDF-1.7 settings"),
     );
 
@@ -366,7 +537,7 @@ describe("generated outline storage", () => {
     databases.push(db);
     const document = storeDocument(
       db,
-      { name: "outline.pdf", pageCount: 5 },
+      { name: "outline.pdf", pageCount: 5, format: "pdf" },
       new TextEncoder().encode("%PDF-1.7 generated outline"),
     );
     expect(getGeneratedOutline(db, document.id)).toBeNull();
@@ -387,7 +558,7 @@ describe("generated outline storage", () => {
     const db = tempDb();
     const document = storeDocument(
       db,
-      { name: "outline.pdf", pageCount: 5 },
+      { name: "outline.pdf", pageCount: 5, format: "pdf" },
       new TextEncoder().encode("%PDF-1.7 outline failures"),
     );
     saveGeneratedOutline(db, document.id, outline);
@@ -424,7 +595,7 @@ describe("generated outline storage", () => {
     const db = tempDb();
     const document = storeDocument(
       db,
-      { name: "outline.pdf", pageCount: 5 },
+      { name: "outline.pdf", pageCount: 5, format: "pdf" },
       new TextEncoder().encode("%PDF-1.7 corrupted outline"),
     );
     const stored = [

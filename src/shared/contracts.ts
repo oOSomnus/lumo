@@ -1,4 +1,9 @@
 import { z } from "zod";
+import {
+  MAX_CONTEXT_IMAGE_BASE64_CHARS,
+  MAX_PAGE_TEXT_CHARS,
+  MAX_TRANSLATION_CONTEXT_CHARS,
+} from "./limits";
 
 export const TARGET_LANGUAGES = [
   "zh-CN",
@@ -36,6 +41,10 @@ export const documentIdSchema = z
   .string()
   .regex(/^[a-f0-9]{64}$/, "documentId must be a lowercase SHA-256 hex digest");
 
+export const documentFormatSchema = z.enum(["pdf", "epub"]);
+
+export type DocumentFormat = z.infer<typeof documentFormatSchema>;
+
 export const pageNumberSchema = z.number().int().safe().min(1);
 
 export const documentNameSchema = z
@@ -44,44 +53,178 @@ export const documentNameSchema = z
   .max(255)
   .refine((value) => !value.includes("\u0000"), "name must not contain NUL");
 
-export const MAX_PAGE_TEXT_CHARS = 100_000;
 export const MAX_IMAGE_BASE64_CHARS = 6_000_000;
-export const MAX_MARKDOWN_CHARS = 200_000;
+export const MAX_EPUB_CFI_CHARS = 4096;
+export const MAX_TYPST_CHARS = 200_000;
+export const MAX_TYPST_DIAGNOSTICS_CHARS = 16_000;
+// Closes a repair request's diagnostics with what the previous reply did; the repair prompt names it.
+export const TYPST_PREVIOUS_ATTEMPT_HEADING = "Previous repair attempt (not source):";
 export const MAX_PROVIDER_CHARS = 1024;
 
-const jpegBase64Schema = z
+function jpegBase64Schema(maxChars: number) {
+  return z
+    .string()
+    .max(maxChars)
+    .refine(
+      (value) =>
+        value.length % 4 === 0 &&
+        /^[A-Za-z0-9+/]+={0,2}$/.test(value) &&
+        value.startsWith("/9j/"),
+      "imageBase64 must be base64-encoded JPEG data",
+    );
+}
+
+export const translationUnitSchema = z
   .string()
-  .max(MAX_IMAGE_BASE64_CHARS)
+  .max(128)
+  .regex(/^[A-Za-z0-9_-]*$/, "unit must be letters, digits, underscores or dashes");
+
+// An opaque EPUB range identifier; the iframe resolves it against the book.
+export const epubCfiSchema = z
+  .string()
+  .max(MAX_EPUB_CFI_CHARS)
+  .regex(/^epubcfi\(.+\)$/, "sourceCfi must be an EPUB CFI such as epubcfi(/6/4!/4/2,/1:0,/1:9)");
+
+// `page-` or `sel-` plus the SHA-256 of the kind and sourceCfi (see shared/epub.ts).
+export const epubUnitSchema = z
+  .string()
+  .regex(/^(?:page|sel)-[a-f0-9]{64}$/, "unit must be an EPUB page or selection identity");
+
+const typstSourceSchema = z
+  .string()
+  .max(MAX_TYPST_CHARS)
+  .refine((value) => value.trim().length > 0, "typst must not be empty");
+
+const typstRepairSchema = z.strictObject({
+  typst: typstSourceSchema,
+  diagnostics: z.string().min(1).max(MAX_TYPST_DIAGNOSTICS_CHARS),
+});
+
+export type TypstRepair = z.infer<typeof typstRepairSchema>;
+
+const translationReferenceSchema = z
+  .strictObject({
+    text: z.string().min(1).max(MAX_TRANSLATION_CONTEXT_CHARS).optional(),
+    imageBase64: jpegBase64Schema(MAX_CONTEXT_IMAGE_BASE64_CHARS).optional(),
+  })
   .refine(
-    (value) =>
-      value.length % 4 === 0 &&
-      /^[A-Za-z0-9+/]+={0,2}$/.test(value) &&
-      value.startsWith("/9j/"),
-    "imageBase64 must be base64-encoded JPEG data",
+    (value) => value.text !== undefined || value.imageBase64 !== undefined,
+    "a reference needs text or an image",
   );
 
-export const translatePageInputSchema = z
+export type TranslationReference = z.infer<typeof translationReferenceSchema>;
+
+// The end of the previous page and the start of the next one; an absent neighbour is omitted.
+export const translationContextSchema = z.strictObject({
+  previous: translationReferenceSchema.optional(),
+  next: translationReferenceSchema.optional(),
+});
+
+export type TranslationContext = z.infer<typeof translationContextSchema>;
+
+const translateIdentityFields = {
+  documentId: documentIdSchema,
+  pageNumber: pageNumberSchema,
+  targetLanguage: targetLanguageSchema,
+  force: z.boolean().default(false),
+};
+
+const pdfLocationFields = {
+  ...translateIdentityFields,
+  format: z.literal("pdf"),
+  unit: translationUnitSchema.optional(),
+};
+
+// An EPUB unit is an on-screen range: sourceCfi is its position and unit its identity.
+const epubLocationFields = {
+  ...translateIdentityFields,
+  format: z.literal("epub"),
+  unit: epubUnitSchema,
+  sourceCfi: epubCfiSchema,
+};
+
+const translatePdfPageInputSchema = z.strictObject({
+  ...pdfLocationFields,
+  text: z.string().max(MAX_PAGE_TEXT_CHARS),
+  imageBase64: jpegBase64Schema(MAX_IMAGE_BASE64_CHARS),
+  context: translationContextSchema.optional(),
+});
+
+export const EPUB_ASSET_PATH_PATTERN =
+  /^assets\/[a-f0-9]{64}\.(png|jpg|gif|svg)$/;
+
+const epubImageSchema = z.strictObject({
+  path: z.string().regex(EPUB_ASSET_PATH_PATTERN, "invalid EPUB asset path"),
+  imageBase64: jpegBase64Schema(MAX_IMAGE_BASE64_CHARS),
+});
+
+const translateEpubPageInputSchema = z
   .strictObject({
-    documentId: documentIdSchema,
-    pageNumber: pageNumberSchema,
-    targetLanguage: targetLanguageSchema,
-    text: z.string().max(MAX_PAGE_TEXT_CHARS),
-    imageBase64: jpegBase64Schema,
-    force: z.boolean().default(false),
+    ...epubLocationFields,
+    xhtml: z.string().max(MAX_PAGE_TEXT_CHARS),
+    images: z.array(epubImageSchema).max(256),
+    context: translationContextSchema.optional(),
+  })
+  .superRefine((value, ctx) => {
+    const paths = new Set<string>();
+    let total = 0;
+    for (const [index, image] of value.images.entries()) {
+      total += image.imageBase64.length;
+      if (total > MAX_IMAGE_BASE64_CHARS) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["images", index],
+          message: "image previews exceed the 6000000 character limit",
+        });
+        return;
+      }
+      if (paths.has(image.path)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["images", index, "path"],
+          message: "image paths must be unique",
+        });
+      }
+      paths.add(image.path);
+    }
   });
 
+// A repair carries only the failing source and its diagnostics, never the original page.
+const translatePdfRepairInputSchema = z.strictObject({
+  ...pdfLocationFields,
+  repair: typstRepairSchema,
+});
+
+const translateEpubRepairInputSchema = z.strictObject({
+  ...epubLocationFields,
+  repair: typstRepairSchema,
+});
+
+export const translatePageInputSchema = z.union([
+  translatePdfPageInputSchema,
+  translateEpubPageInputSchema,
+  translatePdfRepairInputSchema,
+  translateEpubRepairInputSchema,
+]);
+
 export type TranslatePageInput = z.infer<typeof translatePageInputSchema>;
+export type TranslateRepairInput = Extract<TranslatePageInput, { repair: TypstRepair }>;
+export type TranslateGenerationInput = Exclude<TranslatePageInput, TranslateRepairInput>;
 
 export const translationContentSchema = z.strictObject({
-  markdown: z
-    .string()
-    .max(MAX_MARKDOWN_CHARS)
-    .refine((value) => value.trim().length > 0, "markdown must not be empty"),
+  typst: typstSourceSchema,
   provider: z.string().min(1).max(MAX_PROVIDER_CHARS),
   model: z.string().min(1).max(MAX_PROVIDER_CHARS),
 });
 
 export type TranslationContent = z.infer<typeof translationContentSchema>;
+
+// What the client saves: the generated content plus, for an EPUB unit, where it came from.
+export const translationSaveInputSchema = translationContentSchema.extend({
+  sourceCfi: epubCfiSchema.optional(),
+});
+
+export type TranslationSaveInput = z.infer<typeof translationSaveInputSchema>;
 
 export const MAX_OUTLINE_ENTRIES = 10_000;
 export const MAX_OUTLINE_HEADINGS_PER_PAGE = 128;
@@ -149,7 +292,7 @@ export const outlineEntriesSchema = z
     }
   });
 
-const outlinePageContentSchema = translatePageInputSchema.pick({
+const outlinePageContentSchema = translatePdfPageInputSchema.pick({
   text: true,
   imageBase64: true,
 });
@@ -210,7 +353,8 @@ const readerViewScaleSchema = z
     return scale >= 0.1 && scale <= 25;
   }, "scaleValue must be a PDF.js zoom preset or a scale between 0.1 and 25");
 
-export const readerViewSchema = z.strictObject({
+export const pdfReaderViewSchema = z.strictObject({
+  format: z.literal("pdf"),
   scaleValue: readerViewScaleSchema,
   rotation: z.union([
     z.literal(0),
@@ -227,13 +371,53 @@ export const readerViewSchema = z.strictObject({
   spreadMode: z.union([z.literal(0), z.literal(1), z.literal(2)]),
 });
 
+export type PdfReaderView = z.infer<typeof pdfReaderViewSchema>;
+
+export const EPUB_FONT_SIZE_MIN = 12;
+export const EPUB_FONT_SIZE_MAX = 36;
+export const EPUB_FONT_SIZE_STEP = 2;
+export const EPUB_FONT_FAMILIES = ["serif", "sans-serif"] as const;
+export const EPUB_LINE_HEIGHTS = [1.4, 1.6, 1.8, 2] as const;
+export const EPUB_THEMES = ["light", "sepia", "dark"] as const;
+
+export const epubReaderViewSchema = z.strictObject({
+  format: z.literal("epub"),
+  cfi: z.string().min(1).max(MAX_EPUB_CFI_CHARS).nullable(),
+  fontSize: z.number().int().min(EPUB_FONT_SIZE_MIN).max(EPUB_FONT_SIZE_MAX),
+  fontFamily: z.enum(EPUB_FONT_FAMILIES),
+  lineHeight: z.union([
+    z.literal(1.4),
+    z.literal(1.6),
+    z.literal(1.8),
+    z.literal(2),
+  ]),
+  theme: z.enum(EPUB_THEMES),
+});
+
+export type EpubReaderView = z.infer<typeof epubReaderViewSchema>;
+
+export const readerViewSchema = z.discriminatedUnion("format", [
+  pdfReaderViewSchema,
+  epubReaderViewSchema,
+]);
+
 export type ReaderView = z.infer<typeof readerViewSchema>;
 
-export const DEFAULT_READER_VIEW: ReaderView = {
+export const DEFAULT_PDF_READER_VIEW: PdfReaderView = {
+  format: "pdf",
   scaleValue: "page-fit",
   rotation: 0,
   scrollMode: 3,
   spreadMode: 0,
+};
+
+export const DEFAULT_EPUB_READER_VIEW: EpubReaderView = {
+  format: "epub",
+  cfi: null,
+  fontSize: 18,
+  fontFamily: "serif",
+  lineHeight: 1.6,
+  theme: "light",
 };
 
 export interface DocumentRecord {
@@ -244,6 +428,7 @@ export interface DocumentRecord {
   currentPage: number;
   createdAt: number;
   lastOpenedAt: number;
+  format: DocumentFormat;
 }
 
 export interface ReaderSettings {
@@ -255,10 +440,20 @@ export interface TranslationRecord {
   documentId: string;
   pageNumber: number;
   targetLanguage: TargetLanguage;
-  markdown: string;
+  unit?: string;
+  /** The EPUB range this unit was translated from; absent for PDF pages. */
+  sourceCfi?: string;
+  typst: string;
   provider: string;
   model: string;
   translatedAt: number;
+}
+
+/** Where a translation lives, without its Typst source. `unit` is "" for a PDF page. */
+export interface TranslationLocationSummary {
+  pageNumber: number;
+  unit: string;
+  sourceCfi?: string;
 }
 
 export interface LibrarySnapshot {
@@ -470,10 +665,58 @@ export interface ApiErrorBody {
 
 export const DOCUMENT_UPLOAD_QUERY_SCHEMA = z.strictObject({
   name: documentNameSchema,
-  pageCount: z.coerce.number().int().safe().min(1),
+  pageCount: z.coerce.number().int().safe().min(1).optional(),
+  format: documentFormatSchema,
 });
 
 export type DocumentUploadQuery = z.infer<typeof DOCUMENT_UPLOAD_QUERY_SCHEMA>;
+
+export const translationRecordSchema = z.strictObject({
+  documentId: documentIdSchema,
+  pageNumber: pageNumberSchema,
+  targetLanguage: targetLanguageSchema,
+  unit: translationUnitSchema.optional(),
+  sourceCfi: epubCfiSchema.optional(),
+  typst: z.string().max(MAX_TYPST_CHARS),
+  provider: z.string(),
+  model: z.string(),
+  translatedAt: z.number().int(),
+});
+
+export const typstRepairChangeSchema = z.discriminatedUnion("mode", [
+  z.strictObject({
+    mode: z.literal("edits"),
+    count: z.number().int().safe().min(1),
+  }),
+  z.strictObject({ mode: z.literal("rewrite") }),
+]);
+
+export type TypstRepairChange = z.infer<typeof typstRepairChangeSchema>;
+
+// A compile round may take up to two model replies; this is the reply's ordinal.
+const typstRepairReplyAttemptSchema = z.union([z.literal(1), z.literal(2)]);
+
+export const typstRepairProgressSchema = z.discriminatedUnion("phase", [
+  z.strictObject({
+    phase: z.literal("requesting"),
+    replyAttempt: typstRepairReplyAttemptSchema,
+  }),
+  z.strictObject({
+    phase: z.literal("rejected"),
+    replyAttempt: typstRepairReplyAttemptSchema,
+    error: z.strictObject({
+      code: z.literal("INVALID_AI_OUTPUT"),
+      message: z.string().min(1).max(MAX_TYPST_DIAGNOSTICS_CHARS),
+    }),
+  }),
+  z.strictObject({
+    phase: z.literal("applied"),
+    replyAttempt: typstRepairReplyAttemptSchema,
+    change: typstRepairChangeSchema,
+  }),
+]);
+
+export type TypstRepairProgress = z.infer<typeof typstRepairProgressSchema>;
 
 export const translateStreamEventSchema = z.discriminatedUnion("type", [
   z.strictObject({ type: z.literal("start") }),
@@ -482,19 +725,17 @@ export const translateStreamEventSchema = z.discriminatedUnion("type", [
     contentIndex: z.number().int().min(0),
     text: z.string(),
   }),
-  z.strictObject({ type: z.literal("saving") }),
   z.strictObject({
-    type: z.literal("done"),
-    translation: z.strictObject({
-      documentId: documentIdSchema,
-      pageNumber: pageNumberSchema,
-      targetLanguage: targetLanguageSchema,
-      markdown: z.string(),
-      provider: z.string(),
-      model: z.string(),
-      translatedAt: z.number().int(),
-    }),
-    cacheHit: z.boolean(),
+    type: z.literal("repair"),
+    progress: typstRepairProgressSchema,
+  }),
+  z.strictObject({
+    type: z.literal("generated"),
+    content: translationContentSchema,
+  }),
+  z.strictObject({
+    type: z.literal("cached"),
+    translation: translationRecordSchema,
   }),
   z.strictObject({
     type: z.literal("error"),

@@ -4,8 +4,8 @@ import {
   type TranslatePageInput,
   type TranslateStreamEvent,
   type TranslationContent,
-  type TranslationRecord,
 } from "../shared/contracts";
+import { isEpubUnitOf } from "../shared/epub";
 import type { AiRuntime } from "./ai";
 import type { AiManager } from "./ai-settings";
 import {
@@ -14,11 +14,7 @@ import {
   HttpError,
   readJson,
 } from "./http";
-import {
-  getDocument,
-  getTranslation,
-  saveTranslation,
-} from "./storage";
+import { getDocument, getTranslation } from "./storage";
 
 export const MAX_TRANSLATE_BODY_BYTES = 8 * 1024 * 1024;
 export const TRANSLATE_TIMEOUT_MS = 120_000;
@@ -57,7 +53,6 @@ function aiEventError(error: unknown, timedOut: boolean): {
 
 export function createGenerationStream(
   input: TranslatePageInput,
-  db: Database,
   ai: AiRuntime,
   request: Request,
 ): ReadableStream<Uint8Array> {
@@ -113,6 +108,11 @@ export function createGenerationStream(
             ({ contentIndex, delta }) => {
               emit({ type: "delta", contentIndex, text: delta });
             },
+            (progress) => {
+              if (!abortController.signal.aborted) {
+                emit({ type: "repair", progress });
+              }
+            },
           );
 
           if (abortController.signal.aborted) {
@@ -124,21 +124,7 @@ export function createGenerationStream(
             return;
           }
 
-          emit({ type: "saving" });
-          let record: TranslationRecord;
-          try {
-            record = saveTranslation(db, input, content);
-          } catch (error) {
-            const classified = classifyError(error);
-            emit({
-              type: "error",
-              error: { code: classified.code, message: classified.message },
-              draft: content,
-            });
-            finish();
-            return;
-          }
-          emit({ type: "done", translation: record, cacheHit: false });
+          emit({ type: "generated", content });
           finish();
         } catch (error) {
           if (closed) {
@@ -179,15 +165,28 @@ export async function handleTranslate(
   if (!document) {
     throw new HttpError(404, "DOCUMENT_NOT_FOUND", "document does not exist");
   }
+  if (document.format !== input.format) {
+    throw new HttpError(
+      400,
+      "INVALID_REQUEST",
+      "translation input format does not match the document",
+    );
+  }
   if (input.pageNumber > document.pageCount) {
     throw new HttpError(400, "INVALID_REQUEST", "page number is outside the document");
   }
+  if (
+    input.format === "epub" &&
+    !(await isEpubUnitOf(input.unit, input.sourceCfi))
+  ) {
+    throw new HttpError(400, "INVALID_REQUEST", "invalid translation location");
+  }
 
-  if (!input.force) {
+  if (!input.force && !("repair" in input)) {
     const cached = getTranslation(ctx.db, input);
     if (cached) {
       return ndjsonResponse(
-        oneLineStream({ type: "done", translation: cached, cacheHit: true }),
+        oneLineStream({ type: "cached", translation: cached }),
       );
     }
   }
@@ -198,5 +197,5 @@ export async function handleTranslate(
     throw new HttpError(503, configured.code, configured.message);
   }
 
-  return ndjsonResponse(createGenerationStream(input, ctx.db, runtime, request));
+  return ndjsonResponse(createGenerationStream(input, runtime, request));
 }

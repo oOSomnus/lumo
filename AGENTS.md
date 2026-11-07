@@ -9,6 +9,7 @@ Personal project. Make clean cutovers: change current behavior, update every cal
 - Multi-statement SQLite mutations stay in immediate transactions; a single statement does not need one. Credential deletion/login must cancel and await the previous login before writing.
 - Save flows: validate a copy before `done`/saved state, keep cancellation and attempt guards, retain unsaved drafts, and never mark newer edits saved after an in-flight save.
 - PDF worker ownership: PDF.js transfers `data.buffer` it receives. Retain bytes needed for upload before handing a buffer to validation/rendering; never mutate viewer-owned buffers.
+- EPUB text preparation lives in the sandboxed `epub-viewer` iframe; image bytes must come from `book.archive`, never from HTML fetch. The iframe bundle takes no zod or `contracts.ts` at runtime (share limits through `src/shared/limits.ts`) and is built by `bun run prepare:typst`, so rebuild it after editing any module it imports. Typst compiles and renders locally with `vendor/typst/` assets; saved sources must remain valid without network access.
 - UI locale is independent of target languages. A locale switch waits for persisted reader progress and must not reload while translations, drafts, edits or saves are active.
 
 ## Where to look
@@ -16,6 +17,7 @@ Personal project. Make clean cutovers: change current behavior, update every cal
 - Auth, credentials, login: `src/server/{ai-settings,ai-credentials,ai-auth}.ts` and their tests.
 - Streaming, queue, wire contracts: `src/shared/contracts.ts`, `src/server/translate.ts`, `src/client/{api,translation-queue}.ts` and their tests.
 - PDF bridge, pinned viewer, fetch/build scripts: `src/client/{pdf,pdfBridge}.ts`, `vendor/pdfjs/`, `scripts/`. Pi is updated with `bun run update:pi`.
+- EPUB and Typst: `src/server/epub.ts`, `src/shared/{epub,limits,typst}.ts`; the iframe `src/client/{epub-viewer,epub-content,epub-image,epub-page,epub-style,epub-toc,epub-js}.ts` and its protocol `src/client/{epub-protocol,epub-bridge,epub-bridge-client}.ts`; the reader side `src/client/{epub-batch,toc,translation-input,typst,typst-worker}.ts`; `scripts/prepare-typst.ts`, `vendor/typst/`.
 - Commands: `bun run typecheck`, `bun test`, `bun run build` — see [README.md](README.md#development).
 
 Run the focused test for a changed area, then `bun test` and `bun run typecheck` before handoff. Document user-visible behavior in the README and its Chinese edition; keep protocol and schema details in source.

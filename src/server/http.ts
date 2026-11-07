@@ -1,13 +1,15 @@
 import { timingSafeEqual } from "node:crypto";
 import type { z } from "zod";
 import { ZodError } from "zod";
-import type { ApiErrorBody } from "../shared/contracts";
+import type { ApiErrorBody, DocumentFormat } from "../shared/contracts";
 import { AiError } from "./ai";
 import { CredentialStorageError, StorageBusyError } from "./ai-credentials";
 import { AiConfigError, AiProviderNotFoundError } from "./ai-settings";
 import {
+  DocumentMetadataConflictError,
   DocumentNotFoundError,
   PageOutOfRangeError,
+  ReaderViewFormatError,
   StoredAiConfigError,
 } from "./storage";
 
@@ -120,9 +122,13 @@ export function assertJsonContentType(request: Request): void {
   }
 }
 
-export function assertPdfContentType(request: Request): void {
-  if (mediaType(request) !== "application/pdf") {
-    throw new HttpError(400, "INVALID_REQUEST", "Content-Type must be application/pdf");
+export function assertDocumentContentType(
+  request: Request,
+  format: DocumentFormat,
+): void {
+  const expected = format === "pdf" ? "application/pdf" : "application/epub+zip";
+  if (mediaType(request) !== expected) {
+    throw new HttpError(400, "INVALID_REQUEST", `Content-Type must be ${expected}`);
   }
 }
 
@@ -226,6 +232,20 @@ export function classifyError(error: unknown): ClassifiedError {
       status: 400,
       code: "INVALID_REQUEST",
       message: "page number is outside the document",
+    };
+  }
+  if (error instanceof DocumentMetadataConflictError) {
+    return {
+      status: 409,
+      code: "DOCUMENT_CONFLICT",
+      message: "the same file is already stored with different metadata",
+    };
+  }
+  if (error instanceof ReaderViewFormatError) {
+    return {
+      status: 400,
+      code: "INVALID_REQUEST",
+      message: error.message,
     };
   }
   if (error instanceof AiConfigError) {

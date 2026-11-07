@@ -170,7 +170,7 @@ test("an unreadable PDF shows a placeholder and can be deleted", async ({
   lumo,
 }) => {
   const broken = await lumo.api.post(
-    "/api/documents?name=broken.pdf&pageCount=1",
+    "/api/documents?name=broken.pdf&pageCount=1&format=pdf",
     {
       headers: { "Content-Type": "application/pdf" },
       data: Buffer.from("%PDF-1.7\nbroken"),
@@ -218,7 +218,7 @@ test("an unreadable PDF shows a placeholder and can be deleted", async ({
     .click();
 
   await expect(
-    library.getByText("The library is empty. Open a PDF to start."),
+    library.getByText("The library is empty. Open a PDF or EPUB to start."),
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Return to reading", exact: true }),

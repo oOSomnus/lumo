@@ -16,6 +16,49 @@ export interface LibraryProps {
   onDropPdf: (file: File) => void;
 }
 
+function renderEpubCover(name: string): Promise<Blob> {
+  const canvas = document.createElement("canvas");
+  canvas.width = 480;
+  canvas.height = 640;
+  const context = canvas.getContext("2d");
+  if (!context) return Promise.reject(new Error("canvas unavailable"));
+  let hue = 0;
+  for (let index = 0; index < name.length; index += 1) {
+    hue = (hue * 31 + name.charCodeAt(index)) % 360;
+  }
+  const gradient = context.createLinearGradient(0, 0, canvas.width, canvas.height);
+  gradient.addColorStop(0, `hsl(${hue} 42% 34%)`);
+  gradient.addColorStop(1, `hsl(${(hue + 40) % 360} 46% 22%)`);
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = "rgba(255,255,255,0.9)";
+  context.font = "600 36px sans-serif";
+  context.textBaseline = "top";
+  context.fillText("EPUB", 40, 48);
+  context.font = "600 42px serif";
+  const words = name.replace(/\.epub$/i, "").split(/\s+/u);
+  let line = "";
+  let y = 160;
+  for (const word of words) {
+    const candidate = line ? `${line} ${word}` : word;
+    if (context.measureText(candidate).width > canvas.width - 80 && line) {
+      context.fillText(line, 40, y);
+      y += 56;
+      line = word;
+      if (y > 500) break;
+    } else {
+      line = candidate;
+    }
+  }
+  if (y <= 500 && line) context.fillText(line, 40, y);
+  return new Promise((resolve, reject) =>
+    canvas.toBlob(
+      (blob) => (blob ? resolve(blob) : reject(new Error("cover encoding failed"))),
+      "image/png",
+    ),
+  );
+}
+
 function BookCover({
   url,
   failed,
@@ -68,6 +111,8 @@ export function Library({
   const mountedRef = useRef(true);
   const wasActiveRef = useRef(active);
   const [, setCoverVersion] = useState(0);
+  const documentsRef = useRef(documents);
+  documentsRef.current = documents;
 
   const startNextCover = useCallback(() => {
     if (!mountedRef.current || !activeRef.current || runningRef.current) return;
@@ -83,7 +128,12 @@ export function Library({
     runningRef.current = documentId;
     const controller = new AbortController();
     controllersRef.current.set(documentId, controller);
-    renderDocumentCover(documentId, controller.signal)
+    const document = documentsRef.current.find((item) => item.id === documentId);
+    const render =
+      document?.format === "epub"
+        ? renderEpubCover(document.name)
+        : renderDocumentCover(documentId, controller.signal);
+    render
       .then(
         (blob) => {
           if (!mountedRef.current || controller.signal.aborted) return;
@@ -228,7 +278,9 @@ export function Library({
                     <span className="book-title">{document.name}</span>
                   </button>
                   <p className="book-meta">
-                    {t.common.pageOf(shownPage, document.pageCount)}
+                    {document.format === "epub"
+                      ? t.common.sectionOf(shownPage, document.pageCount)
+                      : t.common.pageOf(shownPage, document.pageCount)}
                   </p>
                   <p className="book-meta muted">
                     {t.library.recentlyRead(

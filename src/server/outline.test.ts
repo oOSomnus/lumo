@@ -31,7 +31,7 @@ function setup(): {
   databases.push(db);
   const document = storeDocument(
     db,
-    { name: "outline.pdf", pageCount: 3 },
+    { name: "outline.pdf", pageCount: 3, format: "pdf" },
     new TextEncoder().encode("%PDF-1.7 outline fixture"),
   );
   return {
@@ -152,6 +152,34 @@ describe("handleOutlinePage", () => {
       code: "AI_NOT_CONFIGURED",
     });
     expect(called).toBe(false);
+  });
+
+  test("refuses an EPUB with 400 before any AI work", async () => {
+    const { db, input } = setup();
+    const epub = storeDocument(
+      db,
+      { name: "book.epub", pageCount: 3, format: "epub" },
+      new TextEncoder().encode("epub fixture"),
+    );
+    let aiWork = 0;
+    const counting: AiRuntime = {
+      checkConfigured: async () => {
+        aiWork += 1;
+        return { ok: true };
+      },
+      translatePage: async (): Promise<TranslationContent> => {
+        aiWork += 1;
+        throw new Error("unexpected translation request");
+      },
+      extractOutlinePage: async () => {
+        aiWork += 1;
+        return [];
+      },
+    };
+    await expect(
+      handleOutlinePage(request({ ...input, documentId: epub.id }), { db, ai: manager(counting) }),
+    ).rejects.toMatchObject({ status: 400, code: "INVALID_REQUEST" });
+    expect(aiWork).toBe(0);
   });
 
   test("rejects non-POST methods", async () => {

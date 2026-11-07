@@ -6,23 +6,24 @@
   "type": "module",
   "scripts": {
     "prepare:pdfjs": "bun scripts/fetch-pdfjs.ts",
-    "dev": "bun run prepare:pdfjs && NODE_ENV=development bun src/server/index.ts",
+    "prepare:typst": "bun scripts/prepare-typst.ts",
+    "dev": "bun run prepare:pdfjs && bun run prepare:typst && NODE_ENV=development bun src/server/index.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "test:e2e": "node node_modules/@playwright/test/cli.js test --config tests/e2e/playwright.config.ts",
-    "build": "bun run prepare:pdfjs && bun scripts/build.ts",
+    "build": "bun run prepare:pdfjs && bun run prepare:typst && bun scripts/build.ts",
     "update:pi": "bun update @earendil-works/pi-ai --latest"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "^1.4.0",
-    "katex": "^0.16.22",
+    "@myriaddreamin/typst-ts-renderer": "0.7.0",
+    "@myriaddreamin/typst-ts-web-compiler": "0.7.0",
+    "@myriaddreamin/typst.ts": "0.7.0",
+    "dompurify": "3.4.17",
+    "epubjs": "^0.3.93",
+    "jszip": "3.10.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "react-markdown": "^10.1.0",
-    "rehype-katex": "^7.0.1",
-    "remark-cjk-friendly": "^2.3.3",
-    "remark-gfm": "^4.0.1",
-    "remark-math": "^6.0.0",
     "zod": "^4.1.12"
   },
   "devDependencies": {

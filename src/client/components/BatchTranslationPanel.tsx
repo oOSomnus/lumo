@@ -3,8 +3,11 @@ import {
   TARGET_LANGUAGE_LABELS,
   type DocumentRecord,
   type TargetLanguage,
+  type TranslationLocationSummary,
 } from "../../shared/contracts";
+import { isEpubPageUnit } from "../../shared/epub";
 import { apiJson } from "../api";
+import { isOpenTask, type EpubBatchState } from "../epub-batch";
 import { errorText, toUiError, useI18n, type UiError } from "../i18n";
 import {
   buildOutlineRanges,
@@ -13,7 +16,13 @@ import {
   type OutlineRange,
 } from "../outline";
 import { parsePageSelection } from "../page-selection";
-import type { TranslationQueue, TranslationTask } from "../translation-queue";
+import {
+  hasRetainedDraft,
+  isActiveStage,
+  type TranslationQueue,
+  type TranslationTask,
+} from "../translation-queue";
+import { TypstRepairSummary } from "./TypstRepairPanel";
 
 interface BatchTranslationPanelProps {
   document: DocumentRecord;
@@ -40,9 +49,19 @@ interface BatchTranslationPanelProps {
   onRetrySaveOutline: () => void;
   onDiscardOutline: () => void;
   onOpenOutlinePage: (pageNumber: number) => void;
+  epubBatch: EpubBatchState;
+  onStartEpubBatch: (options: {
+    sections: readonly number[];
+    retranslate: boolean;
+    saved: ReadonlySet<string>;
+  }) => void;
+  /** Ticks the EPUB sections that still have an untranslated screen page; needs the pages located first. */
+  onSelectUntranslatedEpub: (saved: ReadonlySet<string>) => void;
+  onStopAll: () => void;
 }
 
 const PAGE_GROUP_SIZE = 100;
+const NO_LOCATIONS: TranslationLocationSummary[] = [];
 
 export function BatchTranslationPanel({
   document,
@@ -65,8 +84,45 @@ export function BatchTranslationPanel({
   onRetrySaveOutline,
   onDiscardOutline,
   onOpenOutlinePage,
+  epubBatch,
+  onStartEpubBatch,
+  onSelectUntranslatedEpub,
+  onStopAll,
 }: BatchTranslationPanelProps) {
   const { locale, t } = useI18n();
+  const isEpub = document.format === "epub";
+  const pageTasks = useMemo(
+    () =>
+      tasks.filter((task) =>
+        isEpub ? isEpubPageUnit(task.unit ?? "") : !task.unit,
+      ),
+    [tasks, isEpub],
+  );
+  const copy = isEpub
+    ? {
+        select: t.batch.epub.selectSections,
+        expression: t.batch.epub.expression,
+        current: t.batch.epub.currentSection,
+        all: t.batch.epub.allSections,
+        untranslated: t.batch.epub.untranslatedSections,
+        range: t.batch.epub.sectionRange,
+        checkboxes: t.batch.epub.sectionCheckboxes,
+        marker: t.batch.epub.markerTranslated,
+        outlineRange: t.outline.sectionRange,
+        selectOutlineRange: t.outline.selectSectionRange,
+      }
+    : {
+        select: t.batch.selectPages,
+        expression: t.batch.expression,
+        current: t.batch.currentPage,
+        all: t.batch.allPages,
+        untranslated: t.batch.untranslatedPages,
+        range: t.batch.pageRange,
+        checkboxes: t.batch.pageCheckboxes,
+        marker: t.batch.markerTranslated,
+        outlineRange: t.outline.pageRange,
+        selectOutlineRange: t.outline.selectRange,
+      };
   const [expression, setExpression] = useState("");
   const [expressionError, setExpressionError] = useState<UiError | null>(null);
   const [groupIndex, setGroupIndex] = useState(0);
@@ -75,9 +131,9 @@ export function BatchTranslationPanel({
   const [translated, setTranslated] = useState<{
     key: string;
     status: "loading" | "ready" | "error";
-    pages: number[];
+    locations: TranslationLocationSummary[];
     message?: UiError;
-  }>({ key: "", status: "loading", pages: [] });
+  }>({ key: "", status: "loading", locations: NO_LOCATIONS });
   const [reloadToken, setReloadToken] = useState(0);
 
   const translatedKey = `${document.id}/${language}`;
@@ -95,10 +151,10 @@ export function BatchTranslationPanel({
     setTranslated((previous) =>
       previous.key === translatedKey
         ? previous
-        : { key: translatedKey, status: "loading", pages: [] },
+        : { key: translatedKey, status: "loading", locations: NO_LOCATIONS },
     );
-    void apiJson<{ pages: number[] }>(
-      `/api/documents/${document.id}/translation-pages?targetLanguage=${language}`,
+    void apiJson<{ locations: TranslationLocationSummary[] }>(
+      `/api/documents/${document.id}/translation-locations?targetLanguage=${language}`,
       { signal: controller.signal },
     )
       .then((result) => {
@@ -106,7 +162,7 @@ export function BatchTranslationPanel({
         setTranslated({
           key: translatedKey,
           status: "ready",
-          pages: result.pages,
+          locations: result.locations,
         });
       })
       .catch((error: unknown) => {
@@ -114,7 +170,7 @@ export function BatchTranslationPanel({
         setTranslated({
           key: translatedKey,
           status: "error",
-          pages: [],
+          locations: NO_LOCATIONS,
           message: toUiError(error),
         });
       });
@@ -124,37 +180,50 @@ export function BatchTranslationPanel({
   const activeTranslated =
     translated.key === translatedKey
       ? translated
-      : { status: "loading" as const, pages: [] as number[], message: undefined };
+      : {
+          status: "loading" as const,
+          locations: NO_LOCATIONS,
+          message: undefined,
+        };
 
-  const savedPages = useMemo(() => {
-    const pages = new Set(activeTranslated.pages);
-    for (const task of tasks) {
+  // A PDF page or an EPUB screen page counts as translated; an EPUB selection never does.
+  const { savedPages, savedUnits } = useMemo(() => {
+    const pages = new Set<number>();
+    const units = new Set<string>();
+    const add = (pageNumber: number, unit: string): void => {
+      pages.add(pageNumber);
+      if (unit) units.add(`${pageNumber}/${unit}`);
+    };
+    for (const location of activeTranslated.locations) {
+      if (isEpub ? isEpubPageUnit(location.unit) : location.unit === "") {
+        add(location.pageNumber, location.unit);
+      }
+    }
+    for (const task of pageTasks) {
       if (
         task.documentId === document.id &&
         task.targetLanguage === language &&
         task.stage === "saved"
       ) {
-        pages.add(task.pageNumber);
+        add(task.pageNumber, task.unit ?? "");
       }
     }
-    return pages;
-  }, [activeTranslated.pages, tasks, document.id, language]);
+    return { savedPages: pages, savedUnits: units };
+  }, [activeTranslated.locations, pageTasks, document.id, language, isEpub]);
 
   const issuePages = useMemo(() => {
     const pages = new Set<number>();
-    for (const task of tasks) {
+    for (const task of pageTasks) {
       if (
         task.documentId === document.id &&
         task.targetLanguage === language &&
-        task.stage !== "error" &&
-        task.stage !== "cancelled" &&
-        task.stage !== "saved"
+        isOpenTask(task)
       ) {
         pages.add(task.pageNumber);
       }
     }
     return pages;
-  }, [tasks, document.id, language]);
+  }, [pageTasks, document.id, language]);
 
   const selectedPages = useMemo(
     () => [...selection].sort((a, b) => a - b),
@@ -195,14 +264,18 @@ export function BatchTranslationPanel({
     });
   };
 
+  // An EPUB section is split into screen pages when the batch starts, and every page then
+  // decides for itself whether it is skipped; a PDF page is decided here.
   const candidatePages = useMemo(
     () =>
-      selectedPages.filter((page) => {
-        if (issuePages.has(page)) return false;
-        if (!retranslate && savedPages.has(page)) return false;
-        return true;
-      }),
-    [selectedPages, issuePages, savedPages, retranslate],
+      isEpub
+        ? selectedPages
+        : selectedPages.filter((page) => {
+            if (issuePages.has(page)) return false;
+            if (!retranslate && savedPages.has(page)) return false;
+            return true;
+          }),
+    [isEpub, selectedPages, issuePages, savedPages, retranslate],
   );
 
   const retranslatePages = useMemo(
@@ -212,10 +285,10 @@ export function BatchTranslationPanel({
 
   const documentTasks = useMemo(
     () =>
-      tasks.filter(
+      pageTasks.filter(
         (task) => task.documentId === document.id,
       ),
-    [tasks, document.id],
+    [pageTasks, document.id],
   );
 
   const languageTasks = documentTasks.filter(
@@ -223,11 +296,13 @@ export function BatchTranslationPanel({
   );
   const finished = languageTasks.filter((task) => task.stage === "saved").length;
   const active = languageTasks.filter((task) =>
-    ["preparing", "generating", "saving"].includes(task.stage),
+    ["preparing", "generating", "repairing", "validating", "saving"].includes(
+      task.stage,
+    ),
   ).length;
   const queued = languageTasks.filter((task) => task.stage === "queued").length;
-  const failed = languageTasks.filter((task) =>
-    ["error", "unsaved"].includes(task.stage),
+  const failed = languageTasks.filter(
+    (task) => task.stage === "error" || hasRetainedDraft(task),
   ).length;
 
   const togglePage = (page: number): void => {
@@ -248,6 +323,14 @@ export function BatchTranslationPanel({
 
   const startBatch = async (): Promise<void> => {
     if (candidatePages.length === 0) return;
+    if (isEpub) {
+      onStartEpubBatch({
+        sections: candidatePages,
+        retranslate,
+        saved: savedUnits,
+      });
+      return;
+    }
     if (retranslatePages > 0) {
       const confirmed = await onConfirm({
         title: t.confirm.retranslateSavedTitle,
@@ -389,7 +472,7 @@ export function BatchTranslationPanel({
                               <input
                                 type="checkbox"
                                 checked={checked}
-                                aria-label={t.outline.selectRange(
+                                aria-label={copy.selectOutlineRange(
                                   range.pageNumber,
                                   range.endPage,
                                 )}
@@ -412,7 +495,7 @@ export function BatchTranslationPanel({
                                 {range.title}
                               </button>
                               <span className="outline-pages">
-                                {t.outline.pageRange(
+                                {copy.outlineRange(
                                   range.pageNumber,
                                   range.endPage,
                                 )}
@@ -424,10 +507,14 @@ export function BatchTranslationPanel({
                     )}
                   </ul>
                 )}
-                <p className="outline-note">{t.outline.note}</p>
+                <p className="outline-note">
+                  {document.format === "epub"
+                    ? t.outline.noteEpub
+                    : t.outline.note}
+                </p>
               </>
             )}
-            {outline.entries.length === 0 && outline.stage === "idle" && (
+            {!isEpub && outline.entries.length === 0 && outline.stage === "idle" && (
               <>
                 {outline.error && (
                   <p className="field-error" role="alert">
@@ -450,15 +537,19 @@ export function BatchTranslationPanel({
                 )}
               </>
             )}
+            {isEpub && outline.entries.length === 0 && (
+              <p className="muted">{t.epub.noContents}</p>
+            )}
           </>
         )}
       </section>
 
       <section className="batch-selector" aria-labelledby="batch-selector-title">
-        <h3 id="batch-selector-title">{t.batch.selectPages}</h3>
+        <h3 id="batch-selector-title">{copy.select}</h3>
+        {isEpub && <p className="outline-note">{t.batch.epub.note}</p>}
         <div className="inline-form">
           <label className="sr-only" htmlFor="batch-expression">
-            {t.batch.expression}
+            {copy.expression}
           </label>
           <input
             id="batch-expression"
@@ -487,7 +578,7 @@ export function BatchTranslationPanel({
             type="button"
             onClick={() => onSelectionChange(new Set([currentPage]))}
           >
-            {t.batch.currentPage}
+            {copy.current}
           </button>
           <button
             type="button"
@@ -499,22 +590,27 @@ export function BatchTranslationPanel({
               )
             }
           >
-            {t.batch.allPages}
+            {copy.all}
           </button>
           <button
             type="button"
-            disabled={activeTranslated.status !== "ready"}
+            disabled={
+              activeTranslated.status !== "ready" ||
+              (isEpub && (Boolean(disabledReason) || epubBatch.status === "running"))
+            }
             onClick={() =>
-              onSelectionChange(
-                new Set(
-                  Array.from({ length: pageCount }, (_, index) => index + 1).filter(
-                    (page) => !savedPages.has(page),
-                  ),
-                ),
-              )
+              isEpub
+                ? onSelectUntranslatedEpub(savedUnits)
+                : onSelectionChange(
+                    new Set(
+                      Array.from({ length: pageCount }, (_, index) => index + 1).filter(
+                        (page) => !savedPages.has(page),
+                      ),
+                    ),
+                  )
             }
           >
-            {t.batch.untranslatedPages}
+            {copy.untranslated}
           </button>
           <button type="button" onClick={() => onSelectionChange(new Set())}>
             {t.batch.clear}
@@ -540,7 +636,7 @@ export function BatchTranslationPanel({
           >
             {t.batch.previousGroup}
           </button>
-          <span>{t.batch.pageRange(firstGroupPage, lastGroupPage, pageCount)}</span>
+          <span>{copy.range(firstGroupPage, lastGroupPage, pageCount)}</span>
           <button
             type="button"
             disabled={groupIndex >= groupCount - 1}
@@ -553,7 +649,7 @@ export function BatchTranslationPanel({
         <div
           className="page-checkboxes"
           role="group"
-          aria-label={t.batch.pageCheckboxes}
+          aria-label={copy.checkboxes}
         >
           {Array.from(
             { length: Math.max(0, lastGroupPage - firstGroupPage + 1) },
@@ -569,9 +665,9 @@ export function BatchTranslationPanel({
               {activeTranslated.status === "ready" && savedPages.has(page) && (
                 <span
                   className="page-marker"
-                  title={t.batch.markerTranslated}
+                  title={copy.marker}
                 >
-                  {t.batch.markerTranslated}
+                  {copy.marker}
                 </span>
               )}
               {issuePages.has(page) && (
@@ -586,12 +682,18 @@ export function BatchTranslationPanel({
 
       <section className="batch-summary">
         <p>
-          {t.batch.summary(
-            selectedPages.length,
-            savedPages.size,
-            issuePages.size,
-            candidatePages.length,
-          )}
+          {isEpub
+            ? t.batch.epub.summary(
+                selectedPages.length,
+                savedPages.size,
+                issuePages.size,
+              )
+            : t.batch.summary(
+                selectedPages.length,
+                savedPages.size,
+                issuePages.size,
+                candidatePages.length,
+              )}
         </p>
         <label className="checkbox-row">
           <input
@@ -606,7 +708,8 @@ export function BatchTranslationPanel({
             {disabledReason}
           </p>
         )}
-        {!disabledReason &&
+        {!isEpub &&
+          !disabledReason &&
           candidatePages.length === 0 &&
           selectedPages.length > 0 && (
             <p className="muted">{t.batch.allCovered}</p>
@@ -634,13 +737,16 @@ export function BatchTranslationPanel({
             disabled={
               candidatePages.length === 0 ||
               activeTranslated.status !== "ready" ||
-              Boolean(disabledReason)
+              Boolean(disabledReason) ||
+              epubBatch.status === "running"
             }
             onClick={() => void startBatch()}
           >
-            {t.batch.start(candidatePages.length)}
+            {isEpub
+              ? t.batch.epub.start(candidatePages.length)
+              : t.batch.start(candidatePages.length)}
           </button>
-          <button type="button" onClick={() => queue.cancelAll()}>
+          <button type="button" onClick={onStopAll}>
             {t.batch.stopAll}
           </button>
           <button
@@ -656,6 +762,21 @@ export function BatchTranslationPanel({
             {t.batch.retryFailed}
           </button>
         </div>
+        {isEpub && epubBatch.status === "running" && (
+          <p className="muted" aria-live="polite">
+            {t.batch.epub.finding(epubBatch.found)}
+          </p>
+        )}
+        {isEpub && epubBatch.status === "done" && (
+          <p className="muted" aria-live="polite">
+            {t.batch.epub.found(epubBatch.found, epubBatch.queued)}
+          </p>
+        )}
+        {isEpub && epubBatch.status === "error" && epubBatch.error && (
+          <div className="inline-error" role="alert">
+            {t.batch.epub.findFailed(errorText(epubBatch.error, locale))}
+          </div>
+        )}
         <p className="batch-progress" aria-live="polite">
           {t.batch.progress(finished, languageTasks.length, active, queued, failed)}
         </p>
@@ -673,7 +794,13 @@ export function BatchTranslationPanel({
                 className="task-page"
                 onClick={() => onOpenTaskPage(task)}
               >
-                {t.common.pageLabel(task.pageNumber)}
+                {isEpub
+                  ? t.batch.epub.taskPage(
+                      task.pageNumber,
+                      task.epubPage ?? null,
+                      (task.unit ?? "").slice(-6),
+                    )
+                  : t.common.pageLabel(task.pageNumber)}
               </button>
               <span className="task-language">
                 {TARGET_LANGUAGE_LABELS[task.targetLanguage]}
@@ -704,15 +831,15 @@ export function BatchTranslationPanel({
                   )}
                 </span>
               )}
+              <TypstRepairSummary task={task} />
               <span className="task-actions">
-                {["queued", "preparing", "generating", "saving"].includes(
-                  task.stage,
-                ) && (
+                {isActiveStage(task.stage) && (
                   <button type="button" onClick={() => queue.cancel(task.key)}>
                     {t.common.cancel}
                   </button>
                 )}
-                {(task.stage === "error" || task.stage === "cancelled") && (
+                {(task.stage === "error" ||
+                  (task.stage === "cancelled" && !hasRetainedDraft(task))) && (
                   <button
                     type="button"
                     disabled={Boolean(disabledReason)}
@@ -721,10 +848,20 @@ export function BatchTranslationPanel({
                     {t.common.retry}
                   </button>
                 )}
-                {task.stage === "unsaved" && (
+                {hasRetainedDraft(task) && (
                   <>
                     <button type="button" onClick={() => queue.retry(task.key)}>
                       {t.page.retrySave}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={Boolean(disabledReason)}
+                      title={t.repair.note}
+                      onClick={() => queue.repair(task.key)}
+                    >
+                      {task.repairRounds?.length
+                        ? t.page.continueRepair
+                        : t.page.repair}
                     </button>
                     <button
                       type="button"

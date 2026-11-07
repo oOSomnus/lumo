@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
 const vendorPdfjs = join(root, "vendor", "pdfjs");
+const vendorTypst = join(root, "vendor", "typst");
 const outfile = join(root, "dist", "lumo");
 
 mkdirSync(join(root, "dist"), { recursive: true });
@@ -20,7 +21,7 @@ const result = await Bun.build({
   compile: {
     target: "bun-linux-x64",
     outfile,
-    assets: [vendorPdfjs],
+    assets: [vendorPdfjs, vendorTypst],
     autoloadDotenv: false,
     autoloadBunfig: false,
     autoloadTsconfig: false,

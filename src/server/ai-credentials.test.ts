@@ -222,7 +222,7 @@ describe("SqliteCredentialStore", () => {
     databases.push(db);
     const document = storeDocument(
       db,
-      { name: "doc.pdf", pageCount: 1 },
+      { name: "doc.pdf", pageCount: 1, format: "pdf" },
       new TextEncoder().encode("%PDF-1.7 credentials"),
     );
 
@@ -240,8 +240,8 @@ describe("SqliteCredentialStore", () => {
       saveTranslation(
         db,
         { documentId: document.id, pageNumber: 1, targetLanguage: "en" },
-        { markdown: "# saved", provider: "p", model: "m" },
-      ).markdown,
+        { typst: "# saved", provider: "p", model: "m" },
+      ).typst,
     ).toBe("# saved");
     let settled = false;
     void refresh.finally(() => {

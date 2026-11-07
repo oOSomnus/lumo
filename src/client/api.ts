@@ -10,6 +10,7 @@ import {
   type TranslatePageInput,
   type TranslationContent,
   type TranslationRecord,
+  type TypstRepairProgress,
   type UiLocale,
 } from "../shared/contracts";
 
@@ -169,17 +170,16 @@ export async function readNdjson<T>(
   }
 }
 
-export interface TranslationStreamResult {
-  translation: TranslationRecord;
-  cacheHit: boolean;
-}
+export type TranslationStreamResult =
+  | { cacheHit: true; translation: TranslationRecord }
+  | { cacheHit: false; content: TranslationContent };
 
 export async function requestTranslation(
   input: TranslatePageInput,
   options: {
     signal?: AbortSignal;
     onDelta?: (chunk: { contentIndex: number; text: string }) => void;
-    onSaving?: () => void;
+    onRepair?: (progress: TypstRepairProgress) => void;
   } = {},
 ): Promise<TranslationStreamResult> {
   const response = await apiFetch("/api/translate", {
@@ -197,15 +197,16 @@ export async function requestTranslation(
       case "delta":
         options.onDelta?.({ contentIndex: event.contentIndex, text: event.text });
         break;
-      case "saving":
-        options.onSaving?.();
+      case "repair":
+        options.onRepair?.(event.progress);
         break;
-      case "done":
+      case "generated":
         terminalSeen = true;
-        result = {
-          translation: event.translation,
-          cacheHit: event.cacheHit,
-        };
+        result = { cacheHit: false, content: event.content };
+        break;
+      case "cached":
+        terminalSeen = true;
+        result = { cacheHit: true, translation: event.translation };
         break;
       case "error":
         terminalSeen = true;
@@ -235,9 +236,11 @@ export async function fetchTranslation(
   pageNumber: number,
   targetLanguage: string,
   signal?: AbortSignal,
+  unit?: string,
 ): Promise<TranslationRecord | null> {
+  const query = unit ? `?unit=${encodeURIComponent(unit)}` : "";
   return apiJson(
-    `/api/documents/${documentId}/translations/${pageNumber}/${targetLanguage}`,
+    `/api/documents/${documentId}/translations/${pageNumber}/${targetLanguage}${query}`,
     { signal },
   );
 }
@@ -248,10 +251,13 @@ export async function saveTranslationRecord(
   targetLanguage: string,
   content: TranslationContent,
   signal?: AbortSignal,
+  unit?: string,
+  sourceCfi?: string,
 ): Promise<TranslationRecord> {
+  const query = unit ? `?unit=${encodeURIComponent(unit)}` : "";
   return apiJson(
-    `/api/documents/${documentId}/translations/${pageNumber}/${targetLanguage}`,
-    { ...jsonInit("PUT", content), signal },
+    `/api/documents/${documentId}/translations/${pageNumber}/${targetLanguage}${query}`,
+    { ...jsonInit("PUT", { ...content, sourceCfi }), signal },
   );
 }
 

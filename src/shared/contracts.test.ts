@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
   AI_REASONING_EFFORTS,
+  MAX_EPUB_CFI_CHARS,
   MAX_OUTLINE_ENTRIES,
   MAX_OUTLINE_HEADINGS_PER_PAGE,
+  MAX_TYPST_CHARS,
+  MAX_TYPST_DIAGNOSTICS_CHARS,
   TARGET_LANGUAGES,
   aiConfigSchema,
   outlineEntriesSchema,
@@ -12,14 +15,29 @@ import {
   readerUpdateSchema,
   readerViewSchema,
   translatePageInputSchema,
+  translateStreamEventSchema,
+  translationSaveInputSchema,
+  typstRepairProgressSchema,
 } from "./contracts";
+import { MAX_CONTEXT_IMAGE_BASE64_CHARS, MAX_TRANSLATION_CONTEXT_CHARS } from "./limits";
 
 const base = {
   documentId: "a".repeat(64),
   pageNumber: 1,
   targetLanguage: "zh-CN" as const,
+  format: "pdf" as const,
   text: "",
   imageBase64: "/9j/AAAA",
+};
+
+const cfi = "epubcfi(/6/4!/4/2,/1:0,/1:9)";
+const epubBase = {
+  documentId: "a".repeat(64),
+  pageNumber: 1,
+  targetLanguage: "ja" as const,
+  format: "epub" as const,
+  unit: `page-${"c".repeat(64)}`,
+  sourceCfi: cfi,
 };
 
 describe("translatePageInputSchema", () => {
@@ -38,6 +56,146 @@ describe("translatePageInputSchema", () => {
 
   test("lists every supported target language", () => {
     expect(TARGET_LANGUAGES).toEqual(["zh-CN", "zh-TW", "en", "ja", "ko", "de", "fr", "es"]);
+  });
+
+  test("accepts EPUB content units and rejects unsafe or duplicate image paths", () => {
+    const epub = {
+      documentId: "a".repeat(64),
+      pageNumber: 2,
+      targetLanguage: "ja" as const,
+      format: "epub" as const,
+      unit: `page-${"c".repeat(64)}`,
+      sourceCfi: cfi,
+      xhtml: "<h1>Title</h1>",
+      images: [
+        { path: `assets/${"b".repeat(64)}.png`, imageBase64: "/9j/AAAA" },
+      ],
+    };
+    expect(translatePageInputSchema.parse(epub)).toMatchObject({
+      ...epub,
+      force: false,
+    });
+    expect(() =>
+      translatePageInputSchema.parse({ ...epub, format: "pdf" }),
+    ).toThrow();
+    for (const path of [
+      "assets/../../etc/passwd",
+      `assets/${"B".repeat(64)}.png`,
+      `assets/${"b".repeat(64)}.jpeg`,
+      `images/${"b".repeat(64)}.png`,
+    ]) {
+      expect(() =>
+        translatePageInputSchema.parse({
+          ...epub,
+          images: [{ path, imageBase64: "/9j/AAAA" }],
+        }),
+      ).toThrow();
+    }
+    expect(() =>
+      translatePageInputSchema.parse({
+        ...epub,
+        images: [epub.images[0]!, epub.images[0]!],
+      }),
+    ).toThrow();
+  });
+
+  test("accepts a bounded Typst repair for both formats and rejects malformed ones", () => {
+    const repair = {
+      typst: "#strong[unclosed",
+      diagnostics: "error: unclosed delimiter (line 1, column 8)\n1 | #strong⟦[⟧unclosed",
+    };
+    const pdfRepair = {
+      documentId: "a".repeat(64),
+      pageNumber: 1,
+      targetLanguage: "zh-CN" as const,
+      format: "pdf" as const,
+      repair,
+    };
+    const epubRepair = { ...epubBase, repair };
+    expect(translatePageInputSchema.parse(pdfRepair)).toMatchObject({ repair });
+    expect(translatePageInputSchema.parse(epubRepair)).toMatchObject({ repair });
+    expect(translatePageInputSchema.parse(base)).not.toHaveProperty("repair");
+    expect(
+      translatePageInputSchema.parse({
+        ...pdfRepair,
+        repair: {
+          typst: "x".repeat(MAX_TYPST_CHARS),
+          diagnostics: "x".repeat(MAX_TYPST_DIAGNOSTICS_CHARS),
+        },
+      }),
+    ).toHaveProperty("repair");
+
+    for (const bad of [
+      { ...repair, typst: "" },
+      { ...repair, typst: " \n" },
+      { ...repair, typst: "x".repeat(MAX_TYPST_CHARS + 1) },
+      { ...repair, diagnostics: "" },
+      { ...repair, diagnostics: "x".repeat(MAX_TYPST_DIAGNOSTICS_CHARS + 1) },
+      { ...repair, extra: true },
+      { typst: repair.typst },
+    ]) {
+      expect(() => translatePageInputSchema.parse({ ...pdfRepair, repair: bad })).toThrow();
+      expect(() => translatePageInputSchema.parse({ ...epubRepair, repair: bad })).toThrow();
+    }
+  });
+
+  test("a repair carries only its identity and diagnostics, never page content or context", () => {
+    const repair = { typst: "#strong[unclosed", diagnostics: "error: unclosed delimiter" };
+    const pdfRepair = {
+      documentId: "a".repeat(64),
+      pageNumber: 1,
+      targetLanguage: "zh-CN" as const,
+      format: "pdf" as const,
+      repair,
+    };
+    const epubRepair = { ...epubBase, repair };
+    for (const extra of [{ text: "page" }, { imageBase64: "/9j/AAAA" }, { sourceCfi: cfi }, { context: {} }]) {
+      expect(() => translatePageInputSchema.parse({ ...pdfRepair, ...extra })).toThrow();
+    }
+    for (const extra of [{ xhtml: "<p>x</p>" }, { images: [] }, { context: { next: { text: "a" } } }]) {
+      expect(() => translatePageInputSchema.parse({ ...epubRepair, ...extra })).toThrow();
+    }
+  });
+
+  test("bounds EPUB CFIs and unit identities", () => {
+    const accepted = (input: object) =>
+      translatePageInputSchema.safeParse({ ...epubBase, xhtml: "<p>x</p>", images: [], ...input }).success;
+    const cfiOfLength = (length: number) => `epubcfi(${"x".repeat(length - "epubcfi()".length)})`;
+    expect(accepted({ sourceCfi: cfiOfLength(MAX_EPUB_CFI_CHARS) })).toBe(true);
+    expect(accepted({ sourceCfi: cfiOfLength(MAX_EPUB_CFI_CHARS + 1) })).toBe(false);
+    for (const sourceCfi of ["", "/6/4!/4/2", "epubcfi()", undefined]) {
+      expect(accepted({ sourceCfi })).toBe(false);
+    }
+    expect(accepted({ unit: `sel-${"c".repeat(64)}` })).toBe(true);
+    for (const unit of [`page-${"C".repeat(64)}`, `page-${"c".repeat(63)}`, `page-${"c".repeat(64)}x`, "c".repeat(64), undefined]) {
+      expect(accepted({ unit })).toBe(false);
+    }
+  });
+
+  test("accepts bounded neighbouring-page references and rejects empty, oversized or unknown ones", () => {
+    const text = "x".repeat(MAX_TRANSLATION_CONTEXT_CHARS);
+    const image = `/9j/${"A".repeat(MAX_CONTEXT_IMAGE_BASE64_CHARS - 4)}`;
+    const accepted = (context: object) => translatePageInputSchema.safeParse({ ...base, context }).success;
+    expect(accepted({ previous: { text }, next: { imageBase64: image } })).toBe(true);
+    expect(accepted({ previous: { text: `${text}x` } })).toBe(false);
+    expect(accepted({ next: { imageBase64: `/9j/${"A".repeat(MAX_CONTEXT_IMAGE_BASE64_CHARS)}` } })).toBe(false);
+    for (const reference of [{}, { text: "" }, { text: "a", extra: 1 }, { imageBase64: "iVBORw0KGgo=" }]) {
+      expect(accepted({ previous: reference })).toBe(false);
+    }
+    expect(accepted({ before: { text: "a" } })).toBe(false);
+    expect(
+      translatePageInputSchema.safeParse({ ...epubBase, xhtml: "<p>x</p>", images: [], context: { next: { text: "a" } } }).success,
+    ).toBe(true);
+  });
+});
+
+describe("translationSaveInputSchema", () => {
+  test("keeps the EPUB source CFI optional and bounded", () => {
+    const content = { typst: "#p[x]", provider: "openai", model: "gpt" };
+    expect(translationSaveInputSchema.parse(content)).toEqual(content);
+    expect(translationSaveInputSchema.parse({ ...content, sourceCfi: cfi })).toEqual({ ...content, sourceCfi: cfi });
+    expect(() => translationSaveInputSchema.parse({ ...content, sourceCfi: "/6/4" })).toThrow();
+    expect(() => translationSaveInputSchema.parse({ ...content, extra: 1 })).toThrow();
   });
 });
 
@@ -121,6 +279,7 @@ describe("readerUpdateSchema", () => {
 
 describe("readerViewSchema", () => {
   const view = {
+    format: "pdf" as const,
     scaleValue: "page-fit",
     rotation: 0,
     scrollMode: 3,
@@ -139,10 +298,12 @@ describe("readerViewSchema", () => {
       "1.25",
       "25",
     ]) {
-      expect(readerViewSchema.parse({ ...view, scaleValue }).scaleValue).toBe(scaleValue);
+      const parsed = readerViewSchema.parse({ ...view, scaleValue });
+      expect(parsed.format === "pdf" ? parsed.scaleValue : null).toBe(scaleValue);
     }
     expect(
       readerViewSchema.parse({
+        format: "pdf",
         scaleValue: "page-width",
         rotation: 270,
         scrollMode: 1,
@@ -169,6 +330,42 @@ describe("readerViewSchema", () => {
     expect(() => readerViewSchema.parse({ ...view, scrollMode: 4 })).toThrow();
     expect(() => readerViewSchema.parse({ ...view, spreadMode: 3 })).toThrow();
     expect(() => readerViewSchema.parse({ ...view, extra: true })).toThrow();
+  });
+
+  const epubView = {
+    format: "epub" as const,
+    cfi: null,
+    fontSize: 18,
+    fontFamily: "serif" as const,
+    lineHeight: 1.6 as const,
+    theme: "light" as const,
+  };
+
+  test("keeps EPUB CFI views separate from PDF views", () => {
+    expect(readerViewSchema.parse(epubView)).toEqual(epubView);
+    expect(readerViewSchema.parse({ ...epubView, cfi: "epubcfi(/6/4!/4/2/2)" })).toMatchObject({
+      format: "epub",
+    });
+    expect(() => readerViewSchema.parse({ ...epubView, cfi: "x".repeat(4097) })).toThrow();
+    expect(() => readerViewSchema.parse({ ...view, cfi: "epubcfi(/6/4)" })).toThrow();
+    expect(() => readerViewSchema.parse({ ...epubView, scaleValue: "page-fit" })).toThrow();
+  });
+
+  test("requires explicit EPUB reading settings within their presets", () => {
+    expect(() => readerViewSchema.parse({ format: "epub", cfi: null })).toThrow();
+    for (const bad of [
+      { fontSize: 11 },
+      { fontSize: 37 },
+      { fontSize: 18.5 },
+      { fontFamily: "monospace" },
+      { lineHeight: 1.5 },
+      { theme: "blue" },
+    ]) {
+      expect(() => readerViewSchema.parse({ ...epubView, ...bad })).toThrow();
+    }
+    expect(
+      readerViewSchema.parse({ ...epubView, fontSize: 36, fontFamily: "sans-serif", lineHeight: 2, theme: "dark" }),
+    ).toMatchObject({ fontSize: 36, theme: "dark" });
   });
 });
 
@@ -271,6 +468,56 @@ describe("outline schemas", () => {
   test("rejects extra page result fields", () => {
     expect(() =>
       outlinePageResultSchema.parse({ headings: [], extra: true }),
+    ).toThrow();
+  });
+});
+
+describe("typst repair progress", () => {
+  test("accepts each repair phase and bounds the rejection message", () => {
+    for (const progress of [
+      { phase: "requesting", replyAttempt: 1 },
+      { phase: "rejected", replyAttempt: 2, error: { code: "INVALID_AI_OUTPUT", message: "bad reply" } },
+      {
+        phase: "rejected",
+        replyAttempt: 1,
+        error: { code: "INVALID_AI_OUTPUT", message: "x".repeat(MAX_TYPST_DIAGNOSTICS_CHARS) },
+      },
+      { phase: "applied", replyAttempt: 1, change: { mode: "edits", count: 2 } },
+      { phase: "applied", replyAttempt: 2, change: { mode: "rewrite" } },
+    ] as const) {
+      expect(typstRepairProgressSchema.parse(progress)).toEqual(progress);
+    }
+  });
+
+  test("rejects unknown phases, reply numbers, extra fields, and malformed changes", () => {
+    for (const progress of [
+      { phase: "done", replyAttempt: 1 },
+      { phase: "requesting", replyAttempt: 3 },
+      { phase: "requesting", replyAttempt: 1, extra: true },
+      { phase: "rejected", replyAttempt: 1, error: { code: "INVALID_AI_OUTPUT", message: "" } },
+      { phase: "rejected", replyAttempt: 1, error: { code: "AI_REQUEST_FAILED", message: "bad" } },
+      {
+        phase: "rejected",
+        replyAttempt: 1,
+        error: { code: "INVALID_AI_OUTPUT", message: "x".repeat(MAX_TYPST_DIAGNOSTICS_CHARS + 1) },
+      },
+      { phase: "applied", replyAttempt: 1, change: { mode: "edits", count: 0 } },
+      { phase: "applied", replyAttempt: 1, change: { mode: "edits", count: 1.5 } },
+      { phase: "applied", replyAttempt: 1, change: { mode: "edits" } },
+      { phase: "applied", replyAttempt: 1, change: { mode: "rewrite", count: 1 } },
+    ]) {
+      expect(() => typstRepairProgressSchema.parse(progress)).toThrow();
+    }
+  });
+
+  test("accepts a repair event only with a valid progress payload", () => {
+    const event = { type: "repair", progress: { phase: "requesting", replyAttempt: 1 } } as const;
+    expect(translateStreamEventSchema.parse(event)).toEqual(event);
+    expect(() =>
+      translateStreamEventSchema.parse({
+        type: "repair",
+        progress: { phase: "requesting", replyAttempt: 3 },
+      }),
     ).toThrow();
   });
 });

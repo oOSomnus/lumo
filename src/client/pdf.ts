@@ -1,6 +1,14 @@
 import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist";
-import { MAX_IMAGE_BASE64_CHARS, MAX_PAGE_TEXT_CHARS } from "../shared/contracts";
+import { MAX_IMAGE_BASE64_CHARS } from "../shared/contracts";
+import {
+  MAX_CONTEXT_IMAGE_BASE64_CHARS,
+  MAX_PAGE_TEXT_CHARS,
+  MAX_TRANSLATION_CONTEXT_CHARS,
+} from "../shared/limits";
+import type { TranslationContext, TranslationReference } from "../shared/contracts";
 import { accessToken } from "./api";
+import type { PreparedTranslationPage } from "./translation-queue";
+import type { ViewerBridge } from "./pdfBridge";
 
 export class PagePreparationError extends Error {
   constructor(
@@ -14,6 +22,8 @@ export class PagePreparationError extends Error {
 }
 
 const RENDER_LONG_EDGE = 2000;
+const CONTEXT_EDGE_LONG_EDGE = 1000;
+const CONTEXT_EDGE_RATIO = 0.2;
 
 export async function extractPageText(page: PDFPageProxy): Promise<string> {
   const content = await page.getTextContent();
@@ -93,6 +103,176 @@ export async function preparePageForTranslation(
   }
 
   return { text, imageBase64 };
+}
+
+function textChunk(item: unknown): string | null {
+  if (typeof item !== "object" || item === null || !("str" in item)) return null;
+  return `${item.str}${"hasEOL" in item && item.hasEOL ? "\n" : " "}`;
+}
+
+const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff;
+const isLowSurrogate = (code: number) => code >= 0xdc00 && code <= 0xdfff;
+
+// Reads items from the end only until the trimmed text exceeds the budget.
+export function pageTailText(items: readonly unknown[], limit: number): string {
+  let tail = "";
+  for (let i = items.length - 1; i >= 0; i--) {
+    const chunk = textChunk(items[i]) ?? "";
+    tail = chunk + tail;
+    if (chunk.trim() && tail.trim().length > limit) break;
+  }
+  const text = tail.trim();
+  const excerpt = text.slice(-limit);
+  return text.length > limit && isLowSurrogate(excerpt.charCodeAt(0)) ? excerpt.slice(1) : excerpt;
+}
+
+// Mirror of pageTailText, reading from the start of the page.
+export function pageHeadText(items: readonly unknown[], limit: number): string {
+  let head = "";
+  for (let i = 0; i < items.length; i++) {
+    const chunk = textChunk(items[i]) ?? "";
+    head += chunk;
+    if (chunk.trim() && head.trim().length > limit) break;
+  }
+  const text = head.trim();
+  const excerpt = text.slice(0, limit);
+  return text.length > limit && isHighSurrogate(excerpt.charCodeAt(limit - 1))
+    ? excerpt.slice(0, -1)
+    : excerpt;
+}
+
+// Re-encodes at a smaller long edge until the JPEG fits the neighbour budget.
+export async function encodeWithinContextBudget(
+  encode: (longEdge: number) => Promise<string>,
+): Promise<string> {
+  let longEdge = CONTEXT_EDGE_LONG_EDGE;
+  for (;;) {
+    const base64 = await encode(longEdge);
+    if (base64.length <= MAX_CONTEXT_IMAGE_BASE64_CHARS) return base64;
+    if (longEdge === 1) {
+      throw new PagePreparationError(
+        "PAGE_IMAGE_TOO_LARGE",
+        "the neighbouring page edge image exceeds the context limit",
+        { length: base64.length },
+      );
+    }
+    longEdge = Math.max(1, Math.floor(longEdge * 0.75));
+  }
+}
+
+type ContextSide = "previous" | "next";
+
+// Neighbour failures become warnings; abort and target failures still reject the whole prepare.
+export async function preparePdfTranslationPage(
+  bridge: ViewerBridge,
+  pageNumber: number,
+  signal: AbortSignal,
+): Promise<PreparedTranslationPage> {
+  const borrowed: { number: number; page: PDFPageProxy }[] = [];
+  const borrow = async (number: number) => {
+    const page = await bridge.getPage(number);
+    borrowed.push({ number, page });
+    return page;
+  };
+  const reference = (number: number, side: ContextSide) =>
+    borrow(number).then((page) => referenceFromPage(page, side, bridge.document, signal));
+
+  try {
+    const [target, previous, next] = await Promise.allSettled([
+      borrow(pageNumber).then((page) => preparePageForTranslation(page, bridge.document, signal)),
+      pageNumber > 1 ? reference(pageNumber - 1, "previous") : Promise.resolve(undefined),
+      pageNumber < bridge.pageCount ? reference(pageNumber + 1, "next") : Promise.resolve(undefined),
+    ]);
+    if (signal.aborted) throw new DOMException("aborted", "AbortError");
+    if (target.status === "rejected") throw target.reason;
+
+    const context: TranslationContext = {};
+    const contextWarnings: ContextSide[] = [];
+    for (const [side, result] of [["previous", previous], ["next", next]] as const) {
+      if (result.status === "rejected") contextWarnings.push(side);
+      else if (result.value) context[side] = result.value;
+    }
+    return {
+      format: "pdf",
+      text: target.value.text,
+      imageBase64: target.value.imageBase64,
+      ...(Object.keys(context).length > 0 ? { context } : {}),
+      ...(contextWarnings.length > 0 ? { contextWarnings } : {}),
+    };
+  } finally {
+    for (const { number, page } of borrowed) {
+      if (number !== bridge.page) page.cleanup();
+    }
+  }
+}
+
+async function referenceFromPage(
+  page: PDFPageProxy,
+  side: ContextSide,
+  targetDocument: Document,
+  signal: AbortSignal,
+): Promise<TranslationReference> {
+  const content = await page.getTextContent();
+  signal.throwIfAborted();
+  const text =
+    side === "previous"
+      ? pageTailText(content.items, MAX_TRANSLATION_CONTEXT_CHARS)
+      : pageHeadText(content.items, MAX_TRANSLATION_CONTEXT_CHARS);
+  if (text) return { text };
+  return { imageBase64: await renderContextEdge(page, side, targetDocument, signal) };
+}
+
+// Renders only the strip of the neighbouring page that faces the target page.
+async function renderContextEdge(
+  page: PDFPageProxy,
+  side: ContextSide,
+  targetDocument: Document,
+  signal: AbortSignal,
+): Promise<string> {
+  const base = page.getViewport({ scale: 1 });
+  return encodeWithinContextBudget(async (longEdge) => {
+    signal.throwIfAborted();
+    const scale = longEdge / Math.max(base.width, base.height * CONTEXT_EDGE_RATIO);
+    const pageHeight = base.height * scale;
+    const stripHeight = Math.max(1, Math.floor(pageHeight * CONTEXT_EDGE_RATIO));
+    const viewport = page.getViewport({
+      scale,
+      offsetY: side === "previous" ? stripHeight - pageHeight : 0,
+    });
+
+    const canvas = targetDocument.createElement("canvas");
+    canvas.width = Math.max(1, Math.ceil(viewport.width));
+    canvas.height = stripHeight;
+    const context = canvas.getContext("2d", { alpha: false });
+    if (!context) {
+      throw new PagePreparationError("PAGE_RENDER_FAILED", "the browser could not create a canvas");
+    }
+
+    const renderTask = page.render({ canvas, viewport, background: "#ffffff" });
+    const onAbort = () => renderTask.cancel();
+    signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      await renderTask.promise;
+      signal.throwIfAborted();
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.75);
+      const imageBase64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
+      if (!imageBase64.startsWith("/9j/")) {
+        throw new PagePreparationError("PAGE_RENDER_FAILED", "the page edge image is not JPEG");
+      }
+      return imageBase64;
+    } catch (error) {
+      if (signal.aborted) throw new DOMException("aborted", "AbortError");
+      if (error instanceof PagePreparationError) throw error;
+      throw new PagePreparationError(
+        "PAGE_RENDER_FAILED",
+        error instanceof Error ? error.message : "the page edge could not be rendered",
+      );
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+      canvas.width = 0;
+      canvas.height = 0;
+    }
+  });
 }
 
 interface PdfjsRuntime {

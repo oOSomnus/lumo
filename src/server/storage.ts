@@ -1,28 +1,32 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import {
   aiConfigSchema,
+  documentFormatSchema,
   documentNameSchema,
   outlineEntriesSchema,
   pageNumberSchema,
   readerViewSchema,
   targetLanguageSchema,
+  translationUnitSchema,
   uiLocaleSchema,
   type AiConfig,
+  type DocumentFormat,
   type DocumentRecord,
   type OutlineEntry,
   type ReaderSettings,
   type ReaderView,
   type TargetLanguage,
   type TranslationContent,
+  type TranslationLocationSummary,
   type TranslationRecord,
   type UiLocale,
 } from "../shared/contracts";
 
 export const DB_FILENAME = "reader.sqlite";
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 7;
 
 const BUSINESS_TABLES = [
   "documents",
@@ -68,6 +72,31 @@ function readUserVersion(db: Database): number {
   return row?.user_version ?? 0;
 }
 
+function unsupportedVersion(dbPath: string, version: number): Error {
+  return new Error(
+    `database ${dbPath} uses schema version ${version}; this build supports ${SCHEMA_VERSION}`,
+  );
+}
+
+/**
+ * A read/write open that ends in an error still checkpoints waiting WAL frames into the
+ * file and deletes the WAL on close, which would rewrite a database this build refuses.
+ * With frames waiting, the version is therefore read through a read-only connection first.
+ * A WAL without its database file is left to SQLite, which discards it.
+ */
+function rejectUnsupportedVersionInWal(dbPath: string): void {
+  const wal = `${dbPath}-wal`;
+  if (!existsSync(dbPath) || !existsSync(wal) || statSync(wal).size === 0) return;
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    db.exec("PRAGMA busy_timeout = 10000");
+    const version = readUserVersion(db);
+    if (version !== 0 && version !== SCHEMA_VERSION) throw unsupportedVersion(dbPath, version);
+  } finally {
+    db.close();
+  }
+}
+
 function existingBusinessTables(db: Database): string[] {
   const rows = db
     .query(
@@ -92,6 +121,7 @@ CREATE TABLE documents (
   currentPage INTEGER NOT NULL,
   createdAt INTEGER NOT NULL,
   lastOpenedAt INTEGER NOT NULL,
+  format TEXT NOT NULL CHECK (format IN ('pdf', 'epub')),
   readerView TEXT,
   generatedOutline TEXT
 ) STRICT;
@@ -106,11 +136,13 @@ CREATE TABLE translations (
   documentId TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
   pageNumber INTEGER NOT NULL,
   targetLanguage TEXT NOT NULL,
-  markdown TEXT NOT NULL,
+  unit TEXT NOT NULL,
+  typst TEXT NOT NULL,
   provider TEXT NOT NULL,
   model TEXT NOT NULL,
   translatedAt INTEGER NOT NULL,
-  PRIMARY KEY (documentId, pageNumber, targetLanguage)
+  sourceCfi TEXT,
+  PRIMARY KEY (documentId, pageNumber, targetLanguage, unit)
 ) STRICT;
 CREATE INDEX translations_document_language ON translations(documentId, targetLanguage, pageNumber);
 
@@ -133,6 +165,7 @@ PRAGMA user_version = ${SCHEMA_VERSION};
 export function openReaderDb(dataDirectory: string): Database {
   mkdirSync(dataDirectory, { recursive: true, mode: 0o700 });
   const dbPath = join(dataDirectory, DB_FILENAME);
+  rejectUnsupportedVersionInWal(dbPath);
   const db = new Database(dbPath, { create: true, readwrite: true, strict: true });
 
   try {
@@ -155,11 +188,7 @@ export function openReaderDb(dataDirectory: string): Database {
         return;
       }
 
-      if (version !== SCHEMA_VERSION) {
-        throw new Error(
-          `database ${dbPath} uses schema version ${version}; this build supports ${SCHEMA_VERSION}`,
-        );
-      }
+      if (version !== SCHEMA_VERSION) throw unsupportedVersion(dbPath, version);
 
       const missing = BUSINESS_TABLES.filter((name) => !tables.includes(name));
       if (missing.length > 0) {
@@ -188,7 +217,7 @@ export function openReaderDb(dataDirectory: string): Database {
 }
 
 const DOCUMENT_COLUMNS =
-  "id, name, size, pageCount, currentPage, createdAt, lastOpenedAt";
+  "id, name, size, pageCount, currentPage, createdAt, lastOpenedAt, format";
 
 export function listDocuments(db: Database): DocumentRecord[] {
   return db
@@ -229,10 +258,15 @@ export function saveReaderView(
   view: ReaderView,
 ): ReaderView {
   const parsed = readerViewSchema.parse(view);
-  const result = db
-    .query("UPDATE documents SET readerView = ? WHERE id = ?")
-    .run(JSON.stringify(parsed), documentId);
-  if (result.changes === 0) throw new DocumentNotFoundError(documentId);
+  const document = getDocument(db, documentId);
+  if (!document) throw new DocumentNotFoundError(documentId);
+  if (parsed.format !== document.format) {
+    throw new ReaderViewFormatError(parsed.format, document.format);
+  }
+  db.query("UPDATE documents SET readerView = ? WHERE id = ?").run(
+    JSON.stringify(parsed),
+    documentId,
+  );
   return parsed;
 }
 
@@ -292,12 +326,16 @@ export function saveGeneratedOutline(
 export function getDocumentFile(
   db: Database,
   documentId: string,
-): { name: string; data: Uint8Array } | null {
+): { name: string; data: Uint8Array; format: DocumentFormat } | null {
   const row = db
     .query(
-      "SELECT d.name, f.data FROM files f JOIN documents d ON d.id = f.documentId WHERE f.documentId = ?",
+      "SELECT d.name, d.format, f.data FROM files f JOIN documents d ON d.id = f.documentId WHERE f.documentId = ?",
     )
-    .get(documentId) as { name: string; data: Uint8Array } | null;
+    .get(documentId) as {
+    name: string;
+    format: DocumentFormat;
+    data: Uint8Array;
+  } | null;
   return row;
 }
 
@@ -385,11 +423,12 @@ export function hashDocumentBytes(bytes: Uint8Array): string {
 
 export function storeDocument(
   db: Database,
-  input: { name: string; pageCount: number },
+  input: { name: string; pageCount: number; format: DocumentFormat },
   bytes: Uint8Array,
 ): DocumentRecord {
   const name = documentNameSchema.parse(input.name);
   const pageCount = pageNumberSchema.parse(input.pageCount);
+  const format = documentFormatSchema.parse(input.format);
   if (bytes.byteLength === 0) {
     throw new Error("cannot store an empty document");
   }
@@ -401,12 +440,15 @@ export function storeDocument(
     const existing = getDocument(db, id);
     const now = Date.now();
     if (existing) {
+      if (existing.format !== format || existing.pageCount !== pageCount) {
+        throw new DocumentMetadataConflictError(id, existing.format, format);
+      }
       db.query("UPDATE documents SET lastOpenedAt = ? WHERE id = ?").run(now, id);
       return { ...existing, lastOpenedAt: now };
     }
     db.query(
-      "INSERT INTO documents (id, name, size, pageCount, currentPage, createdAt, lastOpenedAt) VALUES (?, ?, ?, ?, 1, ?, ?)",
-    ).run(id, name, size, pageCount, now, now);
+      "INSERT INTO documents (id, name, size, pageCount, currentPage, createdAt, lastOpenedAt, format) VALUES (?, ?, ?, ?, 1, ?, ?, ?)",
+    ).run(id, name, size, pageCount, now, now, format);
     db.query("INSERT INTO files (documentId, data) VALUES (?, ?)").run(id, bytes);
     return {
       id,
@@ -416,6 +458,7 @@ export function storeDocument(
       currentPage: 1,
       createdAt: now,
       lastOpenedAt: now,
+      format,
     } satisfies DocumentRecord;
   });
 
@@ -431,30 +474,36 @@ export interface TranslationLocation {
   documentId: string;
   pageNumber: number;
   targetLanguage: TargetLanguage;
+  unit?: string;
+  sourceCfi?: string;
 }
 
 function toTranslation(row: {
   documentId: string;
   pageNumber: number;
   targetLanguage: string;
-  markdown: string;
+  unit: string;
+  typst: string;
   provider: string;
   model: string;
   translatedAt: number;
+  sourceCfi: string | null;
 }): TranslationRecord {
   return {
     documentId: row.documentId,
     pageNumber: row.pageNumber,
     targetLanguage: targetLanguageSchema.parse(row.targetLanguage),
-    markdown: row.markdown,
+    unit: row.unit,
+    typst: row.typst,
     provider: row.provider,
     model: row.model,
     translatedAt: row.translatedAt,
+    sourceCfi: row.sourceCfi ?? undefined,
   };
 }
 
 const TRANSLATION_COLUMNS =
-  "documentId, pageNumber, targetLanguage, markdown, provider, model, translatedAt";
+  "documentId, pageNumber, targetLanguage, unit, typst, provider, model, translatedAt, sourceCfi";
 
 export function getTranslation(
   db: Database,
@@ -462,12 +511,13 @@ export function getTranslation(
 ): TranslationRecord | null {
   const row = db
     .query(
-      `SELECT ${TRANSLATION_COLUMNS} FROM translations WHERE documentId = ? AND pageNumber = ? AND targetLanguage = ?`,
+      `SELECT ${TRANSLATION_COLUMNS} FROM translations WHERE documentId = ? AND pageNumber = ? AND targetLanguage = ? AND unit = ?`,
     )
     .get(
       location.documentId,
       location.pageNumber,
       location.targetLanguage,
+      location.unit ?? "",
     ) as Parameters<typeof toTranslation>[0] | null;
   return row ? toTranslation(row) : null;
 }
@@ -479,23 +529,27 @@ export function listTranslations(
 ): TranslationRecord[] {
   const rows = db
     .query(
-      `SELECT ${TRANSLATION_COLUMNS} FROM translations WHERE documentId = ? AND targetLanguage = ? ORDER BY pageNumber ASC`,
+      `SELECT ${TRANSLATION_COLUMNS} FROM translations WHERE documentId = ? AND targetLanguage = ? ORDER BY pageNumber ASC, unit ASC`,
     )
     .all(documentId, targetLanguage) as Parameters<typeof toTranslation>[0][];
   return rows.map(toTranslation);
 }
 
-export function listTranslatedPages(
+export function listTranslationLocations(
   db: Database,
   documentId: string,
   targetLanguage: TargetLanguage,
-): number[] {
+): TranslationLocationSummary[] {
   const rows = db
     .query(
-      "SELECT pageNumber FROM translations WHERE documentId = ? AND targetLanguage = ? ORDER BY pageNumber ASC",
+      "SELECT pageNumber, unit, sourceCfi FROM translations WHERE documentId = ? AND targetLanguage = ? ORDER BY pageNumber ASC, unit ASC",
     )
-    .all(documentId, targetLanguage) as { pageNumber: number }[];
-  return rows.map((row) => row.pageNumber);
+    .all(documentId, targetLanguage) as { pageNumber: number; unit: string; sourceCfi: string | null }[];
+  return rows.map((row) => ({
+    pageNumber: row.pageNumber,
+    unit: row.unit,
+    sourceCfi: row.sourceCfi ?? undefined,
+  }));
 }
 
 export function saveTranslation(
@@ -505,6 +559,7 @@ export function saveTranslation(
 ): TranslationRecord {
   const pageNumber = pageNumberSchema.parse(location.pageNumber);
   const targetLanguage = targetLanguageSchema.parse(location.targetLanguage);
+  const unit = translationUnitSchema.parse(location.unit ?? "");
   const translatedAt = Date.now();
 
   const write = db.transaction(() => {
@@ -516,30 +571,35 @@ export function saveTranslation(
       throw new PageOutOfRangeError(pageNumber, document.pageCount);
     }
     db.query(
-      `INSERT INTO translations (documentId, pageNumber, targetLanguage, markdown, provider, model, translatedAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT (documentId, pageNumber, targetLanguage) DO UPDATE SET
-         markdown = excluded.markdown,
+      `INSERT INTO translations (documentId, pageNumber, targetLanguage, unit, typst, provider, model, translatedAt, sourceCfi)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (documentId, pageNumber, targetLanguage, unit) DO UPDATE SET
+         typst = excluded.typst,
          provider = excluded.provider,
          model = excluded.model,
-         translatedAt = excluded.translatedAt`,
+         translatedAt = excluded.translatedAt,
+         sourceCfi = excluded.sourceCfi`,
     ).run(
       location.documentId,
       pageNumber,
       targetLanguage,
-      content.markdown,
+      unit,
+      content.typst,
       content.provider,
       content.model,
       translatedAt,
+      location.sourceCfi ?? null,
     );
     return {
       documentId: location.documentId,
       pageNumber,
       targetLanguage,
-      markdown: content.markdown,
+      unit,
+      typst: content.typst,
       provider: content.provider,
       model: content.model,
       translatedAt,
+      sourceCfi: location.sourceCfi,
     };
   });
 
@@ -580,6 +640,29 @@ export class DocumentNotFoundError extends Error {
   constructor(documentId: string) {
     super(`document ${documentId} does not exist`);
     this.name = "DocumentNotFoundError";
+  }
+}
+
+export class DocumentMetadataConflictError extends Error {
+  constructor(
+    readonly documentId: string,
+    readonly storedFormat: DocumentFormat,
+    readonly incomingFormat: DocumentFormat,
+  ) {
+    super(
+      `document ${documentId} already exists as ${storedFormat}; the uploaded ${incomingFormat} has different metadata`,
+    );
+    this.name = "DocumentMetadataConflictError";
+  }
+}
+
+export class ReaderViewFormatError extends Error {
+  constructor(
+    readonly viewFormat: string,
+    readonly documentFormat: DocumentFormat,
+  ) {
+    super(`reading view format ${viewFormat} does not match document ${documentFormat}`);
+    this.name = "ReaderViewFormatError";
   }
 }
 

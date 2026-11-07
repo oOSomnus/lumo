@@ -155,6 +155,7 @@ export class ViewerBridge {
     }
     const viewer = this.#app.pdfViewer;
     const parsed = readerViewSchema.safeParse({
+      format: "pdf",
       scaleValue: viewer.currentScaleValue,
       rotation: viewer.pagesRotation,
       scrollMode: viewer.scrollMode,
@@ -170,6 +171,12 @@ export class ViewerBridge {
   }
 
   restoreView(view: ReaderView): void {
+    if (view.format !== "pdf") {
+      throw new ViewerBridgeError(
+        "PDF_VIEWER_UNAVAILABLE",
+        "the PDF viewer cannot restore an EPUB reading view",
+      );
+    }
     const viewer = this.#app.pdfViewer;
     this.#restoring += 1;
     try {

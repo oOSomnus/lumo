@@ -7,19 +7,22 @@ import {
   useState,
 } from "react";
 import {
-  DEFAULT_READER_VIEW,
+  DEFAULT_EPUB_READER_VIEW,
+  DEFAULT_PDF_READER_VIEW,
   MAX_OUTLINE_ENTRIES,
   outlineEntriesSchema,
   outlinePageResultSchema,
   readerViewSchema,
   TARGET_LANGUAGE_LABELS,
   type DocumentRecord,
+  type EpubReaderView,
   type LibrarySnapshot,
   type OutlineEntry,
   type OutlinePageInput,
   type ReaderUpdate,
   type ReaderView,
   type TargetLanguage,
+  type TranslationContent,
   type TranslationRecord,
   type UiLocale,
 } from "../../shared/contracts";
@@ -42,21 +45,53 @@ import {
   useI18n,
   type UiError,
 } from "../i18n";
-import { PagePreparationError, preparePageForTranslation, validatePdfCopy } from "../pdf";
+import { PagePreparationError, preparePageForTranslation, preparePdfTranslationPage, validatePdfCopy } from "../pdf";
+import {
+  findUntranslatedEpubSections,
+  IDLE_EPUB_BATCH,
+  isOpenTask,
+  runEpubBatch,
+  type EpubBatchState,
+} from "../epub-batch";
+import type {
+  EpubBridge,
+  EpubReadyInfo,
+  EpubRelocation,
+  EpubSelection,
+  EpubTocEntry,
+} from "../epub-bridge";
+import { currentTocId, outlineFromEpubToc } from "../toc";
+import { generationRequest, repairRequest } from "../translation-input";
 import { ViewerBridgeError, type ViewerBridge } from "../pdfBridge";
+import { compileTypst, type TypstAsset } from "../typst";
+import { stripPlaceholderControls } from "../../shared/typst";
+import {
+  compareEpubCfi,
+  epubStyleOf,
+  isEpubPageUnit,
+  type EpubLayoutSnapshot,
+  type EpubReaderStyle,
+} from "../../shared/epub";
+import JSZip from "jszip/dist/jszip.min.js";
 import {
   emptyOutlineState,
   OutlineError,
   type DocumentOutlineState,
 } from "../outline";
 import {
+  hasRetainedDraft,
+  isActiveStage,
   TranslationQueue,
   translationKey,
   type TranslationTask,
 } from "../translation-queue";
 import { BatchTranslationPanel } from "./BatchTranslationPanel";
 import { Library } from "./Library";
+import { TypstRepairPanel } from "./TypstRepairPanel";
 import { ModalDialog } from "./ModalDialog";
+import { EpubTocPanel } from "./EpubTocPanel";
+import { EpubToolbar } from "./EpubToolbar";
+import { EpubViewerFrame } from "./EpubViewerFrame";
 import { PdfViewerFrame } from "./PdfViewerFrame";
 import { SettingsDialog } from "./SettingsDialog";
 import { TranslationView } from "./TranslationView";
@@ -85,24 +120,56 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 function sameReaderView(a: ReaderView, b: ReaderView): boolean {
-  return (
-    a.scaleValue === b.scaleValue &&
-    a.rotation === b.rotation &&
-    a.scrollMode === b.scrollMode &&
-    a.spreadMode === b.spreadMode
-  );
+  if (a.format !== b.format) return false;
+  if (a.format === "epub" && b.format === "epub") {
+    return (
+      a.cfi === b.cfi &&
+      a.fontSize === b.fontSize &&
+      a.fontFamily === b.fontFamily &&
+      a.lineHeight === b.lineHeight &&
+      a.theme === b.theme
+    );
+  }
+  if (a.format === "pdf" && b.format === "pdf") {
+    return (
+      a.scaleValue === b.scaleValue &&
+      a.rotation === b.rotation &&
+      a.scrollMode === b.scrollMode &&
+      a.spreadMode === b.spreadMode
+    );
+  }
+  return false;
 }
 
-function fileValidationError(file: File): UiError | null {
-  if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
-    return { code: "INVALID_PDF_FILE" };
-  }
-  if (file.size === 0) return { code: "EMPTY_PDF_FILE" };
+function fileFormat(file: File): "pdf" | "epub" | null {
+  const name = file.name.toLowerCase();
+  if (file.type === "application/pdf" || name.endsWith(".pdf")) return "pdf";
+  if (file.type === "application/epub+zip" || name.endsWith(".epub")) return "epub";
   return null;
 }
 
+function fileValidationError(file: File): UiError | null {
+  const format = fileFormat(file);
+  if (!format) return { code: "INVALID_DOCUMENT_FILE" };
+  if (file.size === 0) return { code: "EMPTY_DOCUMENT_FILE" };
+  return null;
+}
+
+const EPUB_STYLE_DEBOUNCE_MS = 120;
+
+/** What the right pane shows for an EPUB: the screen page, a selection, or a range opened from the task list. */
+interface EpubTarget {
+  /** Spine index + 1; it only partitions translations and is not a page number. */
+  pageNumber: number;
+  unit: string;
+  sourceCfi: string;
+  epubPage?: { page: number; total: number };
+  /** Set for a range opened from the task list: the layout its neighbouring excerpts belong to. */
+  epubLayout?: EpubLayoutSnapshot;
+}
+
 function baseName(name: string): string {
-  return name.replace(/\.pdf$/i, "");
+  return name.replace(/\.(?:pdf|epub)$/i, "");
 }
 
 function copyName(name: string, suffix: string): string {
@@ -206,6 +273,7 @@ export function Reader() {
   const [page, setPage] = useState(1);
   const pageRef = useRef(1);
   const [pageCount, setPageCount] = useState(0);
+
   const [language, setLanguage] = useState<TargetLanguage>("zh-CN");
   const languageRef = useRef<TargetLanguage>("zh-CN");
 
@@ -215,6 +283,52 @@ export function Reader() {
   const viewerReadyRef = useRef(false);
   const [viewerError, setViewerError] = useState<UiError | null>(null);
   const bridgeRef = useRef<ViewerBridge | null>(null);
+  const epubBridgeRef = useRef<EpubBridge | null>(null);
+  const [epubSelection, setEpubSelection] = useState<EpubSelection | null>(null);
+  const epubSelectionRef = useRef<EpubSelection | null>(null);
+  const [epubToc, setEpubToc] = useState<readonly EpubTocEntry[]>([]);
+  const [epubLocation, setEpubLocation] = useState<EpubRelocation | null>(null);
+  const epubLocationRef = useRef<EpubRelocation | null>(null);
+  // A range opened from the task list stays shown until the reader turns the page or selects text.
+  const [epubPinned, setEpubPinned] = useState<EpubTarget | null>(null);
+  const [epubFixedLayout, setEpubFixedLayout] = useState(false);
+  const [epubStyle, setEpubStyle] = useState<EpubReaderStyle>(() =>
+    epubStyleOf(DEFAULT_EPUB_READER_VIEW),
+  );
+  const epubStyleRef = useRef<EpubReaderStyle>(epubStyle);
+  const epubStyleTimerRef = useRef<number | null>(null);
+  const epubStyleInflightRef = useRef(0);
+  const [epubStyleBusy, setEpubStyleBusy] = useState(false);
+  const [epubTocOpen, setEpubTocOpen] = useState(false);
+  const epubTocButtonRef = useRef<HTMLButtonElement | null>(null);
+  const [epubActionError, setEpubActionError] = useState<UiError | null>(null);
+  // Counts our own display/select/setView calls so their relocations do not clear a selection.
+  const epubInternalNavRef = useRef(0);
+  const [epubBatch, setEpubBatch] = useState<EpubBatchState>(IDLE_EPUB_BATCH);
+  const epubBatchControllerRef = useRef<AbortController | null>(null);
+  const isEpubDocument = currentDocument?.format === "epub";
+  const epubTarget = useMemo<EpubTarget | null>(() => {
+    if (!isEpubDocument) return null;
+    if (epubPinned) return epubPinned;
+    if (epubSelection) {
+      return {
+        pageNumber: epubSelection.sectionIndex + 1,
+        unit: epubSelection.unit,
+        sourceCfi: epubSelection.sourceCfi,
+      };
+    }
+    if (epubLocation?.sourceCfi && epubLocation.unit) {
+      return {
+        pageNumber: epubLocation.sectionIndex + 1,
+        unit: epubLocation.unit,
+        sourceCfi: epubLocation.sourceCfi,
+        epubPage: { page: epubLocation.page, total: epubLocation.total },
+      };
+    }
+    return null;
+  }, [isEpubDocument, epubPinned, epubSelection, epubLocation]);
+  const currentUnit = epubTarget?.unit ?? "";
+  const currentSourceCfi = epubTarget?.sourceCfi;
   const pendingRef = useRef<PendingLoad | null>(null);
   const openAttemptRef = useRef(0);
   const watchCleanupRef = useRef<(() => void) | null>(null);
@@ -246,13 +360,196 @@ export function Reader() {
   const saveChainRef = useRef<Promise<void>>(Promise.resolve());
   const pendingProgressRef = useRef<Map<string | null, ReaderUpdate>>(new Map());
   const progressDrainRef = useRef<Promise<void> | null>(null);
-  const initialViewRef = useRef<ReaderView>(DEFAULT_READER_VIEW);
+  const initialViewRef = useRef<ReaderView>(DEFAULT_PDF_READER_VIEW);
   const pendingViewsRef = useRef<Map<string, ReaderView>>(new Map());
   const failedViewsRef = useRef<Map<string, ReaderView>>(new Map());
   const savedViewsRef = useRef<Map<string, ReaderView>>(new Map());
   const deletedViewsRef = useRef<Set<string>>(new Set());
   const viewTouchedRef = useRef(false);
   const lastViewRef = useRef<ReaderView | null>(null);
+  const runEpubCommand = useCallback(
+    async (command: (bridge: EpubBridge) => Promise<void>): Promise<void> => {
+      const bridge = epubBridgeRef.current;
+      if (!bridge || !viewerReadyRef.current) return;
+      // The same bridge serves every EPUB: only the session tells this book's call from the next one's.
+      const sessionAtStart = sessionRef.current;
+      const live = (): boolean =>
+        epubBridgeRef.current === bridge && sessionRef.current === sessionAtStart;
+      try {
+        await command(bridge);
+        if (live()) setEpubActionError(null);
+      } catch (error) {
+        const failure = toUiError(error);
+        if (live() && failure.code !== "ABORTED") setEpubActionError(failure);
+      }
+    },
+    [],
+  );
+
+  const navigateEpub = useCallback(
+    (target: string | number) => {
+      viewTouchedRef.current = true;
+      setEpubPinned(null);
+      void runEpubCommand((bridge) => bridge.display(target));
+    },
+    [runEpubCommand],
+  );
+
+  const stepEpub = useCallback(
+    (direction: "next" | "prev") => {
+      viewTouchedRef.current = true;
+      setEpubPinned(null);
+      void runEpubCommand((bridge) =>
+        direction === "next" ? bridge.next() : bridge.prev(),
+      );
+    },
+    [runEpubCommand],
+  );
+
+  const clearEpubSelection = useCallback(() => {
+    epubSelectionRef.current = null;
+    setEpubSelection(null);
+    epubBridgeRef.current?.clearSelection();
+  }, []);
+
+  const resetEpubState = useCallback(() => {
+    epubSelectionRef.current = null;
+    setEpubSelection(null);
+    epubLocationRef.current = null;
+    setEpubLocation(null);
+    setEpubPinned(null);
+    setEpubToc([]);
+    setEpubFixedLayout(false);
+    setEpubTocOpen(false);
+    setEpubActionError(null);
+    epubInternalNavRef.current = 0;
+    if (epubStyleTimerRef.current !== null) {
+      window.clearTimeout(epubStyleTimerRef.current);
+      epubStyleTimerRef.current = null;
+    }
+    epubStyleInflightRef.current = 0;
+    setEpubStyleBusy(false);
+    const style = epubStyleOf(DEFAULT_EPUB_READER_VIEW);
+    epubStyleRef.current = style;
+    setEpubStyle(style);
+    epubBatchControllerRef.current?.abort();
+    epubBatchControllerRef.current = null;
+    setEpubBatch(IDLE_EPUB_BATCH);
+  }, []);
+
+  // The layout neighbouring excerpts are measured against; captured when a task is queued.
+  const captureEpubLayout = useCallback((): EpubLayoutSnapshot | null => {
+    const bridge = epubBridgeRef.current;
+    return bridge
+      ? {
+          width: bridge.viewport.width,
+          height: bridge.viewport.height,
+          style: epubStyleRef.current,
+        }
+      : null;
+  }, []);
+
+  // An unusable saved position falls back to the saved section and says so; it never silently opens the first page.
+  const showEpubPosition = useCallback(
+    async (
+      bridge: EpubBridge,
+      cfi: string | null,
+      section: number,
+    ): Promise<void> => {
+      if (cfi) {
+        try {
+          await bridge.display(cfi);
+          return;
+        } catch (error) {
+          if (toUiError(error).code !== "EPUB_NAVIGATION_FAILED") throw error;
+          setViewRestoreFailed(true);
+        }
+      }
+      await bridge.display(section - 1);
+    },
+    [],
+  );
+
+  // Applies a stored EPUB view again: the settings first, then the position.
+  const restoreEpubView = useCallback(
+    async (
+      bridge: EpubBridge,
+      view: EpubReaderView,
+      sessionAtStart: number,
+    ): Promise<void> => {
+      const style = epubStyleOf(view);
+      epubStyleRef.current = style;
+      setEpubStyle(style);
+      try {
+        await bridge.setView(view);
+        if (view.cfi) await bridge.display(view.cfi);
+      } catch {
+        if (
+          sessionAtStart === sessionRef.current &&
+          epubBridgeRef.current === bridge
+        ) {
+          setViewRestoreFailed(true);
+        }
+      }
+    },
+    [],
+  );
+
+  // Setting changes apply together after a short pause, so dragging through sizes lays out once.
+  const changeEpubStyle = useCallback(
+    (patch: Partial<EpubReaderStyle>) => {
+      const bridge = epubBridgeRef.current;
+      if (!bridge || !viewerReadyRef.current) return;
+      const sessionAtStart = sessionRef.current;
+      const live = (): boolean =>
+        epubBridgeRef.current === bridge && sessionRef.current === sessionAtStart;
+      epubStyleRef.current = { ...epubStyleRef.current, ...patch };
+      setEpubStyle(epubStyleRef.current);
+      setEpubStyleBusy(true);
+      viewTouchedRef.current = true;
+      if (epubStyleTimerRef.current !== null) {
+        window.clearTimeout(epubStyleTimerRef.current);
+      }
+      epubStyleTimerRef.current = window.setTimeout(async () => {
+        epubStyleTimerRef.current = null;
+        if (!live()) return;
+        epubStyleInflightRef.current += 1;
+        epubInternalNavRef.current += 1;
+        try {
+          await bridge.setView({
+            format: "epub",
+            cfi: null,
+            ...epubStyleRef.current,
+          });
+          if (live()) setEpubActionError(null);
+        } catch (error) {
+          const failure = toUiError(error);
+          if (live() && failure.code !== "ABORTED") {
+            setEpubActionError(failure);
+          }
+        } finally {
+          // A later session's counters start at zero; this call only ever counted into its own.
+          if (live()) {
+            epubInternalNavRef.current -= 1;
+            epubStyleInflightRef.current -= 1;
+            if (
+              epubStyleInflightRef.current === 0 &&
+              epubStyleTimerRef.current === null
+            ) {
+              setEpubStyleBusy(false);
+            }
+          }
+        }
+      }, EPUB_STYLE_DEBOUNCE_MS);
+    },
+    [],
+  );
+
+  const resetEpubStyle = useCallback(
+    () => changeEpubStyle(epubStyleOf(DEFAULT_EPUB_READER_VIEW)),
+    [changeEpubStyle],
+  );
+
   const viewTimerRef = useRef<number | null>(null);
   const viewDrainRef = useRef<Promise<void> | null>(null);
   const workspaceRef = useRef<HTMLElement | null>(null);
@@ -277,10 +574,62 @@ export function Reader() {
     outlineRef.current = outline;
   }, [outline]);
 
+  // The original files of one EPUB range's images; a PDF has none. Only the open book can answer.
+  const assetsForSource = useCallback(
+    async (
+      documentId: string,
+      sourceCfi: string | undefined,
+      signal: AbortSignal,
+    ): Promise<readonly TypstAsset[]> => {
+      signal.throwIfAborted();
+      if (!sourceCfi) return [];
+      const bridge = epubBridgeRef.current;
+      const current = currentDocumentRef.current;
+      if (!bridge || current?.format !== "epub") {
+        throw new PagePreparationError("EPUB_NOT_READY", "the EPUB is not open");
+      }
+      if (current.id !== documentId) {
+        throw new PagePreparationError("DOCUMENT_CHANGED", "the document changed");
+      }
+      return bridge.assets(sourceCfi, signal);
+    },
+    [],
+  );
+
   const queueRef = useRef<TranslationQueue | null>(null);
   if (!queueRef.current) {
     queueRef.current = new TranslationQueue({
       prepare: async (task, signal) => {
+        const current = currentDocumentRef.current;
+        if (current?.format === "epub") {
+          const epub = epubBridgeRef.current;
+          if (!epub) {
+            throw new PagePreparationError("EPUB_NOT_READY", "the EPUB is not open");
+          }
+          if (current.id !== task.documentId) {
+            throw new PagePreparationError("DOCUMENT_CHANGED", "the document changed");
+          }
+          if (!task.sourceCfi || !task.unit) {
+            throw new PagePreparationError(
+              "EPUB_PAGE_UNAVAILABLE",
+              "the task has no page range",
+            );
+          }
+          // Only a whole page gets neighbouring excerpts; a selection is sent alone.
+          const wholePage = isEpubPageUnit(task.unit);
+          if (wholePage && !task.epubLayout) {
+            throw new PagePreparationError(
+              "EPUB_PAGE_UNAVAILABLE",
+              "the page layout was not captured",
+            );
+          }
+          const prepared = await epub.prepare(
+            task.sourceCfi,
+            wholePage ? (task.epubLayout ?? null) : null,
+            signal,
+          );
+          return { format: "epub" as const, ...prepared };
+        }
         const bridge = bridgeRef.current;
         if (!bridge) {
           throw new PagePreparationError("PDF_NOT_READY", "PDF is not open");
@@ -288,44 +637,40 @@ export function Reader() {
         if (previewOnlyRef.current) {
           throw new PagePreparationError("PDF_NOT_SAVED", "the PDF is not in the library yet");
         }
-        const document = currentDocumentRef.current;
-        if (!document || document.id !== task.documentId) {
+        if (!current || current.id !== task.documentId) {
           throw new PagePreparationError("DOCUMENT_CHANGED", "the document changed");
         }
-        const pageProxy = await bridge.getPage(task.pageNumber);
-        try {
-          return await preparePageForTranslation(
-            pageProxy,
-            bridge.document,
-            signal,
-          );
-        } finally {
-          if (task.pageNumber !== bridge.page) pageProxy.cleanup();
-        }
+        return preparePdfTranslationPage(bridge, task.pageNumber, signal);
       },
       translate: (task, prepared, signal, hooks) =>
-        requestTranslation(
-          {
-            documentId: task.documentId,
-            pageNumber: task.pageNumber,
-            targetLanguage: task.targetLanguage,
-            text: prepared.text,
-            imageBase64: prepared.imageBase64,
-            force: task.force,
-          },
-          {
-            signal,
-            onDelta: (chunk) => hooks.onDelta(chunk.contentIndex, chunk.text),
-            onSaving: hooks.onSaving,
-          },
-        ),
-      save: async (task, draft, signal) =>
+        requestTranslation(generationRequest(task, prepared), {
+          signal,
+          onDelta: (chunk) => hooks.onDelta(chunk.contentIndex, chunk.text),
+          onRepair: hooks.onRepair,
+        }),
+      repair: (task, repair, signal, hooks) =>
+        requestTranslation(repairRequest(task, repair), {
+          signal,
+          onDelta: (chunk) => hooks.onDelta(chunk.contentIndex, chunk.text),
+          onRepair: hooks.onRepair,
+        }),
+      validate: async (task, draft, signal) => {
+        const assets = await assetsForSource(
+          task.documentId,
+          task.sourceCfi,
+          signal,
+        );
+        await compileTypst(draft.typst, assets, signal);
+      },
+      save: (task, draft, signal) =>
         saveTranslationRecord(
           task.documentId,
           task.pageNumber,
           task.targetLanguage,
           draft,
           signal,
+          task.unit,
+          task.sourceCfi,
         ),
     });
   }
@@ -336,6 +681,7 @@ export function Reader() {
 
   useEffect(() => {
     setSelection(new Set());
+    resetEpubState();
     const nextOutline = emptyOutlineState();
     outlineRef.current = nextOutline;
     setOutline(nextOutline);
@@ -343,12 +689,14 @@ export function Reader() {
     outlineAttemptRef.current += 1;
     outlineControllerRef.current?.abort();
     outlineControllerRef.current = null;
-  }, [session]);
+  }, [session, resetEpubState]);
 
   const tasks = useMemo(() => queue.getTasks(), [queue, queueVersion]);
-  const currentKey = currentDocument
-    ? translationKey(currentDocument.id, page, language)
-    : "";
+  const targetPage = epubTarget?.pageNumber ?? page;
+  const currentKey =
+    currentDocument && (!isEpubDocument || epubTarget)
+      ? translationKey(currentDocument.id, targetPage, language, currentUnit)
+      : "";
   const currentTask = tasks.find((task) => task.key === currentKey);
   const storedState =
     currentDocument && stored.key === currentKey
@@ -386,8 +734,8 @@ export function Reader() {
       if (
         task.stage === "saved" &&
         task.key !== currentKey &&
-        task.saved?.markdown &&
-        task.saved.markdown.length > 0
+        task.saved?.typst &&
+        task.saved.typst.length > 0
       ) {
         queue.releaseSavedText(task.key);
       }
@@ -409,6 +757,8 @@ export function Reader() {
     const previousId = currentDocumentRef.current?.id ?? null;
     const nextId = document?.id ?? null;
     if (previousId !== nextId) {
+      // The old book's events and replies stop counting now, not only once the next one opens.
+      epubBridgeRef.current?.invalidate();
       setSelection(new Set());
       const nextOutline = emptyOutlineState();
       outlineRef.current = nextOutline;
@@ -497,25 +847,42 @@ export function Reader() {
     void drainViewSaves();
   }, [drainViewSaves]);
 
-  const commitCurrentView = useCallback(async (): Promise<boolean> => {
+  const currentViewSnapshot = useCallback((): ReaderView | null => {
+    if (!viewerReadyRef.current) return null;
+    if (currentDocumentRef.current?.format === "epub") {
+      // Until a page is located there is no position to store; never overwrite one with none.
+      const location = epubLocationRef.current;
+      return location
+        ? { format: "epub", cfi: location.startCfi, ...epubStyleRef.current }
+        : null;
+    }
     const bridge = bridgeRef.current;
+    if (!bridge) return null;
+    try {
+      return bridge.getView();
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const commitCurrentView = useCallback(async (): Promise<boolean> => {
     const document = currentDocumentRef.current;
-    if (bridge && document && viewerReadyRef.current) {
-      try {
-        const view = bridge.getView();
-        const saved = savedViewsRef.current.get(document.id);
-        if (!saved || !sameReaderView(saved, view)) {
-          pendingViewsRef.current.set(document.id, view);
-        }
-      } catch {
-        // The viewer is between documents; the queued snapshot is authoritative.
+    const view = currentViewSnapshot();
+    if (document && view) {
+      const saved = savedViewsRef.current.get(document.id);
+      if (!saved || !sameReaderView(saved, view)) {
+        pendingViewsRef.current.set(document.id, view);
       }
     }
     return flushViewSaves();
-  }, [flushViewSaves]);
+  }, [currentViewSnapshot, flushViewSaves]);
 
   const resolveInitialView = useCallback(
-    async (documentId: string, sessionAtStart: number): Promise<ReaderView> => {
+    async (
+      documentId: string,
+      sessionAtStart: number,
+      fallback: ReaderView = DEFAULT_PDF_READER_VIEW,
+    ): Promise<ReaderView> => {
       const cached =
         pendingViewsRef.current.get(documentId) ??
         savedViewsRef.current.get(documentId);
@@ -524,17 +891,17 @@ export function Reader() {
         const result = await apiJson<{ view: ReaderView | null }>(
           `/api/documents/${documentId}/view`,
         );
-        if (sessionAtStart !== sessionRef.current) return DEFAULT_READER_VIEW;
+        if (sessionAtStart !== sessionRef.current) return fallback;
         const stored = result.view
           ? readerViewSchema.safeParse(result.view)
           : null;
         setViewRestoreFailed(false);
-        if (!stored?.success) return DEFAULT_READER_VIEW;
+        if (!stored?.success) return fallback;
         savedViewsRef.current.set(documentId, stored.data);
         return stored.data;
       } catch {
         if (sessionAtStart === sessionRef.current) setViewRestoreFailed(true);
-        return DEFAULT_READER_VIEW;
+        return fallback;
       }
     },
     [],
@@ -567,8 +934,7 @@ export function Reader() {
 
   const retryViewRestore = useCallback(async () => {
     const document = currentDocumentRef.current;
-    const bridge = bridgeRef.current;
-    if (!document || !bridge || !viewerReadyRef.current) return;
+    if (!document || !viewerReadyRef.current) return;
     const sessionAtStart = sessionRef.current;
     try {
       const result = await apiJson<{ view: ReaderView | null }>(
@@ -582,33 +948,34 @@ export function Reader() {
       if (!stored?.success) return;
       savedViewsRef.current.set(document.id, stored.data);
       if (viewTouchedRef.current) {
-        try {
-          pendingViewsRef.current.set(document.id, bridge.getView());
+        const view = currentViewSnapshot();
+        if (view) {
+          pendingViewsRef.current.set(document.id, view);
           void drainViewSaves();
-        } catch {
-          // The viewer is between documents; the next change records it.
         }
         return;
       }
       initialViewRef.current = stored.data;
       lastViewRef.current = stored.data;
-      bridge.restoreView(stored.data);
+      if (stored.data.format === "epub") {
+        const bridge = epubBridgeRef.current;
+        if (!bridge) return;
+        await restoreEpubView(bridge, stored.data, sessionAtStart);
+      } else {
+        bridgeRef.current?.restoreView(stored.data);
+      }
     } catch {
       if (sessionAtStart === sessionRef.current) setViewRestoreFailed(true);
     }
-  }, [drainViewSaves]);
+  }, [currentViewSnapshot, drainViewSaves, restoreEpubView]);
 
   const captureCurrentView = useCallback((documentId: string): boolean => {
-    const bridge = bridgeRef.current;
-    if (!bridge || !viewerReadyRef.current) return false;
-    try {
-      pendingViewsRef.current.set(documentId, bridge.getView());
-      failedViewsRef.current.delete(documentId);
-      return true;
-    } catch {
-      return false;
-    }
-  }, []);
+    const view = currentViewSnapshot();
+    if (!view) return false;
+    pendingViewsRef.current.set(documentId, view);
+    failedViewsRef.current.delete(documentId);
+    return true;
+  }, [currentViewSnapshot]);
 
   const showReader = useCallback(() => {
     libraryRefreshRef.current?.abort();
@@ -633,7 +1000,8 @@ export function Reader() {
     libraryRefreshRef.current?.abort();
     const controller = new AbortController();
     libraryRefreshRef.current = controller;
-    const attempt = openAttemptRef.current;
+    // Going to the Library cancels a book still being opened or uploaded: it joins the list but does not pull the user away.
+    const attempt = ++openAttemptRef.current;
     void (async () => {
       try {
         await saveChainRef.current;
@@ -738,26 +1106,33 @@ export function Reader() {
   }, [token]);
 
   useEffect(() => {
-    if (!currentDocument) {
+    if (!currentDocument || !currentKey) {
       setStored({ key: "", status: "idle" });
       return;
     }
-    const key = translationKey(currentDocument.id, page, language);
     const controller = new AbortController();
     setStored((previous) =>
-      previous.key === key ? previous : { key, status: "loading" },
+      previous.key === currentKey
+        ? previous
+        : { key: currentKey, status: "loading" },
     );
-    fetchTranslation(currentDocument.id, page, language, controller.signal)
+    fetchTranslation(
+      currentDocument.id,
+      targetPage,
+      language,
+      controller.signal,
+      currentUnit || undefined,
+    )
       .then((record) => {
         if (controller.signal.aborted) return;
-        setStored({ key, status: "ready", record });
+        setStored({ key: currentKey, status: "ready", record });
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
-        setStored({ key, status: "error", message: toUiError(error) });
+        setStored({ key: currentKey, status: "error", message: toUiError(error) });
       });
     return () => controller.abort();
-  }, [currentDocument, page, language, storedReload]);
+  }, [currentDocument?.id, currentKey, targetPage, language, currentUnit, storedReload]);
 
   const ask = useCallback((options: AskOptions): Promise<boolean> => {
     const { promise, resolve } = Promise.withResolvers<boolean>();
@@ -912,7 +1287,7 @@ export function Reader() {
       tasks.some(
         (task) =>
           task.documentId === document.id &&
-          ["queued", "preparing", "generating", "saving"].includes(task.stage),
+          isActiveStage(task.stage),
       )
     ) {
       return;
@@ -1184,16 +1559,23 @@ export function Reader() {
     (pageNumber: number) => {
       const document = currentDocumentRef.current;
       if (!document) return;
-      const total = bridgeRef.current?.pageCount ?? pageCount;
+      const total =
+        document.format === "epub"
+          ? pageCount
+          : bridgeRef.current?.pageCount ?? pageCount;
       const target = total > 0 ? clamp(pageNumber, 1, total) : pageNumber;
-      if (bridgeRef.current && viewerReadyRef.current) {
-        bridgeRef.current.setPage(target);
+      if (document.format === "epub") {
+        navigateEpub(target - 1);
+      } else {
+        if (bridgeRef.current && viewerReadyRef.current) {
+          bridgeRef.current.setPage(target);
+        }
+        setPageValue(target);
+        saveProgress(document.id, target, languageRef.current);
       }
-      setPageValue(target);
       if (narrow) setNarrowTab("pdf");
-      saveProgress(document.id, target, languageRef.current);
     },
-    [narrow, pageCount, saveProgress, setPageValue],
+    [narrow, navigateEpub, pageCount, saveProgress, setPageValue],
   );
 
   const currentHasWork = useCallback(
@@ -1202,10 +1584,8 @@ export function Reader() {
         (task) => documentId === null || task.documentId === documentId,
       );
       return {
-        active: relevant.some((task) =>
-          ["queued", "preparing", "generating", "saving"].includes(task.stage),
-        ),
-        drafts: relevant.filter((task) => task.stage === "unsaved"),
+        active: relevant.some((task) => isActiveStage(task.stage)),
+        drafts: relevant.filter((task) => hasRetainedDraft(task)),
       };
     },
     [tasks],
@@ -1240,12 +1620,14 @@ export function Reader() {
       body: t.confirm.switchBody(reasons.join(t.common.listSeparator)),
       confirmLabel: t.confirm.switchConfirm,
       extraLabel: drafts.length > 0 ? t.confirm.exportDrafts : undefined,
-      onExtra: () => exportDraftMarkdown(),
+      onExtra: () => exportDraftTypst(),
     });
   }, [ask, currentHasWork, modified, outline.stage, previewOnly, t]);
 
   const stopCurrentWork = useCallback(() => {
     queue.cancelAll();
+    epubBatchControllerRef.current?.abort();
+    epubBatchControllerRef.current = null;
     abortOutlineWork();
     watchCleanupRef.current?.();
     watchCleanupRef.current = null;
@@ -1258,11 +1640,15 @@ export function Reader() {
         const clamped = clamp(targetPage, 1, document.pageCount);
         if (
           currentDocumentRef.current?.id === document.id &&
-          bridgeRef.current &&
-          viewerReadyRef.current
+          viewerReadyRef.current &&
+          (document.format === "epub"
+            ? epubBridgeRef.current
+            : bridgeRef.current)
         ) {
           const current = pageRef.current;
-          if (bridgeRef.current.page !== current) bridgeRef.current.setPage(current);
+          if (document.format !== "epub" && bridgeRef.current?.page !== current) {
+            bridgeRef.current?.setPage(current);
+          }
           setPageValue(current);
           saveProgress(document.id, current, languageRef.current);
           showReader();
@@ -1279,7 +1665,10 @@ export function Reader() {
         const pending = pendingRef.current;
         if (pending?.kind === "preview") URL.revokeObjectURL(pending.blobUrl);
 
-        initialViewRef.current = DEFAULT_READER_VIEW;
+        initialViewRef.current =
+          document.format === "epub"
+            ? DEFAULT_EPUB_READER_VIEW
+            : DEFAULT_PDF_READER_VIEW;
         lastViewRef.current = null;
         viewTouchedRef.current = false;
         setViewRestoreFailed(false);
@@ -1287,6 +1676,7 @@ export function Reader() {
         setNarrowTab("pdf");
         setPageValue(clamped);
         setPageCount(document.pageCount);
+        resetEpubState();
         setPreviewOnly(false);
         previewOnlyRef.current = false;
         setModified(false);
@@ -1302,7 +1692,7 @@ export function Reader() {
       };
       void run();
     },
-    [commitCurrentView, confirmSwitch, saveProgress, selectDocument, setPageCount, setPageValue, showReader, stopCurrentWork],
+    [commitCurrentView, confirmSwitch, resetEpubState, saveProgress, selectDocument, setPageCount, setPageValue, showReader, stopCurrentWork],
   );
 
   const openPreview = useCallback(
@@ -1325,7 +1715,7 @@ export function Reader() {
       const previous = pendingRef.current;
       if (previous?.kind === "preview") URL.revokeObjectURL(previous.blobUrl);
 
-      initialViewRef.current = DEFAULT_READER_VIEW;
+      initialViewRef.current = DEFAULT_PDF_READER_VIEW;
       lastViewRef.current = null;
       viewTouchedRef.current = false;
       setViewRestoreFailed(false);
@@ -1349,6 +1739,66 @@ export function Reader() {
     [commitCurrentView, confirmSwitch, selectDocument, setPageCount, setPageValue, showReader, stopCurrentWork],
   );
 
+  const importEpub = useCallback(
+    async (file: File) => {
+      const validation = fileValidationError(file);
+      if (validation) {
+        setImportError(validation);
+        return;
+      }
+      const attempt = ++openAttemptRef.current;
+      const confirmed = await confirmSwitch();
+      if (!confirmed) return;
+      if (attempt !== openAttemptRef.current) return;
+      await commitCurrentView();
+      if (attempt !== openAttemptRef.current) return;
+      setImportError(null);
+      setPreviewUploadCount((count) => count + 1);
+      try {
+        const query = new URLSearchParams({
+          name: file.name,
+          format: "epub",
+        });
+        const record = await apiJson<DocumentRecord>(`/api/documents?${query}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/epub+zip" },
+          body: file,
+        });
+        // The book is stored whatever the user did meanwhile; only an untouched session opens it.
+        libraryRefreshRef.current?.abort();
+        libraryRefreshRef.current = null;
+        setLibrary((previous) =>
+          previous
+            ? {
+                ...previous,
+                documents: [
+                  record,
+                  ...previous.documents.filter((item) => item.id !== record.id),
+                ],
+              }
+            : previous,
+        );
+        if (attempt === openAttemptRef.current) openDocument(record, 1);
+      } catch (error) {
+        if (attempt === openAttemptRef.current) setImportError(toUiError(error));
+      } finally {
+        setPreviewUploadCount((count) => count - 1);
+      }
+    },
+    [commitCurrentView, confirmSwitch, openDocument],
+  );
+
+  const openFile = useCallback(
+    (file: File) => {
+      if (fileFormat(file) === "epub") {
+        void importEpub(file);
+      } else {
+        void openPreview(file);
+      }
+    },
+    [importEpub, openPreview],
+  );
+
   const loadPendingIntoViewer = useCallback(
     async (bridge: ViewerBridge) => {
       const pending = pendingRef.current;
@@ -1359,6 +1809,7 @@ export function Reader() {
           const view = await resolveInitialView(
             pending.document.id,
             sessionAtStart,
+            DEFAULT_PDF_READER_VIEW,
           );
           if (
             pendingRef.current !== pending ||
@@ -1373,7 +1824,7 @@ export function Reader() {
             token ?? "",
           );
         } else {
-          initialViewRef.current = DEFAULT_READER_VIEW;
+          initialViewRef.current = DEFAULT_PDF_READER_VIEW;
           const blobUrl = pending.blobUrl;
           try {
             await bridge.openBlobUrl(blobUrl);
@@ -1400,6 +1851,7 @@ export function Reader() {
         const query = new URLSearchParams({
           name: pending.file.name,
           pageCount: String(bridge.pageCount),
+          format: "pdf",
         });
         const record = await apiJson<DocumentRecord>(`/api/documents?${query}`, {
           method: "POST",
@@ -1430,7 +1882,11 @@ export function Reader() {
           scheduleViewSave();
           return;
         }
-        const stored = await resolveInitialView(record.id, sessionAtStart);
+        const stored = await resolveInitialView(
+          record.id,
+          sessionAtStart,
+          DEFAULT_PDF_READER_VIEW,
+        );
         if (sessionAtStart !== sessionRef.current) return;
         if (viewTouchedRef.current) {
           if (captureCurrentView(record.id)) scheduleViewSave();
@@ -1533,9 +1989,134 @@ export function Reader() {
     ],
   );
 
+  const handleViewerError = useCallback((error: UiError) => {
+    setViewerError(error);
+    viewerReadyRef.current = false;
+    setViewerReady(false);
+  }, []);
+
+  const handleEpubBridge = useCallback((bridge: EpubBridge | null) => {
+    epubBridgeRef.current = bridge;
+  }, []);
+
+  const handleEpubReady = useCallback(
+    async (info: EpubReadyInfo) => {
+      const document = currentDocumentRef.current;
+      const bridge = epubBridgeRef.current;
+      if (!document || document.format !== "epub" || !bridge) return;
+      const sessionAtStart = sessionRef.current;
+      const stillOpen = (): boolean =>
+        sessionAtStart === sessionRef.current &&
+        epubBridgeRef.current === bridge;
+      setPageCount(info.sectionCount);
+      setEpubToc(info.toc);
+      setEpubFixedLayout(info.fixedLayout);
+      setOutline({
+        entries: outlineFromEpubToc(info.toc, info.sectionCount),
+        source: "native",
+        loadStatus: "ready",
+        stage: "idle",
+        processedPages: 0,
+        skipped: 0,
+        error: null,
+      });
+      const view = await resolveInitialView(
+        document.id,
+        sessionAtStart,
+        DEFAULT_EPUB_READER_VIEW,
+      );
+      if (!stillOpen()) return;
+      const stored = view.format === "epub" ? view : DEFAULT_EPUB_READER_VIEW;
+      const pending = pendingRef.current;
+      const section = clamp(
+        pending?.kind === "library" ? pending.page : pageRef.current,
+        1,
+        info.sectionCount,
+      );
+      const style = epubStyleOf(stored);
+      epubStyleRef.current = style;
+      setEpubStyle(style);
+      initialViewRef.current = stored;
+      lastViewRef.current = stored;
+      try {
+        // The settings go in before the first layout, so the book is paginated once.
+        await bridge.setView(stored);
+        await showEpubPosition(bridge, stored.cfi, section);
+      } catch (error) {
+        if (stillOpen()) handleViewerError(toUiError(error));
+        return;
+      }
+      if (!stillOpen()) return;
+      const opened = epubLocationRef.current
+        ? epubLocationRef.current.sectionIndex + 1
+        : section;
+      setPageValue(opened);
+      viewTouchedRef.current = false;
+      viewerReadyRef.current = true;
+      setViewerReady(true);
+      setViewerError(null);
+      if (pending?.kind === "library") {
+        pendingRef.current = null;
+        selectDocument({
+          ...document,
+          pageCount: info.sectionCount,
+          currentPage: opened,
+        });
+      }
+      saveProgress(document.id, opened, languageRef.current);
+    },
+    [
+      handleViewerError,
+      resolveInitialView,
+      saveProgress,
+      selectDocument,
+      setPageValue,
+      showEpubPosition,
+    ],
+  );
+
+  const handleEpubRelocated = useCallback(
+    (info: EpubRelocation) => {
+      const sectionChanged = pageRef.current !== info.sectionIndex + 1;
+      epubLocationRef.current = info;
+      setEpubLocation(info);
+      setPageValue(info.sectionIndex + 1);
+      if (!viewerReadyRef.current) return;
+      // The page on screen is now the pinned range: nothing is left to pin.
+      setEpubPinned((current) =>
+        current && current.unit === info.unit ? null : current,
+      );
+      if (epubInternalNavRef.current === 0 && epubSelectionRef.current) {
+        clearEpubSelection();
+      }
+      const view = currentViewSnapshot();
+      if (view) handleViewChange(view);
+      const document = currentDocumentRef.current;
+      if (sectionChanged && document?.format === "epub") {
+        saveProgress(document.id, info.sectionIndex + 1, languageRef.current);
+      }
+    },
+    [
+      clearEpubSelection,
+      currentViewSnapshot,
+      handleViewChange,
+      saveProgress,
+      setPageValue,
+    ],
+  );
+
+  const handleEpubSelection = useCallback(
+    (selection: EpubSelection | null) => {
+      epubSelectionRef.current = selection;
+      setEpubSelection(selection);
+      if (selection) setEpubPinned(null);
+    },
+    [],
+  );
+
   useEffect(() => {
     if (pageBodyRef.current) pageBodyRef.current.scrollTop = 0;
-  }, [page, language, currentDocument?.id]);
+  }, [currentKey]);
 
   const handlePageChange = useCallback(
     (nextPage: number) => {
@@ -1568,22 +2149,20 @@ export function Reader() {
     [saveProgress],
   );
 
-  const handleViewerError = useCallback((error: UiError) => {
-    setViewerError(error);
-    viewerReadyRef.current = false;
-    setViewerReady(false);
-  }, []);
-
   const translateCurrent = useCallback(
     async (force: boolean) => {
       const document = currentDocumentRef.current;
-      if (!document || modified || previewOnlyRef.current) return;
+      if (!document || !currentKey || modified || previewOnlyRef.current) return;
       if (
         outlineRef.current.stage === "generating" ||
         outlineRef.current.stage === "saving"
       ) {
         return;
       }
+      // Reading settings are still being applied: the page on screen is about to change.
+      if (document.format === "epub" && (!epubTarget || epubStyleBusy)) return;
+      const existing = queue.getTask(currentKey);
+      if (existing && hasRetainedDraft(existing)) return;
       if (force) {
         const confirmed = await ask({
           title: t.confirm.retranslateTitle,
@@ -1592,131 +2171,440 @@ export function Reader() {
         });
         if (!confirmed) return;
       }
+      // Neighbouring excerpts are measured with the layout the page was read in.
+      const epubLayout =
+        epubTarget && isEpubPageUnit(epubTarget.unit)
+          ? (epubTarget.epubLayout ?? captureEpubLayout())
+          : null;
       const request = queue.enqueue({
         documentId: document.id,
-        pageNumber: pageRef.current,
+        pageNumber: epubTarget?.pageNumber ?? pageRef.current,
         targetLanguage: languageRef.current,
+        ...(currentUnit ? { unit: currentUnit } : {}),
+        ...(epubTarget
+          ? {
+              sourceCfi: epubTarget.sourceCfi,
+              ...(epubLayout ? { epubLayout } : {}),
+              ...(epubTarget.epubPage ? { epubPage: epubTarget.epubPage } : {}),
+            }
+          : {}),
         force,
         priority: "user",
       });
       if (request.stage === "queued" && queue.halt) queue.resume();
       if (narrow) setNarrowTab("translation");
     },
-    [ask, modified, narrow, queue, t],
+    [
+      ask,
+      captureEpubLayout,
+      currentKey,
+      currentUnit,
+      epubStyleBusy,
+      epubTarget,
+      modified,
+      narrow,
+      queue,
+      t,
+    ],
   );
 
-  const markdownForCurrentPage = useCallback((): string | null => {
+  const savedRecord =
+    currentTask?.saved?.typst
+      ? currentTask.saved
+      : storedState.record ?? null;
+  const canRegenerate = Boolean(currentTask?.saved || storedState.record);
+
+  const loadDisplayedAssets = useCallback(
+    (signal: AbortSignal) =>
+      assetsForSource(currentDocument?.id ?? "", currentSourceCfi, signal),
+    [assetsForSource, currentDocument?.id, currentSourceCfi],
+  );
+
+  const editCurrentSource = useCallback(
+    (typst: string) => {
+      const document = currentDocumentRef.current;
+      if (!document) return;
+      const base = currentTask?.draft ?? savedRecord ?? storedState.record;
+      if (!base) return;
+      const content: TranslationContent = {
+        typst,
+        provider: base.provider,
+        model: base.model,
+      };
+      queue.edit({
+        documentId: document.id,
+        pageNumber: targetPage,
+        targetLanguage: languageRef.current,
+        ...(currentUnit ? { unit: currentUnit } : {}),
+        ...(epubTarget
+          ? {
+              sourceCfi: epubTarget.sourceCfi,
+              ...(epubTarget.epubPage ? { epubPage: epubTarget.epubPage } : {}),
+            }
+          : {}),
+        content,
+        saved: savedRecord ?? undefined,
+      });
+    },
+    [
+      currentTask,
+      currentUnit,
+      epubTarget,
+      queue,
+      savedRecord,
+      storedState.record,
+      targetPage,
+    ],
+  );
+
+  const saveCurrentDraft = useCallback(() => {
+    if (currentKey) queue.retry(currentKey);
+  }, [currentKey, queue]);
+
+  const discardCurrentDraft = useCallback(async () => {
+    if (!currentKey) return;
+    const confirmed = await ask({
+      title: t.confirm.discardDraftTitle,
+      body: t.confirm.discardDraftBody,
+      confirmLabel: t.confirm.discardDraftConfirm,
+    });
+    if (confirmed) queue.discard(currentKey);
+  }, [ask, currentKey, queue, t]);
+
+  // Splits the chosen sections into screen pages at the frozen layout and queues them as they are found.
+  const startEpubBatch = useCallback(
+    async (options: {
+      sections: readonly number[];
+      retranslate: boolean;
+      saved: ReadonlySet<string>;
+    }): Promise<void> => {
+      const document = currentDocumentRef.current;
+      const bridge = epubBridgeRef.current;
+      const layout = captureEpubLayout();
+      if (
+        !document ||
+        document.format !== "epub" ||
+        !bridge ||
+        !layout ||
+        !viewerReadyRef.current ||
+        epubBatchControllerRef.current
+      ) {
+        return;
+      }
+      const language = languageRef.current;
+      const controller = new AbortController();
+      epubBatchControllerRef.current = controller;
+      queue.resume();
+      let found = 0;
+      let queued = 0;
+      setEpubBatch({ ...IDLE_EPUB_BATCH, status: "running" });
+      try {
+        const result = await runEpubBatch({
+          bridge,
+          layout,
+          sectionIndexes: options.sections.map((section) => section - 1),
+          documentId: document.id,
+          language,
+          retranslate: options.retranslate,
+          saved: options.saved,
+          isBusy: (pageNumber, unit) =>
+            isOpenTask(
+              queue.getTask(translationKey(document.id, pageNumber, language, unit)),
+            ),
+          confirmRetranslate: (count) =>
+            ask({
+              title: t.confirm.retranslateSavedTitle,
+              body: t.confirm.retranslateSavedBody(count),
+              confirmLabel: t.confirm.retranslateSavedConfirm,
+            }),
+          enqueue: (input) => {
+            queued += 1;
+            queue.enqueue(input);
+          },
+          onFound: (count) => {
+            found = count;
+            setEpubBatch({ status: "running", found, queued, error: null });
+          },
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) return;
+        setEpubBatch(
+          result
+            ? { status: "done", found: result.found, queued: result.queued, error: null }
+            : IDLE_EPUB_BATCH,
+        );
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        setEpubBatch({ status: "error", found, queued, error: toUiError(error) });
+      } finally {
+        if (epubBatchControllerRef.current === controller) {
+          epubBatchControllerRef.current = null;
+        }
+      }
+    },
+    [ask, captureEpubLayout, queue, t],
+  );
+
+  // Ticks every section that still has a screen page, at the current layout, without a saved translation.
+  const selectUntranslatedEpubSections = useCallback(
+    async (saved: ReadonlySet<string>): Promise<void> => {
+      const document = currentDocumentRef.current;
+      const bridge = epubBridgeRef.current;
+      const layout = captureEpubLayout();
+      if (
+        !document ||
+        document.format !== "epub" ||
+        !bridge ||
+        !layout ||
+        !viewerReadyRef.current ||
+        epubBatchControllerRef.current
+      ) {
+        return;
+      }
+      const controller = new AbortController();
+      epubBatchControllerRef.current = controller;
+      let found = 0;
+      setEpubBatch({ ...IDLE_EPUB_BATCH, status: "running" });
+      try {
+        const sections = await findUntranslatedEpubSections({
+          bridge,
+          layout,
+          sectionIndexes: Array.from({ length: pageCount }, (_, index) => index),
+          saved,
+          onFound: (count) => {
+            found = count;
+            setEpubBatch({ status: "running", found, queued: 0, error: null });
+          },
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) return;
+        setSelection(new Set(sections));
+        setEpubBatch(IDLE_EPUB_BATCH);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        setEpubBatch({ status: "error", found, queued: 0, error: toUiError(error) });
+      } finally {
+        if (epubBatchControllerRef.current === controller) {
+          epubBatchControllerRef.current = null;
+        }
+      }
+    },
+    [captureEpubLayout, pageCount],
+  );
+
+  const stopAllTranslation = useCallback(() => {
+    epubBatchControllerRef.current?.abort();
+    epubBatchControllerRef.current = null;
+    setEpubBatch((previous) =>
+      previous.status === "running" ? IDLE_EPUB_BATCH : previous,
+    );
+    queue.cancelAll();
+  }, [queue]);
+
+  const typstForCurrentPage = useCallback((): string | null => {
     if (!currentTask) {
-      return storedState.record ? storedState.record.markdown.trim() : null;
+      return storedState.record ? storedState.record.typst.trim() : null;
     }
-    if (currentTask.stage === "unsaved" && currentTask.draft) {
-      return currentTask.draft.markdown.trim();
+    if (hasRetainedDraft(currentTask)) {
+      return currentTask.draft.typst.trim();
     }
-    if (currentTask.saved?.markdown) {
-      return currentTask.saved.markdown.trim();
+    if (currentTask.saved?.typst) {
+      return currentTask.saved.typst.trim();
     }
-    if (storedState.record) return storedState.record.markdown.trim();
+    if (storedState.record) return storedState.record.typst.trim();
     return null;
   }, [currentTask, storedState.record]);
 
-  const exportCurrentPage = useCallback(() => {
-    const markdown = markdownForCurrentPage();
+  // Adds the originals of one range's images; a path already in the archive is kept once.
+  const addSourceAssets = useCallback(
+    async (
+      zip: JSZip,
+      seen: Set<string>,
+      documentId: string,
+      sourceCfi: string | undefined,
+      signal: AbortSignal,
+    ): Promise<void> => {
+      for (const asset of await assetsForSource(documentId, sourceCfi, signal)) {
+        if (seen.has(asset.path)) continue;
+        seen.add(asset.path);
+        zip.file(asset.path, asset.data);
+      }
+    },
+    [assetsForSource],
+  );
+
+  const exportCurrentPage = useCallback(async () => {
+    const typst = typstForCurrentPage();
     const document = currentDocumentRef.current;
-    if (!markdown) {
+    if (!typst) {
       setExportError({ code: "EXPORT_EMPTY" });
       return;
     }
     if (!document) return;
-    triggerDownload(
-      new Blob([markdown], { type: "text/markdown;charset=utf-8" }),
-      `${baseName(document.name)}-p${pageRef.current}-${languageRef.current}.md`,
-    );
-    setExportOpen(false);
-  }, [markdownForCurrentPage]);
+    const name = `${baseName(document.name)}-${
+      document.format === "epub"
+        ? `s${targetPage}-${currentUnit.slice(0, 13)}`
+        : `p${targetPage}`
+    }-${languageRef.current}`;
+    const controller = new AbortController();
+    try {
+      const assets = await assetsForSource(
+        document.id,
+        currentSourceCfi,
+        controller.signal,
+      );
+      if (assets.length === 0) {
+        triggerDownload(
+          new Blob([stripPlaceholderControls(typst)], {
+            type: "text/plain;charset=utf-8",
+          }),
+          `${name}.typ`,
+        );
+      } else {
+        const zip = new JSZip();
+        zip.file("main.typ", stripPlaceholderControls(typst));
+        for (const asset of assets) zip.file(asset.path, asset.data);
+        triggerDownload(await zip.generateAsync({ type: "blob" }), `${name}.zip`);
+      }
+      setExportOpen(false);
+    } catch (error) {
+      setExportError(toUiError(error));
+    }
+  }, [assetsForSource, currentSourceCfi, currentUnit, targetPage, typstForCurrentPage]);
 
-  const exportAllMarkdown = useCallback(async () => {
+  const exportAllTypst = useCallback(async () => {
     const document = currentDocumentRef.current;
     if (!document) return;
     const exportLanguage = languageRef.current;
     setExportError(null);
+    const controller = new AbortController();
     try {
       const records = await apiJson<TranslationRecord[]>(
         `/api/documents/${document.id}/translations?targetLanguage=${exportLanguage}`,
       );
-      const byPage = new Map<number, string>();
+      // One file per saved page; selections stay out. An unsaved draft or a saved task replaces the stored text.
+      const wholePage = (unit: string | undefined): boolean =>
+        document.format === "epub" ? isEpubPageUnit(unit ?? "") : !unit;
+      const entries = new Map<
+        string,
+        { pageNumber: number; unit: string; sourceCfi?: string; typst: string }
+      >();
+      const put = (
+        pageNumber: number,
+        unit: string | undefined,
+        sourceCfi: string | undefined,
+        typst: string,
+      ): void => {
+        entries.set(`${pageNumber}/${unit ?? ""}`, {
+          pageNumber,
+          unit: unit ?? "",
+          ...(sourceCfi ? { sourceCfi } : {}),
+          typst: typst.trim(),
+        });
+      };
       for (const record of records) {
-        byPage.set(record.pageNumber, record.markdown.trim());
+        if (wholePage(record.unit)) {
+          put(record.pageNumber, record.unit, record.sourceCfi, record.typst);
+        }
       }
       for (const task of tasks) {
         if (
           task.documentId !== document.id ||
-          task.targetLanguage !== exportLanguage
+          task.targetLanguage !== exportLanguage ||
+          !wholePage(task.unit)
         ) {
           continue;
         }
-        if (task.stage === "unsaved" && task.draft) {
-          byPage.set(task.pageNumber, task.draft.markdown.trim());
-        } else if (task.stage === "saved" && task.saved?.markdown) {
-          byPage.set(task.pageNumber, task.saved.markdown.trim());
+        if (hasRetainedDraft(task)) {
+          put(task.pageNumber, task.unit, task.sourceCfi, task.draft.typst);
+        } else if (task.stage === "saved" && task.saved?.typst) {
+          put(task.pageNumber, task.unit, task.sourceCfi, task.saved.typst);
         }
       }
-      const pages = [...byPage.keys()].sort((a, b) => a - b);
-      if (pages.length === 0) {
+      const ordered = [...entries.values()].sort(
+        (a, b) =>
+          a.pageNumber - b.pageNumber ||
+          compareEpubCfi(a.sourceCfi ?? "", b.sourceCfi ?? "") ||
+          a.unit.localeCompare(b.unit),
+      );
+      if (ordered.length === 0) {
         setExportError({ code: "EXPORT_NONE" });
         return;
       }
-      const parts: BlobPart[] = [];
-      for (const pageNumber of pages) {
-        if (parts.length > 0) parts.push("\n\n");
-        parts.push(
-          t.file.exportPageHeading(pageNumber),
-          "\n\n",
-          byPage.get(pageNumber) ?? "",
-        );
+      const zip = new JSZip();
+      const seen = new Set<string>();
+      // The running number keeps a sorted listing of the EPUB files in reading order.
+      const width = String(ordered.length).length;
+      for (const [index, entry] of ordered.entries()) {
+        if (entry.typst === "") continue;
+        const stem =
+          document.format === "epub"
+            ? `${String(index + 1).padStart(width, "0")}-s${entry.pageNumber}-${exportLanguage}`
+            : `p${entry.pageNumber}-${exportLanguage}`;
+        zip.file(`${stem}.typ`, stripPlaceholderControls(entry.typst));
+        await addSourceAssets(zip, seen, document.id, entry.sourceCfi, controller.signal);
       }
+      const blob = await zip.generateAsync({ type: "blob" });
       triggerDownload(
-        new Blob(parts, { type: "text/markdown;charset=utf-8" }),
-        `${baseName(document.name)}-${exportLanguage}-translations.md`,
+        blob,
+        `${baseName(document.name)}-${exportLanguage}-translations.zip`,
       );
       setExportOpen(false);
     } catch (error) {
       setExportError(toUiError(error));
     }
-  }, [tasks, t]);
+  }, [addSourceAssets, tasks]);
 
-  const exportDraftMarkdown = useCallback((document?: DocumentRecord) => {
-    const target = document ?? currentDocumentRef.current;
-    if (!target) return;
-    const drafts = tasks.filter(
-      (task) =>
-        task.documentId === target.id &&
-        task.stage === "unsaved" &&
-        task.draft,
-    );
-    if (drafts.length === 0) return;
-    const content = drafts
-      .sort(
-        (a, b) =>
-          a.pageNumber - b.pageNumber ||
-          a.targetLanguage.localeCompare(b.targetLanguage),
-      )
-      .map(
-        (task) =>
-          `${t.file.exportDraftHeading(
-            task.pageNumber,
-            TARGET_LANGUAGE_LABELS[task.targetLanguage],
-          )}\n\n${task.draft!.markdown.trim()}`,
-      )
-      .join("\n\n");
-    triggerDownload(
-      new Blob([content], { type: "text/markdown;charset=utf-8" }),
-      `${baseName(target.name)}-unsaved.md`,
-    );
-  }, [tasks, t]);
+  const exportDraftTypst = useCallback(
+    async (document?: DocumentRecord) => {
+      const target = document ?? currentDocumentRef.current;
+      if (!target) return;
+      const drafts = tasks
+        .filter(
+          (task) => task.documentId === target.id && hasRetainedDraft(task),
+        )
+        .sort(
+          (a, b) =>
+            a.pageNumber - b.pageNumber ||
+            (a.unit ?? "").localeCompare(b.unit ?? "") ||
+            a.targetLanguage.localeCompare(b.targetLanguage),
+        );
+      if (drafts.length === 0) return;
+      const controller = new AbortController();
+      try {
+        const zip = new JSZip();
+        const seen = new Set<string>();
+        // shortcut: only the open book can supply image originals, so another book's drafts export as text; upgrade if exporting without opening is wanted.
+        const withAssets = target.id === currentDocumentRef.current?.id;
+        for (const task of drafts) {
+          zip.file(
+            `${target.format === "epub" ? "s" : "p"}${task.pageNumber}-${task.targetLanguage}${
+              task.unit ? `-${task.unit}` : ""
+            }.typ`,
+            stripPlaceholderControls(task.draft!.typst),
+          );
+          if (withAssets) {
+            await addSourceAssets(zip, seen, target.id, task.sourceCfi, controller.signal);
+          }
+        }
+        triggerDownload(
+          await zip.generateAsync({ type: "blob" }),
+          `${baseName(target.name)}-unsaved.zip`,
+        );
+      } catch (error) {
+        setExportError(toUiError(error));
+      }
+    },
+    [addSourceAssets, tasks],
+  );
 
   const uploadPdf = useCallback(
     async (body: Blob, name: string, count: number): Promise<DocumentRecord> => {
-      const query = new URLSearchParams({ name, pageCount: String(count) });
+      const query = new URLSearchParams({
+        name,
+        pageCount: String(count),
+        format: "pdf",
+      });
       return apiJson<DocumentRecord>(`/api/documents?${query}`, {
         method: "POST",
         headers: { "Content-Type": "application/pdf" },
@@ -1871,7 +2759,7 @@ export function Reader() {
         ...(drafts.length > 0
           ? {
               extraLabel: t.confirm.exportDrafts,
-              onExtra: () => exportDraftMarkdown(document),
+              onExtra: () => exportDraftTypst(document),
             }
           : {}),
       });
@@ -1928,7 +2816,7 @@ export function Reader() {
       abortOutlineWork,
       ask,
       currentHasWork,
-      exportDraftMarkdown,
+      exportDraftTypst,
       modified,
       queue,
       selectDocument,
@@ -1943,8 +2831,9 @@ export function Reader() {
       modified ||
       previewOnly ||
       outline.stage !== "idle" ||
-      tasks.some((task) =>
-        ["queued", "preparing", "generating", "saving", "unsaved"].includes(task.stage),
+      epubBatch.status === "running" ||
+      tasks.some(
+        (task) => isActiveStage(task.stage) || hasRetainedDraft(task),
       );
     if (!busy) return;
     const handler = (event: BeforeUnloadEvent): void => {
@@ -1953,7 +2842,7 @@ export function Reader() {
     };
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
-  }, [modified, outline.stage, previewOnly, tasks]);
+  }, [epubBatch.status, modified, outline.stage, previewOnly, tasks]);
 
   useEffect(() => {
     const handler = (): void => {
@@ -1961,16 +2850,21 @@ export function Reader() {
         window.clearTimeout(viewTimerRef.current);
         viewTimerRef.current = null;
       }
-      for (const [documentId, view] of pendingViewsRef.current) {
+      const document = currentDocumentRef.current;
+      const view = currentViewSnapshot();
+      if (document && view && !previewOnlyRef.current) {
+        pendingViewsRef.current.set(document.id, view);
+      }
+      for (const [documentId, pending] of pendingViewsRef.current) {
         void apiFetch(`/api/documents/${documentId}/view`, {
-          ...jsonInit("PUT", view),
+          ...jsonInit("PUT", pending),
           keepalive: true,
         }).catch(() => {});
       }
     };
     window.addEventListener("pagehide", handler);
     return () => window.removeEventListener("pagehide", handler);
-  }, []);
+  }, [currentViewSnapshot]);
 
   useEffect(() => {
     return () => {
@@ -2034,7 +2928,7 @@ export function Reader() {
 
   const outlineBusy =
     outline.stage === "generating" || outline.stage === "saving";
-  const translationDisabledReason = !currentDocument
+  const pageDisabledReason = !currentDocument
     ? previewOnly
       ? t.page.disabled.previewOnly
       : t.page.disabled.noPdf
@@ -2045,31 +2939,77 @@ export function Reader() {
         : modified
           ? t.page.disabled.modified
           : null;
+  const epubLocatingReason =
+    isEpubDocument && (!epubTarget || epubStyleBusy)
+      ? epubLocation && !epubStyleBusy
+        ? t.page.disabled.noContent
+        : t.page.disabled.locating
+      : null;
+  const translationDisabledReason =
+    pageDisabledReason ??
+    epubLocatingReason ??
+    (currentTask && hasRetainedDraft(currentTask)
+      ? t.page.disabled.unsavedDraft
+      : null);
 
-  const outlineGenerationDisabledReason = !currentDocument
-    ? null
-    : translationDisabledReason ??
-      (tasks.some(
-        (task) =>
-          task.documentId === currentDocument.id &&
-          ["queued", "preparing", "generating", "saving"].includes(task.stage),
-      )
-        ? t.outline.disabledActive
-        : null);
+  const outlineGenerationDisabledReason =
+    !currentDocument || currentDocument.format === "epub"
+      ? null
+      : pageDisabledReason ??
+        (tasks.some(
+          (task) =>
+            task.documentId === currentDocument.id && isActiveStage(task.stage),
+        )
+          ? t.outline.disabledActive
+          : null);
 
-  const savedRecord =
-    currentTask?.saved?.markdown
-      ? currentTask.saved
-      : storedState.record ?? null;
-  const canRegenerate = Boolean(currentTask?.saved || storedState.record);
-  const previewMarkdown =
-    currentTask && ["generating", "saving"].includes(currentTask.stage)
+  const previewTypst =
+    currentTask?.stage === "generating"
       ? currentTask.preview
-      : "";
+      : currentTask?.stage === "repairing"
+        ? currentTask.preview || currentTask.draft?.typst || ""
+        : currentTask?.draft &&
+            (currentTask.stage === "validating" || currentTask.stage === "saving")
+          ? currentTask.draft.typst
+          : "";
   const hasExportable =
-    Boolean(markdownForCurrentPage()) ||
+    Boolean(typstForCurrentPage()) ||
     currentTask?.stage === "saved" ||
-    currentTask?.stage === "unsaved";
+    Boolean(currentTask && hasRetainedDraft(currentTask));
+  const retainedDraft =
+    currentTask && hasRetainedDraft(currentTask) ? currentTask : null;
+  const shownTypst = retainedDraft ? retainedDraft.draft.typst : savedRecord?.typst;
+
+  const draftFailure = (() => {
+    const error = currentTask?.error;
+    if (!currentTask || !error || !hasRetainedDraft(currentTask)) return null;
+    // The panel shows this failure's output once the latest round recorded it.
+    const latestRound = currentTask.repairRounds?.at(-1);
+    const summaryOnly =
+      (latestRound?.status === "compile-failed" ||
+        latestRound?.status === "request-failed") &&
+      ["validating", "preparing", "repairing"].includes(error.stage ?? "");
+    const detail = summaryOnly
+      ? t.page.errorDetail(
+          errorText({ code: error.code, params: error.params }, locale),
+          error.code,
+        )
+      : errorText(
+          { code: error.code, detail: error.detail, params: error.params },
+          locale,
+        );
+    switch (error.stage) {
+      case "validating":
+        return t.page.unsaved.validationFailed(detail);
+      case "preparing":
+      case "repairing":
+        return t.page.unsaved.repairFailed(detail);
+      case "saving":
+        return t.page.unsaved.saveFailed(detail);
+      default:
+        return t.page.unsaved.operationFailed(detail);
+    }
+  })();
 
   const pageStatus = (() => {
     if (currentTask) {
@@ -2077,6 +3017,8 @@ export function Reader() {
         case "queued":
         case "preparing":
         case "generating":
+        case "repairing":
+        case "validating":
         case "saving":
         case "saved":
         case "unsaved":
@@ -2084,7 +3026,9 @@ export function Reader() {
         case "error":
           return savedRecord ? t.page.mode.saved : t.stages.error;
         case "cancelled":
-          return savedRecord ? t.page.mode.saved : t.stages.cancelled;
+          return savedRecord && !hasRetainedDraft(currentTask)
+            ? t.page.mode.saved
+            : t.stages.cancelled;
         default:
           return "";
       }
@@ -2098,32 +3042,65 @@ export function Reader() {
 
   const openTaskPage = useCallback(
     (task: TranslationTask) => {
-      if (!currentDocumentRef.current || currentDocumentRef.current.id !== task.documentId) {
-        return;
-      }
+      const document = currentDocumentRef.current;
+      if (!document || document.id !== task.documentId) return;
       if (languageRef.current !== task.targetLanguage) {
         handleLanguageChange(task.targetLanguage);
       }
-      if (bridgeRef.current && viewerReadyRef.current) {
-        bridgeRef.current.setPage(task.pageNumber);
+      if (document.format === "epub") {
+        const { sourceCfi, unit } = task;
+        if (sourceCfi && unit) {
+          clearEpubSelection();
+          setEpubPinned({
+            pageNumber: task.pageNumber,
+            unit,
+            sourceCfi,
+            ...(task.epubPage ? { epubPage: task.epubPage } : {}),
+            ...(task.epubLayout ? { epubLayout: task.epubLayout } : {}),
+          });
+          viewTouchedRef.current = true;
+          void runEpubCommand((bridge) => bridge.display(sourceCfi));
+        }
+      } else {
+        if (bridgeRef.current && viewerReadyRef.current) {
+          bridgeRef.current.setPage(task.pageNumber);
+        }
+        setPageValue(task.pageNumber);
+        saveProgress(task.documentId, task.pageNumber, task.targetLanguage);
       }
-      setPageValue(task.pageNumber);
       setRightTab("page");
       setNarrowTab("translation");
-      saveProgress(task.documentId, task.pageNumber, task.targetLanguage);
     },
-    [handleLanguageChange, saveProgress, setPageValue],
+    [clearEpubSelection, handleLanguageChange, runEpubCommand, saveProgress, setPageValue],
   );
 
+  const closeEpubToc = useCallback(() => {
+    setEpubTocOpen(false);
+    epubTocButtonRef.current?.focus();
+  }, []);
+
+  const openEpubTocEntry = useCallback(
+    (entry: EpubTocEntry) => {
+      if (!entry.href) return;
+      closeEpubToc();
+      navigateEpub(entry.href);
+    },
+    [closeEpubToc, navigateEpub],
+  );
+
+  const epubSectionIndex = epubLocation?.sectionIndex ?? null;
+  const epubChapter = useMemo(() => {
+    if (!isEpubDocument) return null;
+    const id = currentTocId(epubToc, epubSectionIndex);
+    return epubToc.find((entry) => entry.id === id)?.label ?? null;
+  }, [isEpubDocument, epubToc, epubSectionIndex]);
+
   const localeApplyBlockedReason = (() => {
-    if (
-      tasks.some((task) =>
-        ["queued", "preparing", "generating", "saving"].includes(task.stage),
-      )
-    ) {
+    // A batch still locating its pages has queued nothing yet, but a reload would silently end it.
+    if (epubBatch.status === "running" || tasks.some((task) => isActiveStage(task.stage))) {
       return t.settings.languageBlockedActive;
     }
-    if (tasks.some((task) => task.stage === "unsaved")) {
+    if (tasks.some((task) => hasRetainedDraft(task))) {
       return t.settings.languageBlockedUnsaved;
     }
     if (outline.stage === "generating" || outline.stage === "saving") {
@@ -2145,10 +3122,9 @@ export function Reader() {
   const applyUiLocale = useCallback(
     async (next: UiLocale): Promise<void> => {
       const blocked =
-        tasks.some((task) =>
-          ["queued", "preparing", "generating", "saving", "unsaved"].includes(
-            task.stage,
-          ),
+        epubBatchControllerRef.current !== null ||
+        tasks.some(
+          (task) => isActiveStage(task.stage) || hasRetainedDraft(task),
         ) ||
         modified ||
         previewOnly ||
@@ -2251,12 +3227,12 @@ export function Reader() {
         <input
           ref={fileInputRef}
           type="file"
-          accept="application/pdf,.pdf"
+          accept="application/pdf,.pdf,application/epub+zip,.epub"
           hidden
           onChange={(event) => {
             const file = event.target.files?.[0];
             event.target.value = "";
-            if (file) void openPreview(file);
+            if (file) openFile(file);
           }}
         />
         {screen === "reader" && (
@@ -2364,7 +3340,7 @@ export function Reader() {
           onDownload={(document) => void downloadDocument(document)}
           onDelete={(document) => void deleteDocument(document)}
           onOpenPdf={() => fileInputRef.current?.click()}
-          onDropPdf={(file) => void openPreview(file)}
+          onDropPdf={(file) => openFile(file)}
         />
         {session > 0 && (
           <main
@@ -2378,7 +3354,7 @@ export function Reader() {
             onDrop={(event) => {
               event.preventDefault();
               const file = event.dataTransfer.files?.[0];
-              if (file) void openPreview(file);
+              if (file) openFile(file);
             }}
           >
         {narrow && (
@@ -2415,25 +3391,76 @@ export function Reader() {
         )}
 
         <section
-          className="pdf-pane"
+          className={`pdf-pane${isEpubDocument ? " epub-pane" : ""}`}
           aria-label={t.tabs.original}
           inert={narrow && narrowTab !== "pdf"}
           aria-hidden={narrow && narrowTab !== "pdf"}
         >
-          <PdfViewerFrame
-            sessionKey={session}
-            locale={locale}
-            title={currentDocument?.name ?? t.appBar.noPdf}
-            onBridge={handleBridge}
-            onDocumentInit={handleDocumentInit}
-            onPageChange={handlePageChange}
-            onViewChange={handleViewChange}
-            onError={handleViewerError}
-            onFilePicked={(file) => void openPreview(file)}
-            onPassword={(password) => {
-              passwordRef.current = password;
-            }}
-          />
+          {currentDocument?.format === "epub" ? (
+            <>
+              <EpubToolbar
+                disabled={!viewerReady}
+                tocOpen={epubTocOpen}
+                tocId="epub-toc"
+                tocButtonRef={epubTocButtonRef}
+                onToggleToc={() => setEpubTocOpen((open) => !open)}
+                atStart={epubLocation?.atStart ?? true}
+                atEnd={epubLocation?.atEnd ?? true}
+                onPrevious={() => stepEpub("prev")}
+                onNext={() => stepEpub("next")}
+                position={
+                  epubLocation
+                    ? {
+                        section: epubLocation.sectionIndex + 1,
+                        sections: pageCount,
+                        page: epubLocation.page,
+                        pages: epubLocation.total,
+                      }
+                    : null
+                }
+                style={epubStyle}
+                fixedLayout={epubFixedLayout}
+                onStyleChange={changeEpubStyle}
+                onResetStyle={resetEpubStyle}
+              />
+              <div className="epub-stage">
+                <EpubViewerFrame
+                  sessionKey={session}
+                  document={currentDocument}
+                  title={currentDocument.name}
+                  onBridge={handleEpubBridge}
+                  onReady={(info) => void handleEpubReady(info)}
+                  onRelocated={handleEpubRelocated}
+                  onSelection={handleEpubSelection}
+                  onError={handleViewerError}
+                />
+                {epubTocOpen && (
+                  <EpubTocPanel
+                    id="epub-toc"
+                    toc={epubToc}
+                    sectionIndex={epubSectionIndex}
+                    onNavigate={openEpubTocEntry}
+                    onClose={closeEpubToc}
+                  />
+                )}
+              </div>
+            </>
+          ) : (
+            <PdfViewerFrame
+              sessionKey={session}
+              locale={locale}
+              title={currentDocument?.name ?? t.appBar.noPdf}
+              onBridge={handleBridge}
+              onDocumentInit={handleDocumentInit}
+              onPageChange={handlePageChange}
+              onViewChange={handleViewChange}
+              onError={handleViewerError}
+              onFilePicked={(file) => void openPreview(file)}
+              onPassword={(password) => {
+                passwordRef.current = password;
+              }}
+            />
+          )}
           {!currentDocument && !previewOnly && viewerReady && (
             <div className="empty-hint">{t.empty.openPdf}</div>
           )}
@@ -2454,6 +3481,11 @@ export function Reader() {
                   {t.viewer.reopen}
                 </button>
               )}
+            </div>
+          )}
+          {!viewerError && epubActionError && (
+            <div className="viewer-error" role="alert">
+              <p>{t.epub.actionFailed(errorText(epubActionError, locale))}</p>
             </div>
           )}
         </section>
@@ -2517,7 +3549,7 @@ export function Reader() {
                 queue={queue}
                 onOpenTaskPage={openTaskPage}
                 onConfirm={ask}
-                disabledReason={translationDisabledReason}
+                disabledReason={pageDisabledReason}
                 selection={selection}
                 onSelectionChange={setSelection}
                 outline={outline}
@@ -2528,6 +3560,10 @@ export function Reader() {
                 onRetrySaveOutline={() => void retrySaveOutline()}
                 onDiscardOutline={discardOutline}
                 onOpenOutlinePage={openOutlinePage}
+                epubBatch={epubBatch}
+                onStartEpubBatch={(options) => void startEpubBatch(options)}
+                onSelectUntranslatedEpub={(saved) => void selectUntranslatedEpubSections(saved)}
+                onStopAll={stopAllTranslation}
               />
             ) : (
               <div className="pane-placeholder">
@@ -2538,8 +3574,21 @@ export function Reader() {
             <div className="page-panel">
               <div className="page-toolbar">
                 <div className="page-position">
-                  <strong>{t.common.pageOf(page, pageCount)}</strong>
-                  <span className="muted">{t.page.actualOrder}</span>
+                  <strong>
+                    {isEpubDocument
+                      ? epubLocation
+                        ? t.epub.position(
+                            epubLocation.sectionIndex + 1,
+                            pageCount,
+                            epubLocation.page,
+                            epubLocation.total,
+                          )
+                        : t.epub.locating
+                      : t.common.pageOf(page, pageCount)}
+                  </strong>
+                  <span className="muted">
+                    {isEpubDocument ? epubChapter : t.page.actualOrder}
+                  </span>
                 </div>
                 <label className="language-field">
                   {t.page.targetLanguage}
@@ -2562,14 +3611,16 @@ export function Reader() {
                     className="primary"
                     disabled={
                       Boolean(translationDisabledReason) ||
-                      ["queued", "preparing", "generating", "saving"].includes(
-                        currentTask?.stage ?? "",
-                      )
+                      Boolean(currentTask && isActiveStage(currentTask.stage))
                     }
                     title={canRegenerate ? t.page.regenerateHint : undefined}
                     onClick={() => void translateCurrent(canRegenerate)}
                   >
-                    {canRegenerate ? t.page.retranslate : t.page.translate}
+                    {canRegenerate
+                      ? t.page.retranslate
+                      : currentUnit && !isEpubPageUnit(currentUnit)
+                        ? t.page.translateSelection
+                        : t.page.translate}
                   </button>
                   <button
                     type="button"
@@ -2590,6 +3641,42 @@ export function Reader() {
                   ? t.page.existingTranslation
                   : ""}
               </p>
+
+              {epubSelection && (
+                <div className="epub-selection" role="status">
+                  <span>
+                    {t.page.selection(epubSelection.text.slice(0, 80))}
+                  </span>
+                  <button type="button" onClick={clearEpubSelection}>
+                    {t.page.clearSelection}
+                  </button>
+                </div>
+              )}
+
+              {epubPinned && epubPinned.unit !== epubLocation?.unit && (
+                <div className="epub-selection epub-range-note" role="status">
+                  <span>
+                    <strong>{t.page.originalRange}</strong>{" "}
+                    {t.page.originalRangeNote(
+                      t.batch.epub.taskPage(
+                        epubPinned.pageNumber,
+                        epubPinned.epubPage ?? null,
+                        epubPinned.unit.slice(-6),
+                      ),
+                    )}
+                  </span>
+                  <button type="button" onClick={() => setEpubPinned(null)}>
+                    {t.page.showVisiblePage}
+                  </button>
+                </div>
+              )}
+
+              {currentTask?.contextWarnings?.length &&
+              (currentTask.stage === "saved" || currentTask.stage === "unsaved") ? (
+                <p className="page-warning" role="status">
+                  {t.page.contextWarning}
+                </p>
+              ) : null}
 
               {translationDisabledReason && (
                 <p className="field-error" role="status">
@@ -2612,89 +3699,53 @@ export function Reader() {
                   </div>
                 )}
 
-                {currentDocument && currentTask?.stage === "generating" && (
-                  <div className="stream-preview">
-                    {previewMarkdown ? (
-                      <TranslationView markdown={previewMarkdown} streaming />
-                    ) : (
-                      <p className="muted">{t.page.waitingModel}</p>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => queue.cancel(currentTask.key)}
-                    >
-                      {t.page.cancelPage}
-                    </button>
-                  </div>
+                {currentTask?.repairRounds && isActiveStage(currentTask.stage) && (
+                  <TypstRepairPanel task={currentTask} />
                 )}
 
                 {currentDocument &&
                   currentTask &&
-                  ["queued", "preparing", "saving"].includes(currentTask.stage) && (
+                  ["generating", "repairing", "validating", "saving"].includes(
+                    currentTask.stage,
+                  ) && (
+                    <div className="stream-preview">
+                      {["generating", "repairing", "validating"].includes(
+                        currentTask.stage,
+                      ) && (
+                        <button
+                          type="button"
+                          onClick={() => queue.cancel(currentTask.key)}
+                        >
+                          {t.page.cancelPage}
+                        </button>
+                      )}
+                      {previewTypst ? (
+                        <TranslationView
+                          typst={previewTypst}
+                          loadAssets={loadDisplayedAssets}
+                          streaming
+                        />
+                      ) : (
+                        <p className="muted">{t.page.waitingModel}</p>
+                      )}
+                    </div>
+                  )}
+
+                {currentDocument &&
+                  currentTask &&
+                  ["queued", "preparing"].includes(currentTask.stage) && (
                     <div className="stream-preview">
                       <p className="muted">{t.stages[currentTask.stage]}…</p>
                     </div>
                   )}
 
                 {currentDocument &&
-                  !["queued", "preparing", "generating", "saving"].includes(
-                    currentTask?.stage ?? "",
-                  ) && (
+                  !(currentTask && isActiveStage(currentTask.stage)) && (
                     <>
-                      {currentTask?.stage === "unsaved" && currentTask.draft && (
-                        <div className="unsaved-banner" role="alert">
-                          <strong>{t.page.unsaved.title}</strong>
-                          <p>{t.page.unsaved.body}</p>
-                          {currentTask.error && (
-                            <p role="alert">
-                              {t.page.unsaved.saveFailed(
-                                errorText(
-                                  {
-                                    code: currentTask.error.code,
-                                    detail: currentTask.error.detail,
-                                    params: currentTask.error.params,
-                                  },
-                                  locale,
-                                ),
-                              )}
-                            </p>
-                          )}
-                          <div className="inline-actions">
-                            <button
-                              type="button"
-                              onClick={() => queue.retry(currentTask.key)}
-                            >
-                              {t.page.retrySave}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setExportError(null);
-                                setExportOpen(true);
-                              }}
-                            >
-                              {t.page.export}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={async () => {
-                                const confirmed = await ask({
-                                  title: t.confirm.discardDraftTitle,
-                                  body: t.confirm.discardDraftBody,
-                                  confirmLabel: t.confirm.discardDraftConfirm,
-                                });
-                                if (confirmed) queue.discard(currentTask.key);
-                              }}
-                            >
-                              {t.page.discardDraft}
-                            </button>
-                          </div>
-                          <TranslationView markdown={currentTask.draft.markdown} />
-                        </div>
-                      )}
-
-                      {(currentTask?.stage === "error" ||
-                        currentTask?.stage === "cancelled") && (
+                      {currentTask &&
+                        !hasRetainedDraft(currentTask) &&
+                        (currentTask.stage === "error" ||
+                          currentTask.stage === "cancelled") && (
                         <div className="inline-error" role="alert">
                           <strong>
                             {currentTask.stage === "cancelled"
@@ -2732,15 +3783,92 @@ export function Reader() {
                         </div>
                       )}
 
-                      {savedRecord && currentTask?.stage !== "unsaved" && (
-                        <>
-                          <TranslationView markdown={savedRecord.markdown} />
-                          <p className="translation-meta">
-                            {TARGET_LANGUAGE_LABELS[savedRecord.targetLanguage]} ·{" "}
-                            {savedRecord.provider}/{savedRecord.model} ·{" "}
-                            {formatDateTime(locale, savedRecord.translatedAt)}
-                          </p>
-                        </>
+                      {shownTypst !== undefined && (
+                        <div
+                          className={retainedDraft ? "unsaved-banner" : undefined}
+                          role={retainedDraft ? "alert" : undefined}
+                        >
+                          {retainedDraft && (
+                            <>
+                              <strong>
+                                {retainedDraft.stage === "cancelled"
+                                  ? t.page.cancelled
+                                  : t.page.unsaved.title}
+                              </strong>
+                              <p>{t.page.unsaved.body}</p>
+                              {draftFailure && (
+                                <p role="alert">{draftFailure}</p>
+                              )}
+                              <div className="inline-actions">
+                                <button
+                                  type="button"
+                                  onClick={() => queue.retry(retainedDraft.key)}
+                                >
+                                  {t.page.retrySave}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={Boolean(pageDisabledReason)}
+                                  onClick={() => queue.repair(retainedDraft.key)}
+                                >
+                                  {retainedDraft.repairRounds?.length
+                                    ? t.page.continueRepair
+                                    : t.page.repair}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setExportError(null);
+                                    setExportOpen(true);
+                                  }}
+                                >
+                                  {t.page.export}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    const confirmed = await ask({
+                                      title: t.confirm.discardDraftTitle,
+                                      body: t.confirm.discardDraftBody,
+                                      confirmLabel: t.confirm.discardDraftConfirm,
+                                    });
+                                    if (confirmed) queue.discard(retainedDraft.key);
+                                  }}
+                                >
+                                  {t.page.discardDraft}
+                                </button>
+                              </div>
+                              <p className="muted">{t.repair.note}</p>
+                              {retainedDraft.repairRounds && (
+                                <TypstRepairPanel task={retainedDraft} />
+                              )}
+                            </>
+                          )}
+                          {/* One mount for the saved text and its draft: the first keystroke turns one into the other and must not close the editor. */}
+                          <TranslationView
+                            key={currentKey}
+                            typst={shownTypst}
+                            loadAssets={loadDisplayedAssets}
+                            dirty={retainedDraft !== null}
+                            editingEnabled={!modified && !previewOnly}
+                            onEdit={editCurrentSource}
+                            onSave={saveCurrentDraft}
+                            onDiscard={discardCurrentDraft}
+                          />
+                          {!retainedDraft && savedRecord && (
+                            <>
+                              <p className="translation-meta">
+                                {TARGET_LANGUAGE_LABELS[savedRecord.targetLanguage]} ·{" "}
+                                {savedRecord.provider}/{savedRecord.model} ·{" "}
+                                {formatDateTime(locale, savedRecord.translatedAt)}
+                              </p>
+                              {currentTask?.stage === "saved" &&
+                                currentTask.repairRounds && (
+                                  <TypstRepairPanel task={currentTask} />
+                                )}
+                            </>
+                          )}
+                        </div>
                       )}
 
                       {!savedRecord &&
@@ -2775,6 +3903,11 @@ export function Reader() {
                                 <p className="muted">{t.page.consent}</p>
                               </>
                             )}
+                            {storedState.status === "idle" && isEpubDocument && (
+                              <p className="muted">
+                                {epubLocation ? t.epub.noContent : t.epub.locating}
+                              </p>
+                            )}
                           </div>
                         )}
                     </>
@@ -2799,10 +3932,10 @@ export function Reader() {
           </p>
         )}
         <div className="dialog-actions vertical">
-          <button type="button" onClick={exportCurrentPage}>
+          <button type="button" onClick={() => void exportCurrentPage()}>
             {t.export.currentPage}
           </button>
-          <button type="button" onClick={() => void exportAllMarkdown()}>
+          <button type="button" onClick={() => void exportAllTypst()}>
             {t.export.allPages}
           </button>
           <button type="button" onClick={() => setExportOpen(false)}>

@@ -2,25 +2,29 @@ import { z } from "zod";
 import type { Database } from "bun:sqlite";
 import {
   DOCUMENT_UPLOAD_QUERY_SCHEMA,
+  MAX_EPUB_CFI_CHARS,
   documentIdSchema,
   outlineEntriesSchema,
   pageNumberSchema,
   readerUpdateSchema,
   readerViewSchema,
   targetLanguageSchema,
-  translationContentSchema,
+  translationUnitSchema,
+  translationSaveInputSchema,
   type LibrarySnapshot,
   type TargetLanguage,
 } from "../shared/contracts";
+import { isEpubUnitOf } from "../shared/epub";
 import {
   applyDataHeaders,
   assertContentEncoding,
-  assertPdfContentType,
+  assertDocumentContentType,
   contentDispositionInline,
   HttpError,
   jsonResponse,
   readJson,
 } from "./http";
+import { EpubPackageError, readEpubSpineCount } from "./epub";
 import {
   getDocument,
   getDocumentFile,
@@ -30,7 +34,7 @@ import {
   getTranslation,
   getUiLocale,
   listDocuments,
-  listTranslatedPages,
+  listTranslationLocations,
   listTranslations,
   removeDocument,
   saveGeneratedOutline,
@@ -42,7 +46,8 @@ import {
 
 const MAX_TRANSLATION_BYTES = 1024 * 1024;
 const MAX_READER_BYTES = 64 * 1024;
-const MAX_READER_VIEW_BYTES = 1024;
+// A CFI is up to MAX_EPUB_CFI_CHARS characters of up to 4 UTF-8 bytes each.
+const MAX_READER_VIEW_BYTES = MAX_EPUB_CFI_CHARS * 4 + 2048;
 const MAX_OUTLINE_BYTES = 32 * 1024 * 1024;
 
 const languageQuerySchema = z.strictObject({
@@ -79,13 +84,48 @@ function hasPdfMagic(bytes: Uint8Array): boolean {
   return false;
 }
 
-function pdfResponse(bytes: Uint8Array, name: string): Response {
+function hasEpubMagic(bytes: Uint8Array): boolean {
+  if (
+    bytes.byteLength < 30 ||
+    bytes[0] !== 0x50 ||
+    bytes[1] !== 0x4b ||
+    bytes[2] !== 0x03 ||
+    bytes[3] !== 0x04
+  ) {
+    return false;
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const method = view.getUint16(8, true);
+  const compressedSize = view.getUint32(18, true);
+  const uncompressedSize = view.getUint32(22, true);
+  const nameLength = view.getUint16(26, true);
+  const extraLength = view.getUint16(28, true);
+  if (method !== 0 || compressedSize !== uncompressedSize) return false;
+  const nameStart = 30;
+  const dataStart = nameStart + nameLength + extraLength;
+  if (dataStart + uncompressedSize > bytes.byteLength) return false;
+  const name = new TextDecoder().decode(
+    bytes.subarray(nameStart, nameStart + nameLength),
+  );
+  if (name !== "mimetype") return false;
+  const content = new TextDecoder().decode(
+    bytes.subarray(dataStart, dataStart + uncompressedSize),
+  );
+  return content === "application/epub+zip";
+}
+
+function documentResponse(
+  bytes: Uint8Array,
+  name: string,
+  format: "pdf" | "epub",
+): Response {
   // Bun serves typed arrays directly; TypeScript's DOM BodyInit omits
   // Uint8Array<ArrayBufferLike>, so keep the buffer without copying.
   const body = bytes as unknown as BodyInit;
   const response = new Response(body, {
     headers: {
-      "Content-Type": "application/pdf",
+      "Content-Type":
+        format === "pdf" ? "application/pdf" : "application/epub+zip",
       "Content-Length": String(bytes.byteLength),
       "Content-Disposition": contentDispositionInline(name),
     },
@@ -100,6 +140,14 @@ function parseDocumentPath(segments: string[]): string {
     throw new HttpError(400, "INVALID_REQUEST", "invalid document id");
   }
   return documentId;
+}
+
+function translationUnit(url: URL): string {
+  const parsed = translationUnitSchema.safeParse(url.searchParams.get("unit") ?? "");
+  if (!parsed.success) {
+    throw new HttpError(400, "INVALID_REQUEST", "invalid translation unit");
+  }
+  return parsed.data;
 }
 
 function parseTranslationPath(
@@ -160,15 +208,42 @@ export async function handleLibrary(
       throw new HttpError(400, "INVALID_REQUEST", "invalid upload query");
     }
     assertContentEncoding(request);
-    assertPdfContentType(request);
+    const format = query.data.format;
+    assertDocumentContentType(request, format);
     const bytes = await request.bytes();
     if (bytes.byteLength === 0) {
-      throw new HttpError(400, "INVALID_REQUEST", "PDF file is empty");
+      throw new HttpError(
+        400,
+        "INVALID_REQUEST",
+        format === "pdf" ? "PDF file is empty" : "EPUB file is empty",
+      );
     }
-    if (!hasPdfMagic(bytes)) {
-      throw new HttpError(400, "INVALID_REQUEST", "file is not a PDF");
+    if (format === "pdf" ? !hasPdfMagic(bytes) : !hasEpubMagic(bytes)) {
+      throw new HttpError(
+        400,
+        "INVALID_REQUEST",
+        format === "pdf" ? "file is not a PDF" : "file is not an EPUB",
+      );
     }
-    const document = storeDocument(ctx.db, query.data, bytes);
+    let pageCount = query.data.pageCount;
+    if (format === "epub") {
+      try {
+        pageCount = await readEpubSpineCount(bytes);
+      } catch (error) {
+        if (error instanceof EpubPackageError) {
+          throw new HttpError(400, "INVALID_REQUEST", error.message);
+        }
+        throw error;
+      }
+    }
+    if (!pageCount) {
+      throw new HttpError(400, "INVALID_REQUEST", "pageCount is required");
+    }
+    const document = storeDocument(
+      ctx.db,
+      { name: query.data.name, pageCount, format },
+      bytes,
+    );
     return jsonResponse(document);
   }
 
@@ -207,6 +282,15 @@ export async function handleLibrary(
   }
 
   if (segments.length === 4 && segments[3] === "outline") {
+    const document = getDocument(ctx.db, documentId);
+    if (!document) notFound();
+    if (document.format !== "pdf") {
+      throw new HttpError(
+        400,
+        "INVALID_REQUEST",
+        "outlines are only available for PDF documents",
+      );
+    }
     if (method === "GET") {
       return jsonResponse({
         outline: getGeneratedOutline(ctx.db, documentId),
@@ -231,10 +315,10 @@ export async function handleLibrary(
     }
     const file = getDocumentFile(ctx.db, documentId);
     if (!file) notFound();
-    return pdfResponse(file.data, file.name);
+    return documentResponse(file.data, file.name, file.format);
   }
 
-  if (segments.length === 4 && segments[3] === "translation-pages") {
+  if (segments.length === 4 && segments[3] === "translation-locations") {
     if (method !== "GET") {
       throw new HttpError(405, "METHOD_NOT_ALLOWED", "method not allowed");
     }
@@ -246,7 +330,11 @@ export async function handleLibrary(
       throw new HttpError(400, "INVALID_REQUEST", "targetLanguage is required");
     }
     return jsonResponse({
-      pages: listTranslatedPages(ctx.db, documentId, query.data.targetLanguage),
+      locations: listTranslationLocations(
+        ctx.db,
+        documentId,
+        query.data.targetLanguage,
+      ),
     });
   }
 
@@ -267,7 +355,10 @@ export async function handleLibrary(
   }
 
   if (segments.length === 6 && segments[3] === "translations") {
-    const location = parseTranslationPath(segments);
+    const location = {
+      ...parseTranslationPath(segments),
+      unit: translationUnit(url),
+    };
     if (method === "GET") {
       if (!getDocument(ctx.db, documentId)) notFound();
       return jsonResponse(getTranslation(ctx.db, location));
@@ -276,10 +367,22 @@ export async function handleLibrary(
       const content = await readJson(
         request,
         MAX_TRANSLATION_BYTES,
-        translationContentSchema,
+        translationSaveInputSchema,
       );
-      const record = saveTranslation(ctx.db, location, content);
-      return jsonResponse(record);
+      const document = getDocument(ctx.db, documentId);
+      if (!document) notFound();
+      const { sourceCfi } = content;
+      const identified =
+        document.format === "epub"
+          ? sourceCfi !== undefined &&
+            (await isEpubUnitOf(location.unit, sourceCfi))
+          : sourceCfi === undefined;
+      if (!identified) {
+        throw new HttpError(400, "INVALID_REQUEST", "invalid translation location");
+      }
+      return jsonResponse(
+        saveTranslation(ctx.db, { ...location, sourceCfi }, content),
+      );
     }
     throw new HttpError(405, "METHOD_NOT_ALLOWED", "method not allowed");
   }

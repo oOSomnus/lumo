@@ -6,8 +6,10 @@ import { openAiCredentialStore, type SqliteCredentialStore } from "./ai-credenti
 import { createAiManager } from "./ai-settings";
 import {
   loadPdfjsAssets,
+  loadTypstAssets,
   resolvePdfjsDirectory,
-  type PdfjsAssets,
+  resolveTypstDirectory,
+  type StaticAssets,
 } from "./assets";
 import {
   errorResponse,
@@ -42,11 +44,18 @@ try {
   fail(`Cannot open reader database in ${dataDirectory}: ${(error as Error).message}`);
 }
 
-let assets: PdfjsAssets;
+let assets: StaticAssets;
 try {
   assets = loadPdfjsAssets();
 } catch (error) {
   fail(`Cannot load PDF.js assets: ${(error as Error).message}`);
+}
+
+let typstAssets: StaticAssets;
+try {
+  typstAssets = loadTypstAssets();
+} catch (error) {
+  fail(`Cannot load Typst assets: ${(error as Error).message}`);
 }
 
 let credentials: SqliteCredentialStore;
@@ -102,6 +111,9 @@ const server = Bun.serve({
     "/pdfjs/*": (request: Request) =>
       assets.serve(new URL(request.url)) ??
       errorResponse(404, "NOT_FOUND", "not found"),
+    "/typst/*": (request: Request) =>
+      typstAssets.serve(new URL(request.url)) ??
+      errorResponse(404, "NOT_FOUND", "not found"),
   },
   fetch() {
     return new Response("Not found", {
@@ -132,5 +144,6 @@ process.once("exit", () => {
 
 console.log(`Lumo data directory: ${dataDirectory}`);
 console.log(`PDF.js assets: ${resolvePdfjsDirectory()}`);
+console.log(`Typst assets: ${resolveTypstDirectory()}`);
 console.log("AI translation: configure a provider, model and credentials in Settings.");
 console.log(`Open in your browser: ${server.url.href}?token=${token}`);

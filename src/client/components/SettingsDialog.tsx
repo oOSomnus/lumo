@@ -242,6 +242,9 @@ export function SettingsDialog({
     async (signal: AbortSignal) => {
       setLoading(true);
       setLoadError(null);
+      // Reset when the dialog opens, not when the fetch returns: a pick made meanwhile must survive.
+      setLanguageDraft(uiLocale);
+      setLanguageError(null);
       setSnapshot(null);
       setCatalog(null);
       setCatalogError(null);
@@ -261,8 +264,6 @@ export function SettingsDialog({
         setSnapshot(settings);
         applyDraft(draftFrom(settings.config));
         setCatalog(baseCatalog);
-        setLanguageDraft(uiLocale);
-        setLanguageError(null);
         const selected = settings.config?.provider ?? "";
         if (selected) {
           const seq = ++catalogSeq.current;

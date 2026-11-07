@@ -8,8 +8,10 @@ import {
 } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import JSZip from "jszip";
 
 export interface DocumentRecord {
   id: string;
@@ -66,10 +68,136 @@ export async function uploadPdf(
   pageCount: number,
   label = name,
 ): Promise<DocumentRecord> {
-  const query = new URLSearchParams({ name, pageCount: String(pageCount) });
+  const query = new URLSearchParams({
+    name,
+    pageCount: String(pageCount),
+    format: "pdf",
+  });
   const response = await api.post(`/api/documents?${query}`, {
     headers: { "Content-Type": "application/pdf" },
     data: Buffer.from(fixturePdf(label, pageCount)),
+  });
+  expect(response.ok(), `upload ${name} failed with HTTP ${response.status()}`).toBe(true);
+  return (await response.json()) as DocumentRecord;
+}
+
+export const LONG_EPUB_PARAGRAPHS = 60;
+
+/** One chapter long enough for several screens; its two anchored headings always start a screen page, whatever the text size. */
+function longChapterXhtml(): string {
+  const paragraphs = Array.from({ length: LONG_EPUB_PARAGRAPHS }, (_, index) => {
+    const number = String(index + 1).padStart(2, "0");
+    const heading =
+      index === 20
+        ? '<h2 id="part-a" style="break-before:column">Part A</h2>'
+        : index === 40
+          ? '<h2 id="part-b" style="break-before:column">Part B</h2>'
+          : "";
+    return `${heading}<p>Paragraph ${number}. ${"The quick brown fox jumps over the lazy dog. ".repeat(5)}</p>`;
+  });
+  return `<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>One</title></head><body><h1>Chapter One</h1>${paragraphs.join("")}</body></html>`;
+}
+
+const LONG_NAV =
+  '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body><nav epub:type="toc" xmlns:epub="http://www.idpf.org/2007/ops"><ol><li><a href="c1.xhtml">Chapter One</a><ol><li><a href="c1.xhtml#part-a">Part A</a></li><li><a href="c1.xhtml#part-b">Part B</a></li></ol></li><li><a href="c2.xhtml">Chapter Two</a></li></ol></nav></body></html>';
+
+/** Three screen pages: text, an image alone, text. */
+export const IMAGE_PAGE_CHAPTER =
+  '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>One</title></head><body><h1>Chapter One</h1><p>Text before the image.</p><p style="break-before:column"><img src="images/pic.jpg" alt="tiny"/></p><p style="break-before:column">Text after the image.</p></body></html>';
+
+/** Two screen pages: text, then an inline SVG alone, which the reader cannot translate. */
+export const SVG_PAGE_CHAPTER =
+  '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>One</title></head><body><h1>Chapter One</h1><p>Text before the figure.</p><p style="break-before:column"><svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" fill="#888"/></svg></p></body></html>';
+
+/** The 8x8 JPEG every fixture book carries; an export must hand back exactly these bytes. */
+export const FIXTURE_JPEG = Buffer.from(
+  "/9j/4AAQSkZJRgABAgAAAQABAAD//gAQTGF2YzYyLjMwLjEwMAD/2wBDAAgEBAQEBAUFBQUFBQYGBgYGBgYGBgYGBgYHBwcICAgHBwcGBgcHCAgICAkJCQgICAgJCQoKCgwMCwsODg4RERT/xABMAAEBAAAAAAAAAAAAAAAAAAAABgEBAQAAAAAAAAAAAAAAAAAABgcQAQAAAAAAAAAAAAAAAAAAAAARAQAAAAAAAAAAAAAAAAAAAAD/wAARCAAIAAgDASIAAhEAAxEA/9oADAMBAAIRAxEAPwCLAE1/f//Z",
+  "base64",
+);
+
+/** A PNG that declares `width`×`height` and stops after its header: nothing can decode it, yet it names a huge picture. */
+export function pngDeclaring(width: number, height: number): Buffer {
+  const bytes = Buffer.alloc(33);
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  bytes.writeUInt32BE(13, 8);
+  bytes.write("IHDR", 12, "ascii");
+  bytes.writeUInt32BE(width, 16);
+  bytes.writeUInt32BE(height, 20);
+  bytes.set([8, 6, 0, 0, 0], 24);
+  return bytes;
+}
+
+const MEDIA_TYPES: Record<string, string> = {
+  jpg: "image/jpeg",
+  png: "image/png",
+  gif: "image/gif",
+  webp: "image/webp",
+};
+
+/** `long` is the long chapter with contents; `chapter` replaces the first chapter's XHTML; `images` adds files under `images/`. */
+export async function fixtureEpub({
+  long = false,
+  chapter,
+  images = {},
+}: {
+  long?: boolean;
+  chapter?: string;
+  images?: Record<string, Uint8Array>;
+} = {}): Promise<Uint8Array> {
+  const zip = new JSZip();
+  zip.file("mimetype", "application/epub+zip", { compression: "STORE" });
+  zip.file(
+    "META-INF/container.xml",
+    '<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+  );
+  zip.file(
+    "OEBPS/content.opf",
+    `<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="bookid">urn:uuid:fixture</dc:identifier><dc:title>Fixture</dc:title><dc:language>en</dc:language></metadata><manifest>
+      <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+      <item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>
+      <item id="c2" href="c2.xhtml" media-type="application/xhtml+xml"/>
+      <item id="img" href="images/pic.jpg" media-type="image/jpeg"/>${Object.keys(images)
+        .map(
+          (name, index) =>
+            `<item id="extra${index}" href="images/${name}" media-type="${MEDIA_TYPES[name.split(".").pop()!]}"/>`,
+        )
+        .join("")}
+    </manifest><spine><itemref idref="c1"/><itemref idref="c2"/></spine></package>`,
+  );
+  zip.file(
+    "OEBPS/nav.xhtml",
+    long
+      ? LONG_NAV
+      : '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body><nav epub:type="toc" xmlns:epub="http://www.idpf.org/2007/ops"><ol><li><a href="c1.xhtml">Chapter One</a></li><li><a href="c2.xhtml">Chapter Two</a></li></ol></nav></body></html>',
+  );
+  zip.file(
+    "OEBPS/c1.xhtml",
+    long
+      ? longChapterXhtml()
+      : (chapter ??
+        '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>One</title></head><body><h1>Chapter One</h1><p>Hello world from EPUB.</p><img src="images/pic.jpg" alt="tiny"/></body></html>'),
+  );
+  zip.file(
+    "OEBPS/c2.xhtml",
+    '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Two</title></head><body><h1>Chapter Two</h1><p>Second section.</p></body></html>',
+  );
+  zip.file("OEBPS/images/pic.jpg", FIXTURE_JPEG);
+  for (const [name, bytes] of Object.entries(images)) zip.file(`OEBPS/images/${name}`, bytes);
+  // One fixed timestamp on every entry, directories included, keeps equal fixtures byte-identical: a book's id never depends on the clock.
+  const date = new Date("2000-01-01T00:00:00Z");
+  for (const entry of Object.values(zip.files)) entry.date = date;
+  return zip.generateAsync({ type: "uint8array" });
+}
+
+export async function uploadEpub(
+  api: APIRequestContext,
+  name: string,
+  options?: { long?: boolean; chapter?: string; images?: Record<string, Uint8Array> },
+): Promise<DocumentRecord> {
+  const query = new URLSearchParams({ name, format: "epub" });
+  const response = await api.post(`/api/documents?${query}`, {
+    headers: { "Content-Type": "application/epub+zip" },
+    data: Buffer.from(await fixtureEpub(options)),
   });
   expect(response.ok(), `upload ${name} failed with HTTP ${response.status()}`).toBe(true);
   return (await response.json()) as DocumentRecord;
@@ -213,3 +341,18 @@ export const test = base.extend<{ lumo: LumoApp }>({
 });
 
 export { expect };
+
+/** Opens the export dialog, downloads every translation of the language and returns the ZIP's files by name as bytes. */
+export async function downloadAllTranslations(page: Page): Promise<Record<string, Uint8Array>> {
+  await page.getByRole("button", { name: "Export", exact: true }).click();
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    page.getByRole("button", { name: "All translated content in this language (ZIP)" }).click(),
+  ]);
+  const zip = await JSZip.loadAsync(await readFile(await download.path()));
+  const files: Record<string, Uint8Array> = {};
+  for (const [name, file] of Object.entries(zip.files)) {
+    if (!file.dir) files[name] = await file.async("uint8array");
+  }
+  return files;
+}

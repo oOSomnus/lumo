@@ -2,7 +2,7 @@ export type ErrorParams = Record<string, string | number>;
 export type ErrorMessage = (params: ErrorParams) => string;
 
 export const en = {
-  appTitle: "Lumo · PDF reader with page translation",
+  appTitle: "Lumo · PDF & EPUB reader with translation",
   common: {
     cancel: "Cancel",
     close: "Close",
@@ -11,21 +11,22 @@ export const en = {
     save: "Save",
     delete: "Delete",
     download: "Download",
-    openPdf: "Open PDF",
+    openPdf: "Open file",
     listSeparator: "; ",
+    sectionOf: (section: number, total: number) =>
+      `Section ${section} / ${total || "?"}`,
     pageLabel: (page: number) => `Page ${page}`,
     pageOf: (page: number, total: number) => `Page ${page} / ${total || "?"}`,
   },
   file: {
     editedCopySuffix: " (edited copy)",
-    exportPageHeading: (page: number) => `## Page ${page}`,
-    exportDraftHeading: (page: number, language: string) =>
-      `## Page ${page} · ${language}`,
   },
   stages: {
     queued: "Waiting",
     preparing: "Preparing page",
     generating: "Generating",
+    repairing: "Repairing Typst",
+    validating: "Validating Typst",
     saving: "Saving",
     saved: "Saved",
     error: "Failed",
@@ -34,8 +35,8 @@ export const en = {
   },
   appBar: {
     library: "Library",
-    openPdf: "Open PDF",
-    noPdf: "No PDF open",
+    openPdf: "Open file",
+    noPdf: "No document open",
     saveModifiedCopy: "Save edited copy",
     savingCopy: "Saving copy…",
     discardChanges: "Discard changes",
@@ -70,17 +71,24 @@ export const en = {
   },
   splitter: "Resize the original and translation panes",
   empty: {
-    openPdf: "Open a PDF to start reading. You can also drop a file here.",
-    noPdfOpen: "No PDF is open.",
+    openPdf: "Open a document to start reading. You can also drop a file here.",
+    noPdfOpen: "No document is open.",
     filesSaved: "Files are saved in the local data directory and restored after the browser closes.",
-    batchHint: "Open a PDF to translate several pages in parallel.",
+    batchHint: "Open a document to translate several pages in parallel.",
   },
   viewer: {
     reopen: "Reopen",
   },
   translation: {
-    imagePlaceholder: (alt: string) =>
-      `〔Image placeholder: ${alt || "no description"}〕`,
+    preview: "Preview",
+    source: "Source",
+    editSource: "Edit source",
+    saveSource: "Save",
+    discardSource: "Discard changes",
+    sourceLabel: "Typst source",
+    previewLabel: "Typst preview",
+    compiling: "Compiling the preview…",
+    compileFailed: "The Typst source does not compile yet. The draft is kept for editing.",
   },
   page: {
     actualOrder: "(actual page order)",
@@ -89,6 +97,11 @@ export const en = {
     regenerateHint:
       "Use current AI settings; the previous translation is kept until the new one is saved.",
     translate: "Translate this page",
+    translateSelection: "Translate selection",
+    previousPage: "Previous page",
+    nextPage: "Next page",
+    selection: (text: string) => `Selected: ${text}`,
+    clearSelection: "Clear selection",
     export: "Export",
     existingTranslation: " · used saved translation",
     waitingModel: "Waiting for the model to return text…",
@@ -96,12 +109,20 @@ export const en = {
     retrySave: "Retry save",
     discardDraft: "Discard draft",
     retry: "Retry",
+    repair: "Repair Typst",
+    continueRepair: "Continue repair",
     readingStored: "Reading saved translation…",
     storedReadFailedTitle: "Could not read the saved translation",
     noTranslation: "This page has no translation yet.",
     consent:
-      "Translation sends this page's text and image to the configured AI service. The whole PDF is not sent.",
+      "Translation sends the current page to the configured AI service together with small excerpts of the previous and next pages (text, or a thin image strip when there is no text). The excerpts are reference only: they are not translated or saved. The whole document is not sent.",
     cacheHint: "saved translation",
+    contextWarning:
+      "Some neighboring context could not be read, so this page was translated with less surrounding context.",
+    originalRange: "Original page range",
+    originalRangeNote: (position: string) =>
+      `Showing the translation of an earlier page range (${position}). The reading layout has changed since, so that range may span several pages now.`,
+    showVisiblePage: "Show the page on screen",
     mode: {
       notInLibrary: "Not in library",
       readingStored: "Reading saved translation",
@@ -111,22 +132,60 @@ export const en = {
     },
     disabled: {
       previewOnly: "This file is not in the library yet. Retry the import before translating.",
-      noPdf: "Open a PDF first.",
-      loading: "The PDF is still loading.",
+      noPdf: "Open a document first.",
+      loading: "The document is still loading.",
       modified: "The PDF has unsaved edits. Save an edited copy or discard them before generating new translations.",
       outlineBusy:
         "An outline is being generated or saved. Wait for it to finish before translating.",
+      unsavedDraft: "Repair, save or discard the current draft first.",
+      locating: "The visible page is still being located.",
+      noContent: "This page has no text or image the reader can translate.",
     },
     unsaved: {
       title: "Unsaved",
-      body: "The text was generated, but writing it to disk failed. Retry the save or export it; the previous translation was not overwritten.",
+      body: "The translation is not saved yet. The draft is kept, and the previous translation was not overwritten.",
       saveFailed: (detail: string) => `Save failed: ${detail}`,
+      validationFailed: (detail: string) => `Typst check failed: ${detail}`,
+      repairFailed: (detail: string) => `Repair failed: ${detail}`,
+      operationFailed: (detail: string) =>
+        `Could not complete the operation: ${detail}`,
     },
     cancelledKept: "Regeneration cancelled; previous translation kept",
     cancelled: "Cancelled",
     failedKept: "Regeneration failed; previous translation kept",
     failed: "Translation failed",
     errorDetail: (detail: string, code: string) => `${detail} (${code})`,
+  },
+  repair: {
+    title: "Typst repair",
+    note: "Calls AI only when the compiler rejects the draft, and keeps going until it compiles or you cancel; may cost money.",
+    round: (round: number) => `Round ${round}`,
+    earlierRoundsOmitted: (count: number) => `Details of ${count} earlier round(s) are omitted.`,
+    status: {
+      requesting: "Waiting for the model",
+      validating: "Changes applied; waiting for compile",
+      "compile-failed": "Still does not compile",
+      "compile-passed": "Compiles",
+      rejected: "Reply rejected; asking again",
+      "request-failed": "Repair request failed",
+      cancelled: "Cancelled",
+    },
+    requesting: (reply: number) => `Requested model reply ${reply}`,
+    rejected: (reply: number, message: string) =>
+      `Reply ${reply} rejected: ${message}`,
+    appliedEdits: (reply: number, count: number) =>
+      `Reply ${reply}: ${count} local replacement(s) applied`,
+    appliedRewrite: (reply: number) => `Reply ${reply}: full source rewritten`,
+    diagnostics: "Compiler diagnostics",
+    changeAt: (line: number) => `Changed from line ${line}`,
+    rangeNote:
+      "Shows the covering range; unchanged lines between edits may be included.",
+    before: "Before (removed)",
+    after: "After (added)",
+    resultDiagnostics: "Compiler result after this round",
+    savedFailedAfterCompile: "The source compiled, but saving failed.",
+    cancelledDraftKept: "Repair cancelled. The latest draft is kept.",
+    saved: "Saved",
   },
   errors: {
     LOCAL_ACCESS_REQUIRED: () =>
@@ -137,6 +196,7 @@ export const en = {
     NOT_FOUND: () => "The requested item does not exist.",
     METHOD_NOT_ALLOWED: () => "This action is not supported.",
     DOCUMENT_NOT_FOUND: () => "This document no longer exists in the library.",
+    DOCUMENT_CONFLICT: () => "This file is already stored with different metadata.",
     STORAGE_BUSY: () => "The database is busy. Try again shortly.",
     STORAGE_FULL: () => "The disk is full. Free some space and try again.",
     STORAGE_ERROR: () => "The local database could not be read or written.",
@@ -165,6 +225,12 @@ export const en = {
     STREAM_INTERRUPTED: () => "The connection ended before the translation completed.",
     ABORTED: () => "The action was cancelled.",
     TRANSLATION_FAILED: () => "Translation failed.",
+    TYPST_COMPILE_FAILED: () =>
+      "The Typst source does not compile. The draft is kept for editing.",
+    TYPST_COMPILE_TIMEOUT: () =>
+      "Typst compilation timed out. The draft is kept; try again.",
+    TYPST_RUNTIME_UNAVAILABLE: () =>
+      "The local Typst runtime is unavailable. Reload and try again.",
     EXPORT_EMPTY: () => "This page has no complete translation to export.",
     EXPORT_NONE: () => "No complete translations to export yet.",
     LANGUAGE_RELOAD_BLOCKED: () =>
@@ -187,9 +253,13 @@ export const en = {
       "The copy is encrypted and the password is missing or incorrect. The original file was not replaced.",
     PDF_RUNTIME_UNAVAILABLE: () => "The PDF runtime is not available.",
     PDF_NOT_READY: () => "The PDF is not open yet.",
+    EPUB_NOT_READY: () => "The EPUB is not open yet.",
+    EPUB_OPEN_FAILED: () => "The EPUB could not be opened.",
     PDF_VIEWER_UNAVAILABLE: () => "The PDF.js viewer could not be initialized.",
     PDF_OPEN_FAILED: () => "The PDF could not be opened.",
     INVALID_PDF_FILE: () => "Choose a PDF file.",
+    INVALID_DOCUMENT_FILE: () => "Choose a PDF or EPUB file.",
+    EMPTY_DOCUMENT_FILE: () => "That file is empty.",
     EMPTY_PDF_FILE: () => "The PDF file is empty.",
     COPY_CHANGED_DURING_SAVE: () =>
       "New edits arrived while saving. The copy was stored, but the current editor was not switched; save again.",
@@ -200,6 +270,14 @@ export const en = {
     PAGE_RENDER_FAILED: () => "The page could not be rendered.",
     PAGE_IMAGE_TOO_LARGE: () =>
       "The page image exceeds the 6000000 character limit.",
+    EPUB_NAVIGATION_FAILED: () =>
+      "The book could not move to that position or apply that setting.",
+    EPUB_PAGE_UNAVAILABLE: () =>
+      "The visible page could not be located in the book. Turn the page or resize the window and try again.",
+    EPUB_PAGE_TOO_LARGE: () =>
+      "The text of this page is over the 100000 character limit.",
+    PAGE_ASSETS_TOO_LARGE: () =>
+      "The images of this page are too large to use together.",
     OUTLINE_INVALID: () =>
       "The PDF outline could not be used. Select pages manually.",
     OUTLINE_EMPTY: () =>
@@ -258,15 +336,15 @@ export const en = {
   },
   export: {
     title: "Export translation",
-    currentPage: "This page as Markdown",
-    allPages: "All translated pages in this language",
+    currentPage: "This page as Typst",
+    allPages: "All translated content in this language (ZIP)",
     noCurrent: "This page has no complete translation to export.",
     none: "No complete translations to export yet.",
     failed: (detail: string) => `Export failed: ${detail}`,
   },
   library: {
     title: "Library",
-    empty: "The library is empty. Open a PDF to start.",
+    empty: "The library is empty. Open a PDF or EPUB to start.",
     recentlyRead: (date: string) => `last read ${date}`,
     returnToReader: "Return to reading",
     coverUnavailable: "Cover unavailable",
@@ -312,19 +390,50 @@ export const en = {
     tasks: "Translation tasks",
     noTasks: "No tasks yet. Select pages and start translating.",
     existing: "used saved translation",
+    epub: {
+      selectSections: "Select sections",
+      expression: "Section expression",
+      currentSection: "Current section",
+      allSections: "All sections",
+      untranslatedSections: "Untranslated sections",
+      sectionRange: (first: number, last: number, total: number) =>
+        `Sections ${first}–${last} (${total} total)`,
+      sectionCheckboxes: "Section selection",
+      markerTranslated: "Has translations",
+      summary: (selected: number, translated: number, tasks: number) =>
+        `${selected} selected · ${translated} with translations · ${tasks} with tasks`,
+      start: (count: number) =>
+        `Start translation${count > 0 ? ` (${count} section${count === 1 ? "" : "s"})` : ""}`,
+      note: "Starting splits each selected section into the screen pages of the current window size and reading settings, then translates every page on its own. Changing the settings afterwards does not change pages already queued.",
+      finding: (found: number) => `Finding pages… ${found} found`,
+      found: (found: number, queued: number) =>
+        `${found} pages found · ${queued} queued`,
+      findFailed: (detail: string) =>
+        `Could not split the sections into pages: ${detail}`,
+      taskPage: (
+        section: number,
+        position: { page: number; total: number } | null,
+        id: string,
+      ) =>
+        position
+          ? `Section ${section} · page ${position.page} / ${position.total}`
+          : `Section ${section} · page …${id}`,
+    },
   },
   outline: {
     sectionTitle: "Select by outline",
     loading: "Reading the outline…",
     loadFailed: (detail: string) => `Could not read the outline: ${detail}`,
     reload: "Reload outline",
-    sourceNative: "PDF outline",
+    sourceNative: "Document outline",
     sourceGenerated: "AI-generated outline",
     skipped: (count: number) =>
       `${count} outline item${count === 1 ? "" : "s"} without a page ${
         count === 1 ? "was" : "were"
       } skipped.`,
     note: "Translation uses whole PDF pages; sections that start on the same page may overlap.",
+    noteEpub:
+      "Selecting a heading selects its whole sections; headings that point at the same section overlap.",
     generate: "Generate outline with AI",
     retryGenerate: "Try again",
     generateTitle: "Generate an outline with AI?",
@@ -347,6 +456,39 @@ export const en = {
     toggle: (title: string) => `Expand or collapse ${title}`,
     selectRange: (start: number, end: number) =>
       start === end ? `Select page ${start}` : `Select pages ${start}–${end}`,
+    sectionRange: (start: number, end: number) =>
+      start === end ? `Section ${start}` : `Sections ${start}–${end}`,
+    selectSectionRange: (start: number, end: number) =>
+      start === end ? `Select section ${start}` : `Select sections ${start}–${end}`,
+  },
+  epub: {
+    toolbar: "EPUB reading controls",
+    contents: "Contents",
+    contentsTitle: "Contents of this book",
+    closeContents: "Close contents",
+    noContents: "This EPUB has no contents.",
+    toggleGroup: (label: string) => `Expand or collapse ${label}`,
+    position: (section: number, sections: number, page: number, pages: number) =>
+      `Section ${section} / ${sections || "?"} · page ${page} / ${pages}`,
+    locating: "Locating…",
+    noContent: "Nothing to translate on this page",
+    settings: "Reading settings",
+    fontSize: "Font size",
+    smaller: "Smaller text",
+    larger: "Larger text",
+    fontSizeValue: (size: number) => `${size} px`,
+    fontFamily: "Font",
+    serif: "Serif",
+    sansSerif: "Sans-serif",
+    lineHeight: "Line spacing",
+    theme: "Theme",
+    light: "Light",
+    sepia: "Sepia",
+    dark: "Dark",
+    resetSettings: "Restore defaults",
+    fixedLayout:
+      "This book has a fixed layout: font size, font and line spacing do not apply. The theme still does.",
+    actionFailed: (detail: string) => `Could not update the book view: ${detail}`,
   },
   settings: {
     title: "Settings",

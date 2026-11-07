@@ -25,6 +25,13 @@ export async function handleOutlinePage(
   if (!document) {
     throw new HttpError(404, "DOCUMENT_NOT_FOUND", "document does not exist");
   }
+  if (document.format !== "pdf") {
+    throw new HttpError(
+      400,
+      "INVALID_REQUEST",
+      "AI outline generation is only available for PDF documents",
+    );
+  }
   if (input.pageNumber > document.pageCount) {
     throw new HttpError(400, "INVALID_REQUEST", "page number is outside the document");
   }
