@@ -153,7 +153,10 @@ function Test-KeyExists($info) {
     if (present.length === 0) return;
     powershell(
       "remove",
-      String.raw`foreach ($thumbprint in $args) { if (Get-Cert $thumbprint) { Remove-Item -LiteralPath "Cert:\CurrentUser\My\$thumbprint" -DeleteKey } }`,
+      String.raw`foreach ($thumbprint in $args) {
+  if (Get-Cert $thumbprint) { Remove-Item -LiteralPath "Cert:\CurrentUser\My\$thumbprint" -DeleteKey }
+  Remove-Item -LiteralPath "Cert:\CurrentUser\CA\$thumbprint" -ErrorAction SilentlyContinue
+}`,
       present,
     );
   }
@@ -171,6 +174,8 @@ Export-PfxCertificate -Cert $first -FilePath $env:FIXTURE_PFX -Password $passwor
 # Only the PFX keeps the signer: the wrapper must be the one to import it.
 Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($first.Thumbprint)" -DeleteKey
 $other = New-Fixture 'lumo-signing-test-bystander'
+# New-SelfSignedCertificate also leaves a public-key-only copy in CurrentUser\CA; the wrapper refuses any other certificate with the signing key.
+foreach ($thumbprint in $first.Thumbprint, $other.Thumbprint) { Remove-Item -LiteralPath "Cert:\CurrentUser\CA\$thumbprint" -ErrorAction SilentlyContinue }
 @{ signer = $first.Thumbprint; bystander = $other.Thumbprint } | ConvertTo-Json -Compress
 `,
       [],
