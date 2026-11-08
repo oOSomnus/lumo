@@ -349,7 +349,7 @@ test("EPUB selection is its own unit, the page keeps its translation and the pos
   await openBook(page, lumo.url, "novel.epub");
   const book = () => page.frameLocator("iframe.epub-frame").frameLocator("iframe").first();
   await book().getByText("Chapter One").waitFor();
-  expect(await readPosition(page)).toEqual({ section: 1, sections: 2, page: 1, pages: 1 });
+  await expect.poll(() => readPosition(page)).toEqual({ section: 1, sections: 2, page: 1, pages: 1 });
 
   await page.getByRole("button", { name: "Translate this page" }).click();
   await expect(page.locator(".page-status")).toHaveText(/Saved/, SAVED);
@@ -385,7 +385,7 @@ test("EPUB selection is its own unit, the page keeps its translation and the pos
 
   await page.getByRole("button", { name: "Next page", exact: true }).click();
   await book().getByText("Chapter Two").waitFor();
-  expect(await readPosition(page)).toEqual({ section: 2, sections: 2, page: 1, pages: 1 });
+  await expect.poll(() => readPosition(page)).toEqual({ section: 2, sections: 2, page: 1, pages: 1 });
   await expect
     .poll(async () => (await savedView(lumo.api, document.id))?.cfi)
     .toContain("/6/4");
@@ -393,7 +393,7 @@ test("EPUB selection is its own unit, the page keeps its translation and the pos
   await page.reload();
   await openFromLibrary(page, "novel.epub");
   await book().getByText("Chapter Two").waitFor();
-  expect(await readPosition(page)).toEqual({ section: 2, sections: 2, page: 1, pages: 1 });
+  await expect.poll(() => readPosition(page)).toEqual({ section: 2, sections: 2, page: 1, pages: 1 });
 });
 
 test("EPUB contents and settings stay usable on a narrow screen", async ({ page, lumo }) => {
@@ -1213,6 +1213,11 @@ test("EPUB pane layouts reflow the book in place and keep the page's first text 
   await openContentsEntry(page, "Part A");
   await expect.poll(async () => (await readPosition(page)).page).toBeGreaterThan(1);
   const before = await readPosition(page);
+  // The saved translation marks this page's exact text range: it is found again only once the book shows that range.
+  await page.getByRole("button", { name: "Translate this page" }).click();
+  await expect(page.locator(".page-status")).toHaveText(/Saved/, SAVED);
+  expect(requests).toHaveLength(1);
+  expect(requests[0]!.xhtml).toContain("Part A");
   const layout = page.getByRole("group", { name: "Pane layout" });
   const choose = (name: string) => layout.getByRole("button", { name, exact: true }).click();
 
@@ -1224,10 +1229,8 @@ test("EPUB pane layouts reflow the book in place and keep the page's first text 
   await expect.poll(async () => (await readPosition(page)).pages).toBeLessThan(narrow);
   for (const name of ["Left only", "Right only", "Equal split"]) await choose(name);
 
-  // Back at the first layout the book is back on the same page of the same section, and that page still starts at its heading.
+  // Back at the first layout the book is back on the same page of the same section, still starting at its heading.
   await expect.poll(() => readPosition(page)).toEqual(before);
-  await page.getByRole("button", { name: "Translate this page" }).click();
-  await expect.poll(() => requests.length).toBe(1);
-  expect(requests[0]!.xhtml).toContain("Part A");
   await expect(page.locator(".page-status")).toHaveText(/Saved/, SAVED);
+  expect(requests).toHaveLength(1);
 });
