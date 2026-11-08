@@ -77,7 +77,12 @@ async function main(): Promise<void> {
   }
   // Windows imports the certificate for exactly the duration of this command and removes it, key included, afterwards.
   const wrapped = signing?.importWindowsCertificate;
-  await run("Tauri", wrapped ? windowsSigningCommand(tauri) : tauri, wrapped ? windowsSigningEnvironment(process.env) : process.env);
+  let env: NodeJS.ProcessEnv = wrapped ? windowsSigningEnvironment(process.env) : process.env;
+  if (mode === "build" && target.platform === "linux" && target.arch === "arm64") {
+    // linuxdeploy's strip and patchelf both leave Bun's aarch64 sidecar unable to start (scripts/linuxdeploy-patchelf.sh).
+    env = { ...env, NO_STRIP: "1", PATCHELF: join(root, "scripts", "linuxdeploy-patchelf.sh") };
+  }
+  await run("Tauri", wrapped ? windowsSigningCommand(tauri) : tauri, env);
   if (signing) {
     // Written only after Tauri succeeded: a failed signing step never leaves a "signed" claim behind.
     const status = signingStatus(target.platform, signing);
