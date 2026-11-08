@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="Lumo logo">
+<rect width="256" height="256" rx="57" fill="#294A63"/>
+
+  <path d="M44 93 C73 81 100 83 125 99 L125 192 C102 179 76 174 44 184 Z" fill="#F8FBFC"/>
+  <path d="M131 99 C157 83 184 81 212 93 L212 184 C180 174 154 179 131 192 Z" fill="#83D2CB"/>
+  <path d="M125 99 L125 192" fill="none" stroke="#DDE9EC" stroke-width="2"/>
+  <path d="M131 99 L131 192" fill="none" stroke="#60BDB5" stroke-width="2"/>
+  <path d="M59 113 Q83 108 108 121 M59 132 Q83 127 108 140" stroke="#B7CCD5" stroke-width="4.2" stroke-linecap="round" opacity="0.78" fill="none"/>
+  <path d="M147 121 Q173 108 197 113 M147 140 Q173 127 197 132" stroke="#367F7B" stroke-width="4.2" stroke-linecap="round" opacity="0.56" fill="none"/>
+  <path d="M128 47 C130.9 58.2 136.6 63.9 148 66.7 C136.6 69.5 130.9 75.2 128 86.4 C125.1 75.2 119.4 69.5 108 66.7 C119.4 63.9 125.1 58.2 128 47Z" fill="#F7CA81"/>
+
+</svg>
