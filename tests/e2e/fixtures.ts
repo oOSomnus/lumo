@@ -12,6 +12,7 @@ import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import JSZip from "jszip";
+import { getBuildTarget } from "../../scripts/targets";
 
 export interface DocumentRecord {
   id: string;
@@ -266,7 +267,7 @@ export const test = base.extend<{ lumo: LumoApp; aiConfigured: boolean }>({
   lumo: async ({ aiConfigured }, use, testInfo) => {
     const directory = mkdtempSync(join(tmpdir(), "lumo-major-"));
     const standalone = testInfo.project.name === "standalone";
-    const command = standalone ? resolve("dist/lumo") : "bun";
+    const command = standalone ? resolve(getBuildTarget().serverPath) : "bun";
     const args = standalone ? [] : [resolve("src/server/index.ts")];
     const child = spawn(command, args, {
       cwd: resolve("."),

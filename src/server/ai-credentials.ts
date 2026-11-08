@@ -135,6 +135,7 @@ export class SqliteCredentialStore implements CredentialStore {
   readonly #db: Database;
   readonly #path: string;
   #chain: Promise<unknown> = Promise.resolve();
+  #closing: Promise<void> | undefined;
 
   constructor(db: Database, path: string) {
     this.#db = db;
@@ -234,11 +235,16 @@ export class SqliteCredentialStore implements CredentialStore {
     });
   }
 
-  close(): void {
-    this.#db.close();
+  /** Rejects new writes at once, waits for queued ones, then closes. Repeat calls share the result. */
+  close(): Promise<void> {
+    this.#closing ??= this.#chain.then(() => this.#db.close());
+    return this.#closing;
   }
 
   #enqueue<T>(task: () => Promise<T>): Promise<T> {
+    if (this.#closing) {
+      return Promise.reject(new CredentialStorageError("credential store is closed"));
+    }
     const run = this.#chain.then(task, task);
     this.#chain = run.then(
       () => undefined,

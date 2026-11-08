@@ -6,3 +6,5 @@ vendor/
 pdf-reader-layout.png
 *.log
 /test-results/
+/src-tauri/target/
+/src-tauri/gen/

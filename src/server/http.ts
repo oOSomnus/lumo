@@ -286,6 +286,12 @@ export function classifyError(error: unknown): ClassifiedError {
           code: "AI_LOGIN_BUSY",
           message: "another AI sign-in is already in progress",
         };
+      case "AiLoginStoppingError":
+        return {
+          status: 503,
+          code: "SERVER_STOPPING",
+          message: "the server is shutting down",
+        };
       case "AiLoginNotFoundError":
         return {
           status: 404,

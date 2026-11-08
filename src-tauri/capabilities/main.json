@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "The launcher panel: its five commands and state events only.",
+  "windows": ["main"],
+  "permissions": [
+    "allow-get-snapshot",
+    "allow-open-webui",
+    "allow-copy-webui-url",
+    "allow-retry-start",
+    "allow-confirm-exit",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
+  ]
+}

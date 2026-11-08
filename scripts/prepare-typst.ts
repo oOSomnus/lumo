@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import JSZip from "jszip";
 
 const VERSION = "0.7.0";
 const ASSET_TAG = "v0.13.1";
@@ -167,11 +168,6 @@ async function prepareFonts(): Promise<void> {
     return;
   }
 
-  const unzip = Bun.spawnSync(["unzip", "-v"], { stdout: "ignore", stderr: "ignore" });
-  if (unzip.exitCode !== 0) {
-    throw new Error("unzip is required to prepare Typst fonts; install unzip and retry");
-  }
-
   const zip = await download(NOTO_URL, "Noto Serif CJK");
   const digest = sha256(zip);
   if (digest !== NOTO_ZIP_SHA256) {
@@ -180,29 +176,19 @@ async function prepareFonts(): Promise<void> {
     );
   }
 
+  const member = (await JSZip.loadAsync(zip)).file(NOTO_MEMBER);
+  if (!member) {
+    throw new Error(`downloaded archive does not contain ${NOTO_MEMBER}`);
+  }
+  const font = await member.async("uint8array");
+  if (sha256(font) !== NOTO_TTC_SHA256) {
+    throw new Error("extracted Noto Serif CJK font checksum mismatch");
+  }
   const workDirectory = mkdtempSync(join(root, "vendor", ".typst-tmp-"));
   try {
-    const zipPath = join(workDirectory, "noto.zip");
-    writeFileSync(zipPath, zip);
-    const extraction = Bun.spawnSync(
-      ["unzip", "-q", zipPath, NOTO_MEMBER, "-d", workDirectory],
-      { stdout: "pipe", stderr: "pipe" },
-    );
-    if (extraction.exitCode !== 0) {
-      throw new Error(
-        `unzip failed: ${
-          extraction.stderr.toString().trim() || `exit ${extraction.exitCode}`
-        }`,
-      );
-    }
-    const extracted = join(workDirectory, NOTO_MEMBER);
-    if (!statSync(extracted).isFile()) {
-      throw new Error(`downloaded archive does not contain ${NOTO_MEMBER}`);
-    }
-    if (sha256(readFileSync(extracted)) !== NOTO_TTC_SHA256) {
-      throw new Error("extracted Noto Serif CJK font checksum mismatch");
-    }
-    renameSync(extracted, notoDestination);
+    const staged = join(workDirectory, NOTO_MEMBER);
+    writeFileSync(staged, font);
+    renameSync(staged, notoDestination);
   } finally {
     rmSync(workDirectory, { recursive: true, force: true });
   }

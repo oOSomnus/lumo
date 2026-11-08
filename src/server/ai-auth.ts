@@ -24,6 +24,13 @@ export class AiLoginBusyError extends Error {
   }
 }
 
+export class AiLoginStoppingError extends Error {
+  constructor() {
+    super("the server is shutting down");
+    this.name = "AiLoginStoppingError";
+  }
+}
+
 export class AiLoginNotFoundError extends Error {
   constructor() {
     super("AI sign-in session does not exist");
@@ -388,10 +395,7 @@ class LoginSession {
   }
 
   #finish(): void {
-    if (this.#closed) {
-      this.#resolveSettled();
-      return;
-    }
+    // A disconnected browser sets #closed before the run ends; timers must still stop.
     this.#closed = true;
     clearTimeout(this.#deadline);
     clearInterval(this.#heartbeat);
@@ -416,18 +420,23 @@ export interface LoginRegistry {
   answer(sessionId: string, promptId: string, value: string): void;
   cancel(sessionId: string): void;
   cancelProvider(provider: string): Promise<void>;
+  /** Refuses new sign-ins, cancels the active one and resolves once it has settled. */
+  shutdown(): Promise<void>;
 }
 
 export function createLoginRegistry(
   options: { deadlineMs?: number } = {},
 ): LoginRegistry {
   let active: LoginSession | null = null;
+  let stopping = false;
   const deadlineMs = options.deadlineMs ?? LOGIN_DEADLINE_MS;
 
   return {
     async start(provider, type, ai) {
+      if (stopping) throw new AiLoginStoppingError();
       if (active) throw new AiLoginBusyError();
       await ai.assertLoginSupported(provider, type);
+      if (stopping) throw new AiLoginStoppingError();
       if (active) throw new AiLoginBusyError();
 
       const session = new LoginSession(provider, type, ai, deadlineMs);
@@ -464,6 +473,13 @@ export function createLoginRegistry(
     async cancelProvider(provider) {
       if (!active || active.provider !== provider) return;
       const session = active;
+      session.cancel("cancelled");
+      await session.settled;
+    },
+    async shutdown() {
+      stopping = true;
+      const session = active;
+      if (!session) return;
       session.cancel("cancelled");
       await session.settled;
     },

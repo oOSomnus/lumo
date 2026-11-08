@@ -39,21 +39,33 @@
 - 译文持久化到 SQLite；再次打开同一页优先显示已保存结果。“导出全部译文”会把已保存的页面源码导出为 ZIP，内含逐页 `.typ` 文件和图片资源：PDF 为 `p<页码>-<语言>.typ`，EPUB 为 `<序号>-s<章节>-<语言>.typ`，序号按阅读顺序给已保存的屏幕页编号；选择译文不包含在该文件中。
 - 修改表单或批注后，“保存修改副本”会生成新文档并保留原件；有未保存修改时会阻止产生新译文。
 
-## 单文件构建
+## 桌面应用与独立服务
+
+安装后的应用是一个小窗口，它启动随包附带的服务 `lumo-server`，并在窗口打开期间保持其运行。`lumo-server` 是编译后的 Bun 程序，内嵌服务端、前端、PDF.js、epub.js、JSZip 以及 Typst 编译器/渲染器和字体；机器上不需要 `node_modules`、`vendor/` 或 Bun。阅读和翻译仍在系统默认浏览器中进行，窗口本身不加载阅读界面。
+
+窗口从上到下显示：名称和版本；文字状态（正在启动、正在运行、正在停止、未在运行）；不含访问码的本地地址；**打开 WebUI** 与**复制访问链接**；通俗易懂的最近活动；**更多日志与详情**（最近 200 条、数据目录，失败后还有失败码）；以及**退出 Lumo**。只有服务运行时才能打开和复制。**复制访问链接**复制的是含本次访问码的完整链接：它只在本机有效，请勿分享。服务就绪后，窗口使用书库中保存的界面语言；此前以及数据库无法打开时，使用系统语言（中文或英文）。
+
+- **失败** — 服务无法启动或意外停止时，窗口保持打开、撤下地址，并显示固定原因和**重试启动**。每次重试都会启动新的服务，使用新的端口和访问码，因此上一次运行的链接随即失效。45 秒内未就绪视为失败。
+- **退出** — 关闭窗口、应用菜单的“退出”和**退出 Lumo**行为一致。服务运行时 Lumo 会先请你确认，因为这会停止服务并中断正在进行的翻译；随后等待服务写完数据（最长 35 秒，超时则强制结束并给出警告），窗口才关闭。macOS 上关闭最后一个窗口同样会退出，不留后台进程。窗口进程若意外消失，服务会自行发现并退出。
+- **再次启动** — 再次启动 Lumo 只会把已有窗口带到前台。
+- **活动日志** — 只保存在内存中（最近 200 条），不写入磁盘；内容是固定的提示语，不含访问码、密钥、模型输入或服务商的错误文本。
+
+为本机构建安装包，或只构建独立服务：
 
 ```bash
-bun run build
-LUMO_DATA_DIR=/absolute/path ./dist/lumo
+bun run build            # 安装包位于 src-tauri/target/<triple>/release/bundle/
+bun run build:server     # dist/sidecar/lumo-server-<triple>
+LUMO_DATA_DIR=/absolute/path ./dist/sidecar/lumo-server-<triple>
 ```
 
-构建产物内嵌 Bun、服务端、前端、PDF.js、epub.js、JSZip 以及 Typst 编译器/渲染器和字体；运行时不需要 `node_modules`、`vendor/` 或 Bun。
+不带参数手动启动时，服务会像源码模式一样打印浏览器地址。`--desktop` 是窗口使用的私有协议（stdout 上的 JSON 事件和 stdin 上的一条停止命令），不供手动使用。
 
 ## 数据与安全
 
-默认数据目录为 `${XDG_DATA_HOME:-~/.local/share}/lumo`。启动时可用 `LUMO_DATA_DIR` 指定绝对路径：
+所有系统的默认数据目录都是 `${XDG_DATA_HOME:-~/.local/share}/lumo`：未设置 `XDG_DATA_HOME` 时，macOS 和 Linux 为 `~/.local/share/lumo`，Windows 为 `%USERPROFILE%\.local\share\lumo`。安装、升级和卸载应用都不会触碰它。请在启动 Lumo 的环境中用 `LUMO_DATA_DIR` 指定绝对路径：
 
 ```bash
-LUMO_DATA_DIR=/absolute/path/to/lumo-data bun run dev
+LUMO_DATA_DIR=/absolute/path/to/lumo-data bun run dev:server
 ```
 
 | 文件 | 内容 |
@@ -61,13 +73,13 @@ LUMO_DATA_DIR=/absolute/path/to/lumo-data bun run dev
 | `reader.sqlite` | PDF 与 EPUB 原始字节、书库、阅读进度与每本书的阅读视图（页码或 EPUB CFI）、生成的 PDF 目录、界面语言、AI 配置、译文和编辑后的 Typst 源码。 |
 | `ai-credentials.sqlite` | API key / OAuth 凭证。 |
 
-- 目录权限 `0700`；两个数据库文件权限均为 `0600`。
+- macOS 和 Linux 上目录权限为 `0700`、两个数据库文件权限为 `0600`；Windows 上沿用你的用户配置文件目录的访问控制。
 - AI 凭证在本机明文存储，未加密；不会通过 API 返回，也不会写进日志。备份前请按需保护。
 - 多个实例可以共用同一数据目录：各自取得不同端口，写入通过 SQLite 事务串行化，同一条记录以最后提交为准；界面不会实时同步其他窗口。
 - 备份前先关闭所有使用该目录的实例；WAL 文件（`reader.sqlite-wal`、`-shm`）是数据库的一部分，不要只复制主文件。
 - 删除书库条目会同时删除该 PDF 的全部译文。退出登录只删除本地凭证，不会在 provider 侧撤销；旧备份仍可能包含该凭证。
 - 应用只接受当前存储格式。较旧或不受支持的数据库会在启动时被拒绝，原文件保持不变。
-- 页面只由本机 `127.0.0.1` 提供；访问码在启动时随机生成，只出现在终端打印的 URL 和 API 的 Bearer 头中。API 校验 Host、Origin、`Sec-Fetch-Site` 和 Bearer token，并拒绝跨源预检、跨站写请求和压缩请求体。
+- 页面只由本机 `127.0.0.1` 提供；访问码在启动时随机生成，只出现在终端打印的 URL 和 API 的 Bearer 头中。桌面窗口从不显示访问码：**打开 WebUI** 与**复制访问链接**由启动器从内存中附上。API 校验 Host、Origin、`Sec-Fetch-Site` 和 Bearer token，并拒绝跨源预检、跨站写请求和压缩请求体。
 - 翻译请求会发送当前页（PDF 为页面图像和文字，EPUB 为可见范围的 XHTML 与图片预览）以及上文所述的简短相邻摘录；摘录不会被保存，也不会发送整本文档。PDF 中的链接/表单不执行页面脚本；EPUB 内容在沙箱中运行且禁用脚本，远程资源被阻止。Typst 渲染只输出自身 SVG，不会执行文档 HTML 或脚本。除配置的 AI endpoint 外，应用不向其他第三方发送数据；登录时浏览器直连 provider 的授权页面。
 
 [返回 README](../README.zh-CN.md)

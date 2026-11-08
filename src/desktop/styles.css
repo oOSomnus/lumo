@@ -1,0 +1,149 @@
+#root {
+  padding: 12px;
+}
+
+.launcher {
+  height: 100%;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 20px 20px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--paper);
+}
+
+.launcher h1,
+.launcher h2,
+.launcher h3,
+.launcher p {
+  margin: 0;
+}
+
+.launcher h1 {
+  font-size: 20px;
+  line-height: 1.2;
+}
+
+.launcher h2 {
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.launcher h3 {
+  margin: 12px 0 6px;
+  font-size: 13px;
+}
+
+.launcher-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.launcher-header img {
+  flex: none;
+  border-radius: 10px;
+}
+
+.launcher-state {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.launcher-failure {
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--error);
+  background: var(--error-soft);
+  color: var(--error);
+}
+
+.launcher-address code {
+  display: block;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--chrome);
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.launcher-address span {
+  display: block;
+  padding: 8px 0;
+}
+
+.launcher-note {
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.launcher-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.launcher-actions .primary {
+  min-width: 140px;
+}
+
+.launcher-actions .danger {
+  margin-left: auto;
+}
+
+.launcher-log {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.launcher-log li {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  padding: 3px 0;
+}
+
+.launcher-log time {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.launcher-log li[data-level="warn"] span,
+.launcher-log li[data-level="error"] span {
+  font-weight: 600;
+}
+
+.launcher-log li[data-level="error"] span {
+  color: var(--error);
+}
+
+.launcher-details summary {
+  cursor: pointer;
+}
+
+.launcher-details dl {
+  margin: 8px 0 0;
+}
+
+.launcher-details dt {
+  font-weight: 600;
+}
+
+.launcher-details dd {
+  margin: 0 0 8px;
+  overflow-wrap: anywhere;
+}
+
+.launcher-log-scroll {
+  max-height: 160px;
+  overflow: auto;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}

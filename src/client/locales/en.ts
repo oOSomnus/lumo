@@ -1,3 +1,5 @@
+import type { LauncherLogCode } from "../../shared/desktop";
+
 export type ErrorParams = Record<string, string | number>;
 export type ErrorMessage = (params: ErrorParams) => string;
 
@@ -46,7 +48,7 @@ export const en = {
   },
   gates: {
     accessTitle: "Lumo",
-    missingToken: "Access code missing. Open this page using the complete link printed in the terminal.",
+    missingToken: "Access code missing. Open Lumo from its window with “Open WebUI”, or use the complete link printed in the terminal.",
     tokenRotates: "A new link is generated each time the server starts; old links stop working.",
     opening: "Opening the library…",
     libraryFailedTitle: "Cannot open the library",
@@ -210,7 +212,7 @@ export const en = {
   },
   errors: {
     LOCAL_ACCESS_REQUIRED: () =>
-      "The access code is missing or invalid. Open the link printed in the terminal.",
+      "The access code is missing or invalid. Open Lumo from its window with “Open WebUI”, or use the link printed in the terminal.",
     FORBIDDEN: () => "This request was not accepted by the local server.",
     INVALID_REQUEST: () => "The request was not valid.",
     PAYLOAD_TOO_LARGE: () => "The request is too large.",
@@ -641,9 +643,74 @@ export const en = {
     backup:
       "Reading data and translations are stored in reader.sqlite. Backups are not encrypted at rest. Close every instance before copying the directory, including its WAL files; backups contain the AI credential database.",
     access:
-      "The access code is valid only for this run. Use the new link printed after restarting.",
+      "The access code is valid only for this run. After a restart, open Lumo again from its window or use the new link printed in the terminal.",
     signOutNote:
       "Signing out removes the credential locally; it does not revoke it at the provider. Old backups can still contain it.",
+  },
+  launcher: {
+    version: (version: string) => `Version ${version}`,
+    statusStarting: "Starting the local service…",
+    statusRunning: "Lumo is running",
+    statusStopping: "Stopping the local service…",
+    statusFailed: "Lumo is not running",
+    addressLabel: "Local address",
+    addressPending: "Not available yet",
+    addressNote:
+      "This address works only on this computer. The buttons below add the access code for this run.",
+    open: "Open WebUI",
+    copy: "Copy access link",
+    copyNote:
+      "The copied link includes this run's access code. Paste it only into a browser on this computer and do not share it.",
+    retry: "Retry start",
+    quit: "Quit Lumo",
+    recent: "Recent activity",
+    noActivity: "Nothing yet.",
+    details: "More logs and details",
+    allActivity: "All activity",
+    dataDirectory: "Data directory",
+    failureCode: "Failure code",
+    quitTitle: "Quit Lumo?",
+    quitBody:
+      "Quitting stops the local service and interrupts translations in progress. Save any unsaved work in the WebUI first.",
+    quitBack: "Go back",
+    quitConfirm: "Quit Lumo",
+    ipcFailed:
+      "This window could not reach the Lumo launcher. Quit Lumo and open it again.",
+    logs: {
+      starting: "Starting Lumo…",
+      reader_ready: "Library database opened.",
+      assets_ready: "Reader and Typst components are ready.",
+      credentials_ready: "Credential store opened.",
+      ready: "Lumo is ready. Press “Open WebUI” to start reading.",
+      stopping: "Stopping the local service…",
+      browser_opened: "Opened the WebUI in your default browser.",
+      browser_open_failed:
+        "Could not open your browser. Use “Copy access link” and paste it into a browser.",
+      link_copied: "Access link copied.",
+      clipboard_failed:
+        "Could not copy the link. Try again, or press “Open WebUI”.",
+      sidecar_missing:
+        "The Lumo service files are missing or cannot start. Reinstall Lumo.",
+      protocol_failed:
+        "The service sent something unexpected and was stopped. Retry; if it repeats, reinstall Lumo.",
+      startup_timeout: "The service was not ready after 45 seconds and was stopped. Retry.",
+      server_exited: "The service stopped unexpectedly. Retry to start it again.",
+      shutdown_timeout: "The service did not stop in time and was ended.",
+      DATA_DIRECTORY_INVALID:
+        "The data directory setting is invalid. LUMO_DATA_DIR must be an absolute path.",
+      READER_DATABASE_FAILED:
+        "Could not open the library database. Check that the data directory is writable and the database is from a supported version.",
+      PDFJS_ASSETS_FAILED:
+        "The PDF viewer files are missing or damaged. Reinstall Lumo.",
+      TYPST_ASSETS_FAILED:
+        "The Typst preview files are missing or damaged. Reinstall Lumo.",
+      CREDENTIALS_DATABASE_FAILED:
+        "Could not open the AI credential database. Close other Lumo windows and check the data directory.",
+      SERVER_LISTEN_FAILED:
+        "Could not start the local server. Check that connections on this computer are allowed.",
+      CONTROL_PROTOCOL_INVALID:
+        "The launcher and the service disagreed on a command. Retry.",
+    } satisfies Record<LauncherLogCode, string>,
   },
 };
 

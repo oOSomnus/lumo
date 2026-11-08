@@ -1,17 +1,20 @@
 {
   "name": "lumo",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "license": "MIT",
   "private": true,
   "type": "module",
   "scripts": {
     "prepare:pdfjs": "bun scripts/fetch-pdfjs.ts",
     "prepare:typst": "bun scripts/prepare-typst.ts",
-    "dev": "bun run prepare:pdfjs && bun run prepare:typst && NODE_ENV=development bun src/server/index.ts",
+    "dev": "bun scripts/desktop.ts dev",
+    "dev:server": "bun run prepare:pdfjs && bun run prepare:typst && NODE_ENV=development bun src/server/index.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "test:e2e": "node node_modules/@playwright/test/cli.js test --config tests/e2e/playwright.config.ts",
-    "build": "bun run prepare:pdfjs && bun run prepare:typst && bun scripts/build.ts",
+    "build": "bun scripts/desktop.ts build",
+    "build:server": "bun run prepare:pdfjs && bun run prepare:typst && bun scripts/build.ts",
+    "tauri": "tauri",
     "update:pi": "bun update @earendil-works/pi-ai --latest"
   },
   "dependencies": {
@@ -19,6 +22,7 @@
     "@myriaddreamin/typst-ts-renderer": "0.7.0",
     "@myriaddreamin/typst-ts-web-compiler": "0.7.0",
     "@myriaddreamin/typst.ts": "0.7.0",
+    "@tauri-apps/api": "^2.12.4",
     "dompurify": "3.4.17",
     "epubjs": "^0.3.93",
     "jszip": "3.10.1",
@@ -29,6 +33,7 @@
   },
   "devDependencies": {
     "@playwright/test": "1.64.1",
+    "@tauri-apps/cli": "^2.12.4",
     "@types/bun": "latest",
     "@types/react": "^19.2.2",
     "@types/react-dom": "^19.2.1",

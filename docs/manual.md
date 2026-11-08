@@ -39,21 +39,33 @@ Until a provider, model and credential are saved, **Translate this page** and th
 - Translations are persisted to SQLite; reopening the same page prefers the saved result. **Export all translations** downloads the saved page sources as a ZIP of per-page `.typ` files with bundled image assets: `p<page>-<language>.typ` for a PDF, and for an EPUB `<n>-s<section>-<language>.typ`, where `<n>` numbers the saved screen pages in reading order. Selection translations stay out of that file.
 - If you edit forms or annotations, **Save edited copy** stores a new document and keeps the original. While modifications are unsaved, new translations are blocked.
 
-## Standalone build
+## Desktop app and standalone server
+
+The installed app is a small window that starts the bundled server, `lumo-server`, and keeps it running while the window is open. `lumo-server` is a compiled Bun program with the server, the client, PDF.js, epub.js, JSZip and the Typst compiler/renderer with fonts inside; it needs no `node_modules`, `vendor/` or Bun on the machine. Reading and translating stay in your default browser: the window never loads the reader.
+
+The window shows, top to bottom: the name and version; a text status (starting, running, stopping, not running); the local address without its access code; **Open WebUI** and **Copy access link**; the latest activity in plain language; **More logs and details** (the last 200 entries, the data directory and, after a failure, its code); and **Quit Lumo**. Only a running service enables opening and copying. **Copy access link** copies the full link including this run's access code: it works only on this computer and must not be shared. The window follows the interface language saved in your library once the service is ready; before that, and when the database cannot be opened, it uses your system language (Chinese or English).
+
+- **Failure** — if the service cannot start or stops unexpectedly, the window stays open, withdraws the address, and shows a fixed reason and **Retry start**. A new attempt starts a new server with a new port and access code, so links from the earlier run stop working. A service that is not ready after 45 seconds counts as failed.
+- **Quit** — closing the window, the application menu's Quit and **Quit Lumo** all behave the same. While the service runs, Lumo asks first, because it stops the service and interrupts translations in progress. It then waits for the service to finish writing (at most 35 seconds, after which the service is ended and a warning is shown) before the window closes. On macOS closing the last window also quits; no background process is left. If the window process disappears, the service notices and exits on its own.
+- **Second launch** — starting Lumo again only brings the existing window forward.
+- **Activity log** — kept in memory only (the last 200 entries), never written to disk. It holds fixed messages, never the access code, keys, model input or provider error text.
+
+Build the installer for this machine, or only the standalone server:
 
 ```bash
-bun run build
-LUMO_DATA_DIR=/absolute/path ./dist/lumo
+bun run build            # installer in src-tauri/target/<triple>/release/bundle/
+bun run build:server     # dist/sidecar/lumo-server-<triple>
+LUMO_DATA_DIR=/absolute/path ./dist/sidecar/lumo-server-<triple>
 ```
 
-The binary embeds Bun, the server, the client, PDF.js, epub.js, JSZip and the Typst compiler/renderer with fonts. It runs without `node_modules`, `vendor/` or Bun installed.
+Started by hand without arguments, the server prints the browser URL as in source mode. `--desktop` is the window's private protocol (JSON events on stdout, one shutdown command on stdin) and is not meant for manual use.
 
 ## Data and security
 
-The default data directory is `${XDG_DATA_HOME:-~/.local/share}/lumo`. Set `LUMO_DATA_DIR` to an absolute path at launch:
+The default data directory is `${XDG_DATA_HOME:-~/.local/share}/lumo` on every system, so `~/.local/share/lumo` on macOS and Linux and `%USERPROFILE%\.local\share\lumo` on Windows when `XDG_DATA_HOME` is unset. Installing, upgrading and uninstalling the app never touch it. Set `LUMO_DATA_DIR` to an absolute path in the environment that launches Lumo:
 
 ```bash
-LUMO_DATA_DIR=/absolute/path/to/lumo-data bun run dev
+LUMO_DATA_DIR=/absolute/path/to/lumo-data bun run dev:server
 ```
 
 | File | Contents |
@@ -61,13 +73,13 @@ LUMO_DATA_DIR=/absolute/path/to/lumo-data bun run dev
 | `reader.sqlite` | PDF and EPUB bytes, library, reading progress and per-book reading view (page or EPUB CFI), generated PDF outlines, interface language, AI configuration, translations and edited Typst sources. |
 | `ai-credentials.sqlite` | API keys and OAuth credentials. |
 
-- The directory is created with mode `0700`; both database files use mode `0600`.
+- On macOS and Linux the directory is created with mode `0700` and both database files use mode `0600`; on Windows they inherit the access control of your user profile.
 - AI credentials are stored in plaintext on this machine and are not encrypted. They are never returned by the API or written to logs. Protect backups accordingly.
 - Several instances may share one data directory: each takes a different port, writes are serialized by SQLite transactions, and the last commit wins for a given record. Open windows do not sync in real time.
 - Close every instance before backing up the directory. WAL files (`reader.sqlite-wal`, `-shm`) are part of the database; do not copy only the main file.
 - Deleting a library entry also deletes all of its translations. Signing out removes the local credential only; older backups may still contain it.
 - The app uses the current storage format only. An older or unsupported database is rejected on launch and left untouched.
-- The page is served only from `127.0.0.1`; the access code is generated at startup and appears only in the printed URL and API Bearer headers. The API validates Host, Origin, `Sec-Fetch-Site` and the Bearer token, and rejects cross-origin preflights, cross-site writes and compressed request bodies.
+- The page is served only from `127.0.0.1`; the access code is generated at startup and appears only in the printed URL and API Bearer headers. The desktop window never displays it: **Open WebUI** and **Copy access link** add it from the launcher's memory. The API validates Host, Origin, `Sec-Fetch-Site` and the Bearer token, and rejects cross-origin preflights, cross-site writes and compressed request bodies.
 - A translation request sends the current page (for a PDF the page image and text, for an EPUB the XHTML of the visible range with image previews) plus the short neighbouring excerpts described above; the excerpts are not saved and the whole document is never sent. PDF links and forms do not execute page scripts. EPUB content is sandboxed and scripts are disabled; remote resources are blocked. Typst rendering emits its own SVG and never executes document HTML or scripts. Apart from the configured AI endpoint, the app sends data to no third party; OAuth sign-in connects the browser directly to the provider's authorization page.
 
 [Back to README](../README.md)

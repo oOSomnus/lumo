@@ -45,7 +45,7 @@ export const zhCN: Messages = {
   },
   gates: {
     accessTitle: "Lumo",
-    missingToken: "缺少访问码。请使用终端打印的完整链接打开本页。",
+    missingToken: "缺少访问码。请在 Lumo 窗口点击“打开 WebUI”，或使用终端打印的完整链接打开本页。",
     tokenRotates: "每次启动都会生成新的链接，旧链接在重启后失效。",
     opening: "正在打开书库…",
     libraryFailedTitle: "无法打开书库",
@@ -202,7 +202,8 @@ export const zhCN: Messages = {
     saved: "已保存",
   },
   errors: {
-    LOCAL_ACCESS_REQUIRED: () => "缺少或错误的访问码。请使用终端打印的链接。",
+    LOCAL_ACCESS_REQUIRED: () =>
+      "缺少或错误的访问码。请在 Lumo 窗口点击“打开 WebUI”，或使用终端打印的链接。",
     FORBIDDEN: () => "本地服务器拒绝了此请求。",
     INVALID_REQUEST: () => "请求无效。",
     PAYLOAD_TOO_LARGE: () => "请求内容过大。",
@@ -589,8 +590,63 @@ export const zhCN: Messages = {
     dataDirectory: "数据目录：",
     backup:
       "阅读数据与译文保存在 reader.sqlite。备份在磁盘上未加密。复制目录前请关闭所有实例，并包含 WAL 文件；备份中会包含 AI 凭证数据库。",
-    access: "访问码只在本次运行有效；重启程序后使用终端打印的新链接。",
+    access:
+      "访问码只在本次运行有效；重启后请重新从 Lumo 窗口打开，或使用终端打印的新链接。",
     signOutNote:
       "退出登录只会在本地移除凭证，不会在服务方撤销它；旧备份仍可能包含该凭证。",
+  },
+  launcher: {
+    version: (version) => `版本 ${version}`,
+    statusStarting: "正在启动本地服务…",
+    statusRunning: "Lumo 正在运行",
+    statusStopping: "正在停止本地服务…",
+    statusFailed: "Lumo 未在运行",
+    addressLabel: "本地地址",
+    addressPending: "暂不可用",
+    addressNote: "此地址只能在本机使用。下方按钮会附上本次运行的访问码。",
+    open: "打开 WebUI",
+    copy: "复制访问链接",
+    copyNote:
+      "复制的链接包含本次运行的访问码。只能粘贴到本机浏览器，请勿分享给他人。",
+    retry: "重试启动",
+    quit: "退出 Lumo",
+    recent: "最近活动",
+    noActivity: "暂无记录。",
+    details: "更多日志与详情",
+    allActivity: "全部活动",
+    dataDirectory: "数据目录",
+    failureCode: "失败代码",
+    quitTitle: "退出 Lumo？",
+    quitBody:
+      "退出会停止本地服务并中断正在进行的翻译。请先在 WebUI 保存未保存的内容。",
+    quitBack: "返回",
+    quitConfirm: "退出 Lumo",
+    ipcFailed: "此窗口无法连接 Lumo 启动器。请退出 Lumo 后重新打开。",
+    logs: {
+      starting: "正在启动 Lumo…",
+      reader_ready: "书库数据库已打开。",
+      assets_ready: "阅读器与 Typst 组件已就绪。",
+      credentials_ready: "凭证库已打开。",
+      ready: "Lumo 已就绪。点击“打开 WebUI”开始阅读。",
+      stopping: "正在停止本地服务…",
+      browser_opened: "已在默认浏览器中打开 WebUI。",
+      browser_open_failed: "无法打开浏览器。请点击“复制访问链接”，粘贴到浏览器中。",
+      link_copied: "已复制访问链接。",
+      clipboard_failed: "无法复制链接。请重试，或点击“打开 WebUI”。",
+      sidecar_missing: "Lumo 服务文件缺失或无法启动。请重新安装 Lumo。",
+      protocol_failed: "服务返回了意外内容，已被停止。请重试；若反复出现，请重新安装 Lumo。",
+      startup_timeout: "服务 45 秒内未就绪，已被停止。请重试。",
+      server_exited: "服务意外停止。请重试启动。",
+      shutdown_timeout: "服务未能及时停止，已被强制结束。",
+      DATA_DIRECTORY_INVALID: "数据目录设置无效。LUMO_DATA_DIR 必须是绝对路径。",
+      READER_DATABASE_FAILED:
+        "无法打开书库数据库。请检查数据目录是否可写，以及数据库是否为受支持的版本。",
+      PDFJS_ASSETS_FAILED: "PDF 查看器文件缺失或已损坏。请重新安装 Lumo。",
+      TYPST_ASSETS_FAILED: "Typst 预览文件缺失或已损坏。请重新安装 Lumo。",
+      CREDENTIALS_DATABASE_FAILED:
+        "无法打开 AI 凭证数据库。请关闭其他 Lumo 窗口并检查数据目录。",
+      SERVER_LISTEN_FAILED: "无法启动本地服务器。请确认本机的连接未被禁止。",
+      CONTROL_PROTOCOL_INVALID: "启动器与服务对命令的理解不一致。请重试。",
+    },
   },
 };

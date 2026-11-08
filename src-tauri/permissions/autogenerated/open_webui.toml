@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-open-webui"
+description = "Enables the open_webui command without any pre-configured scope."
+commands.allow = ["open_webui"]
+
+[[permission]]
+identifier = "deny-open-webui"
+description = "Denies the open_webui command without any pre-configured scope."
+commands.deny = ["open_webui"]

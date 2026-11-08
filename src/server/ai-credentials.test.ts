@@ -37,8 +37,8 @@ async function openSetup(): Promise<{
   return { directory, store };
 }
 
-afterEach(() => {
-  for (const store of stores.splice(0)) store.close();
+afterEach(async () => {
+  for (const store of stores.splice(0)) await store.close();
   for (const db of databases.splice(0)) db.close();
   for (const directory of directories.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
@@ -48,7 +48,8 @@ afterEach(() => {
 describe("SqliteCredentialStore", () => {
   test("persists API keys and OAuth metadata, listing only ids and types", async () => {
     const { directory, store } = await openSetup();
-    expect(statSync(store.path).mode & 0o777).toBe(0o600);
+    // Windows has no POSIX mode bits; its protection is the per-user profile directory.
+    if (process.platform !== "win32") expect(statSync(store.path).mode & 0o777).toBe(0o600);
 
     const apiKey: Credential = { type: "api_key", key: "sk-live", env: { REGION: "eu" } };
     const oauth: Credential = {
@@ -68,12 +69,52 @@ describe("SqliteCredentialStore", () => {
       { providerId: "openrouter", type: "api_key" },
     ]);
     expect(JSON.stringify(await store.list())).not.toContain("sk-live");
-    store.close();
+    await store.close();
     stores.splice(stores.indexOf(store), 1);
 
     const reopened = await openAiCredentialStore(directory);
     stores.push(reopened);
     expect(await reopened.read("anthropic")).toEqual(oauth);
+  });
+
+  test("close waits for in-flight and queued writes and refuses later ones", async () => {
+    const { directory, store } = await openSetup();
+    const gate = Promise.withResolvers<void>();
+    const order: string[] = [];
+    const first = store.modify("openai", async () => {
+      await gate.promise;
+      order.push("first");
+      return { type: "api_key", key: "one" };
+    });
+    const second = store.modify("openai", async (current) => {
+      order.push(`second saw ${current?.type === "api_key" ? current.key : "nothing"}`);
+      return { type: "api_key", key: "two" };
+    });
+
+    let closed = false;
+    const closing = store.close().then(() => {
+      closed = true;
+    });
+    try {
+      await expect(
+        store.modify("late", async () => ({ type: "api_key", key: "x" })),
+      ).rejects.toThrow("credential store is closed");
+      await expect(store.delete("openai")).rejects.toBeInstanceOf(CredentialStorageError);
+      await Bun.sleep(0);
+      expect(closed).toBe(false);
+    } finally {
+      gate.resolve();
+    }
+    await Promise.all([first, second, closing]);
+    expect(closed).toBe(true);
+    expect(order).toEqual(["first", "second saw one"]);
+    await store.close();
+    stores.splice(stores.indexOf(store), 1);
+
+    const reopened = await openAiCredentialStore(directory);
+    stores.push(reopened);
+    expect(await reopened.read("openai")).toEqual({ type: "api_key", key: "two" });
+    expect(await reopened.read("late")).toBeUndefined();
   });
 
   test("keeps the previous credential when a replacement fails or is cancelled", async () => {

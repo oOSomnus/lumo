@@ -9,7 +9,8 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import JSZip from "jszip";
 
 const VERSION = "6.3.289";
 const SHA256 = "98c5832ffe7af4edd59853476a478c0d4d4d76dd49c1701f4c86f7182725cdf9";
@@ -48,17 +49,51 @@ function removeMapsAndDemo(directory: string): void {
   }
 }
 
+function assertSafeMember(name: string, base: string): string {
+  if (
+    name === "" ||
+    name.includes("\0") ||
+    name.includes("\\") ||
+    isAbsolute(name) ||
+    name.startsWith("/") ||
+    /^[A-Za-z]:/.test(name) ||
+    name.split("/").includes("..")
+  ) {
+    throw new Error(`unsafe archive member: ${JSON.stringify(name)}`);
+  }
+  const path = resolve(base, name);
+  if (path !== base && !path.startsWith(base + sep)) {
+    throw new Error(`unsafe archive member: ${JSON.stringify(name)}`);
+  }
+  return path;
+}
+
+/** Extracts regular files and directories only; no member may land outside `destination`. */
+export async function extractPdfjsArchive(
+  bytes: Uint8Array,
+  destination: string,
+): Promise<void> {
+  const archive = await JSZip.loadAsync(bytes);
+  const base = resolve(destination);
+  const members = Object.values(archive.files).map((entry) => ({
+    entry,
+    path: assertSafeMember(entry.unsafeOriginalName ?? entry.name, base),
+  }));
+  mkdirSync(base, { recursive: true });
+  for (const { entry, path } of members) {
+    if (entry.dir) {
+      mkdirSync(path, { recursive: true });
+      continue;
+    }
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, await entry.async("uint8array"));
+  }
+}
+
 async function main(): Promise<void> {
   if (cacheIsValid()) {
     console.log(`PDF.js ${VERSION} already prepared at ${target}`);
     return;
-  }
-
-  const unzip = Bun.spawnSync(["unzip", "-v"], { stdout: "ignore", stderr: "ignore" });
-  if (unzip.exitCode !== 0) {
-    throw new Error(
-      "unzip is required to prepare PDF.js assets; install unzip and retry",
-    );
   }
 
   console.log(`Downloading PDF.js ${VERSION}...`);
@@ -76,19 +111,9 @@ async function main(): Promise<void> {
 
   mkdirSync(join(root, "vendor"), { recursive: true });
   const workDirectory = mkdtempSync(join(root, "vendor", ".pdfjs-tmp-"));
-  const zipPath = join(workDirectory, "pdfjs.zip");
   try {
-    writeFileSync(zipPath, bytes);
     const extractDirectory = join(workDirectory, "extract");
-    const extraction = Bun.spawnSync(
-      ["unzip", "-q", zipPath, "-d", extractDirectory],
-      { stdout: "pipe", stderr: "pipe" },
-    );
-    if (extraction.exitCode !== 0) {
-      throw new Error(
-        `unzip failed: ${extraction.stderr.toString().trim() || `exit ${extraction.exitCode}`}`,
-      );
-    }
+    await extractPdfjsArchive(bytes, extractDirectory);
     if (!statSync(join(extractDirectory, "web", "viewer.html")).isFile()) {
       throw new Error("downloaded archive does not contain web/viewer.html");
     }
@@ -107,4 +132,4 @@ async function main(): Promise<void> {
   console.log(`PDF.js ${VERSION} prepared at ${target}`);
 }
 
-await main();
+if (import.meta.main) await main();

@@ -40,8 +40,8 @@ const custom: AiConfig = {
   maxTokens: 4096,
 };
 
-afterEach(() => {
-  for (const store of stores.splice(0)) store.close();
+afterEach(async () => {
+  for (const store of stores.splice(0)) await store.close();
   for (const db of databases.splice(0)) db.close();
   for (const directory of directories.splice(0)) {
     rmSync(directory, { recursive: true, force: true });

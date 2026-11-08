@@ -296,4 +296,52 @@ describe("AI login transport", () => {
     const second = new EventReader(await start(logins, ai));
     expect(await second.next()).toMatchObject({ type: "session" });
   });
+
+  test("shutdown cancels the active login and resolves only after it settles", async () => {
+    const logins = createLoginRegistry();
+    const aborted = Promise.withResolvers<void>();
+    const cleanedUp = Promise.withResolvers<void>();
+    const ai = fakeManager(async (interaction) => {
+      interaction.signal?.addEventListener("abort", () => aborted.resolve());
+      await aborted.promise;
+      await cleanedUp.promise;
+      throw new DOMException("aborted", "AbortError");
+    });
+    const stream = new EventReader(await start(logins, ai));
+    expect(await stream.next()).toMatchObject({ type: "session" });
+
+    let stopped = false;
+    const shutdown = logins.shutdown().then(() => {
+      stopped = true;
+    });
+    try {
+      await aborted.promise;
+      await Bun.sleep(0);
+      expect(stopped).toBe(false);
+    } finally {
+      cleanedUp.resolve();
+    }
+    await shutdown;
+    expect(stopped).toBe(true);
+    expect(await stream.next()).toEqual({ type: "cancelled" });
+  });
+
+  test("refuses sign-ins that start or finish checking after shutdown began", async () => {
+    const logins = createLoginRegistry();
+    const checking = Promise.withResolvers<void>();
+    const slow = {
+      assertLoginSupported: () => checking.promise,
+      login: async () => undefined,
+      logout: async () => undefined,
+    } as unknown as AiManager;
+    const racing = failure(start(logins, slow));
+    await logins.shutdown();
+    checking.resolve();
+    const raced = await racing;
+    expect(raced.status).toBe(503);
+    expect(await raced.json()).toMatchObject({ error: { code: "SERVER_STOPPING" } });
+
+    const later = await failure(start(logins, fakeManager(async () => undefined)));
+    expect(later.status).toBe(503);
+  });
 });
