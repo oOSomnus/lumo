@@ -99,11 +99,11 @@ describe("resolveDataDirectory", () => {
     expect(resolveDataDirectory({ LUMO_DATA_DIR: "/data/lumo" }, "/home/me")).toBe("/data/lumo");
     expect(
       resolveDataDirectory({ XDG_DATA_HOME: "/home/me/.xdg" }, "/home/me"),
-    ).toBe("/home/me/.xdg/lumo");
-    expect(resolveDataDirectory({}, "/home/me")).toBe("/home/me/.local/share/lumo");
+    ).toBe(join("/home/me/.xdg", "lumo"));
+    expect(resolveDataDirectory({}, "/home/me")).toBe(join("/home/me", ".local", "share", "lumo"));
     expect(
       resolveDataDirectory({ XDG_DATA_HOME: "relative/dir" }, "/home/me"),
-    ).toBe("/home/me/.local/share/lumo");
+    ).toBe(join("/home/me", ".local", "share", "lumo"));
   });
 
   test("rejects a relative explicit data directory", () => {

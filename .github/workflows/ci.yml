@@ -95,7 +95,11 @@ jobs:
           APPLE_API_KEY: ${{ runner.os == 'macOS' && github.event_name != 'pull_request' && secrets.APPLE_API_KEY || '' }}
           APPLE_API_PRIVATE_KEY: ${{ runner.os == 'macOS' && github.event_name != 'pull_request' && secrets.APPLE_API_PRIVATE_KEY || '' }}
         run: |
-          if [ "$RUNNER_OS" = macOS ] && [ -n "$APPLE_API_PRIVATE_KEY" ]; then
+          # GitHub turns an absent secret into an empty string, and Tauri treats a present-but-empty Apple variable as a credential.
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_API_ISSUER APPLE_API_KEY APPLE_API_PRIVATE_KEY; do
+            if [ -z "${!name}" ]; then unset "$name"; fi
+          done
+          if [ "$RUNNER_OS" = macOS ] && [ -n "${APPLE_API_PRIVATE_KEY:-}" ]; then
             umask 077
             trap 'rm -f "$RUNNER_TEMP/AuthKey.p8"' EXIT
             printf '%s' "$APPLE_API_PRIVATE_KEY" > "$RUNNER_TEMP/AuthKey.p8"
@@ -153,10 +157,19 @@ jobs:
           }
           if (-not (Test-Path $env:LUMO_DATA_DIR)) { throw "the data directory disappeared" }
 
+      # The packaged sidecar, not just the one built before linuxdeploy copied it.
+      - name: Smoke the sidecar inside the AppImage
+        if: runner.os == 'Linux'
+        run: |
+          image="$(realpath dist/release/${{ matrix.triple }}/*.AppImage)"
+          extract="$(mktemp -d -p "$RUNNER_TEMP")"
+          (cd "$extract" && env -u APPIMAGE_EXTRACT_AND_RUN "$image" --appimage-extract > /dev/null)
+          bun scripts/smoke-desktop.ts --target ${{ matrix.triple }} --binary "$extract/squashfs-root/usr/bin/lumo-server"
+
       - name: Install the Debian package and run the panel
         if: runner.os == 'Linux'
         run: |
-          deb="$(ls dist/release/${{ matrix.triple }}/*.deb)"
+          deb="$(ls ./dist/release/${{ matrix.triple }}/*.deb)"
           dpkg-deb -I "$deb" | grep -E "Depends:.*libwebkit2gtk-4.1-0"
           sudo apt-get install -y "$deb"
           test -x /usr/bin/lumo && test -x /usr/bin/lumo-server

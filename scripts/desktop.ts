@@ -1,6 +1,6 @@
 import { rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { signingPlan, signingStatus, windowsSigningCommand } from "./signing";
+import { signingPlan, signingStatus, windowsSigningCommand, windowsSigningEnvironment } from "./signing";
 import { getBuildTarget } from "./targets";
 
 const root = resolve(import.meta.dir, "..");
@@ -11,9 +11,10 @@ const BUNDLES = {
   linux: "deb,rpm,appimage",
 } as const;
 
-async function run(label: string, command: string[]): Promise<void> {
+async function run(label: string, command: string[], env: NodeJS.ProcessEnv = process.env): Promise<void> {
   const child = Bun.spawn(command, {
     cwd: root,
+    env,
     stdin: "inherit",
     stdout: "inherit",
     stderr: "inherit",
@@ -71,9 +72,12 @@ async function main(): Promise<void> {
       writeFileSync(configPath, JSON.stringify(signing.config));
       tauri.push("--config", configPath);
     }
+    // linuxdeploy's own error is otherwise discarded, leaving "failed to run linuxdeploy".
+    if (target.platform === "linux") tauri.push("--verbose");
   }
   // Windows imports the certificate for exactly the duration of this command and removes it, key included, afterwards.
-  await run("Tauri", signing?.importWindowsCertificate ? windowsSigningCommand(tauri) : tauri);
+  const wrapped = signing?.importWindowsCertificate;
+  await run("Tauri", wrapped ? windowsSigningCommand(tauri) : tauri, wrapped ? windowsSigningEnvironment(process.env) : process.env);
   if (signing) {
     // Written only after Tauri succeeded: a failed signing step never leaves a "signed" claim behind.
     const status = signingStatus(target.platform, signing);

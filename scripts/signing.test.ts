@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { signingPlan, signingStatus, windowsSigningCommand } from "./signing";
+import { signingPlan, signingStatus, windowsSigningCommand, windowsSigningEnvironment } from "./signing";
 
 const windows = {
   WINDOWS_CERTIFICATE: "base64",
@@ -62,6 +62,14 @@ describe("signingPlan", () => {
     ["notarization without signing", "macos", notarization, /Developer ID/],
   ] as const)("fails instead of downgrading: %s", (_label, platform, env, message) => {
     expect(() => signingPlan(platform, env)).toThrow(message);
+  });
+});
+
+describe("windowsSigningEnvironment", () => {
+  test("drops PSModulePath in any case, keeps everything else, and leaves its input alone", () => {
+    const env = { PATH: "/bin", PsModulePath: "pwsh7", PSMODULEPATH: "pwsh7", WINDOWS_CERTIFICATE: "base64", UNSET: undefined };
+    expect(windowsSigningEnvironment(env)).toEqual({ PATH: "/bin", WINDOWS_CERTIFICATE: "base64", UNSET: undefined });
+    expect(Object.keys(env)).toContain("PsModulePath");
   });
 });
 
@@ -131,7 +139,7 @@ function Test-KeyExists($info) {
     const file = join(work, `${name}.ps1`);
     writeFileSync(file, lib + script);
     const result = Bun.spawnSync([...POWERSHELL, file, ...args], {
-      env: { ...process.env, SIGNER: signer, BYSTANDER: bystander, ...env },
+      env: windowsSigningEnvironment({ ...process.env, SIGNER: signer, BYSTANDER: bystander, ...env }),
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -197,7 +205,7 @@ exit $ExitCode
     writeFileSync(join(work, "inner.ps1"), lib + inner);
     const command = [...POWERSHELL, join(work, "inner.ps1"), record, String(options.exit ?? 0)];
     const result = Bun.spawnSync(windowsSigningCommand(command), {
-      env: {
+      env: windowsSigningEnvironment({
         ...process.env,
         SIGNER: signer,
         BYSTANDER: bystander,
@@ -206,7 +214,7 @@ exit $ExitCode
         WINDOWS_CERTIFICATE: pfxBase64,
         WINDOWS_CERTIFICATE_PASSWORD: options.password ?? PASSWORD,
         WINDOWS_CERTIFICATE_THUMBPRINT: options.thumbprint ?? signer,
-      },
+      }),
       stdout: "pipe",
       stderr: "pipe",
     });

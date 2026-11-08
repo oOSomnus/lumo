@@ -84,6 +84,11 @@ export function windowsSigningCommand(command: string[]): string[] {
   ];
 }
 
+/** `env` without PowerShell 7's module path, which Windows PowerShell 5.1 cannot load modules from. */
+export function windowsSigningEnvironment(env: Environment): Environment {
+  return Object.fromEntries(Object.entries(env).filter(([name]) => name.toUpperCase() !== "PSMODULEPATH"));
+}
+
 /** What users are told about a build, from the credentials it was made with. */
 export function signingStatus(platform: BuildTarget["platform"], plan: SigningPlan): string {
   if (platform === "windows") {
