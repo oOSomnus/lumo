@@ -1,4 +1,4 @@
-# Lumo
+<h1 align="center"><img src="docs/assets/lumo-readme.png" alt="Lumo" width="640"></h1>
 
 A local PDF and EPUB reader that translates pages with a vision model: a PDF page, or the page on screen in an EPUB. Each request also carries short excerpts of the neighbouring pages for continuity; they are reference only and never translated or saved. Each page becomes a standalone Typst document (headings, lists, tables, formulas, diagrams, kept images or explicit placeholders) that keeps the source's columns, table structure, colours and bold/italic emphasis where the model can read them, saved in SQLite and rendered in the app. A document that does not compile locally goes back to the model, round after round, until it compiles or you cancel (this can incur charges), and the page panel shows the diagnostics and changed lines of the latest five rounds. If a PDF has no usable outline, Lumo can generate one with the same vision model and use it to select page ranges for batch translation. EPUB has a contents panel built from its own table of contents, and reading settings for font size, typeface, line spacing and theme.
 
