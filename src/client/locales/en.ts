@@ -8,6 +8,7 @@ export const en = {
     close: "Close",
     confirm: "Confirm",
     retry: "Retry",
+    technicalDetails: "Technical details",
     save: "Save",
     delete: "Delete",
     download: "Download",
@@ -70,6 +71,22 @@ export const en = {
     batchTranslation: "Batch translation",
   },
   splitter: "Resize the original and translation panes",
+  layout: {
+    label: "Pane layout",
+    leftOnly: "Left only",
+    rightOnly: "Right only",
+    equal: "Equal split",
+    leftWide: "Left wider",
+    rightWide: "Right wider",
+  },
+  ai: {
+    checking: "Reading the AI settings…",
+    checkFailed: (detail: string) => `Could not read the AI settings: ${detail}`,
+    retryCheck: "Retry reading AI settings",
+    notConfigured: "AI translation is not set up yet.",
+    configure: "Configure AI to translate",
+    openSettings: "Open AI settings",
+  },
   empty: {
     openPdf: "Open a document to start reading. You can also drop a file here.",
     noPdfOpen: "No document is open.",
@@ -78,6 +95,7 @@ export const en = {
   },
   viewer: {
     reopen: "Reopen",
+    tools: "Reading tools",
   },
   translation: {
     preview: "Preview",
@@ -89,6 +107,8 @@ export const en = {
     previewLabel: "Typst preview",
     compiling: "Compiling the preview…",
     compileFailed: "The Typst source does not compile yet. The draft is kept for editing.",
+    liveSource: "Live Typst source",
+    highlightUnavailable: "Syntax highlighting is unavailable; the source is kept in full.",
   },
   page: {
     actualOrder: "(actual page order)",
@@ -113,9 +133,11 @@ export const en = {
     continueRepair: "Continue repair",
     readingStored: "Reading saved translation…",
     storedReadFailedTitle: "Could not read the saved translation",
-    noTranslation: "This page has no translation yet.",
+    emptyGuide: "Translate this page with the button above to see it here.",
     consent:
       "Translation sends the current page to the configured AI service together with small excerpts of the previous and next pages (text, or a thin image strip when there is no text). The excerpts are reference only: they are not translated or saved. The whole document is not sent.",
+    consentSummary: "Sends this page and short excerpts of the neighboring pages to your AI service.",
+    consentDetails: "What is sent",
     cacheHint: "saved translation",
     contextWarning:
       "Some neighboring context could not be read, so this page was translated with less surrounding context.",
@@ -154,7 +176,6 @@ export const en = {
     cancelled: "Cancelled",
     failedKept: "Regeneration failed; previous translation kept",
     failed: "Translation failed",
-    errorDetail: (detail: string, code: string) => `${detail} (${code})`,
   },
   repair: {
     title: "Typst repair",
@@ -370,15 +391,24 @@ export const en = {
     pageCheckboxes: "Page selection",
     markerTranslated: "Translated",
     markerTask: "Task",
-    summary: (selected: number, saved: number, tasks: number, candidates: number) =>
-      `${selected} selected · ${saved} with translations · ${tasks} with tasks · ${candidates} new`,
+    method: {
+      legend: "Select by",
+      outline: "By outline",
+      pages: "By page numbers",
+      sections: "By section number",
+      useSections: "Select by section number instead",
+    },
+    pdfSummary: (selected: number, blocked: number, saved: number, candidates: number) =>
+      `${selected} selected · ${blocked} skipped (task or unsaved draft) · ${saved} skipped (already translated) · ${candidates} to translate`,
+    cost: (candidates: number) =>
+      `${candidates} page${candidates === 1 ? "" : "s"} will be translated. This may incur provider charges, and automatic repair can add more requests.`,
     retranslateSaved: "Regenerate saved pages (incurs charges)",
     allCovered:
       "The selected pages already have translations or tasks. Tick “Regenerate saved pages” to generate them again.",
     resumeQueue: "Resume queue",
     start: (count: number) => `Start translation${count > 0 ? ` (${count})` : ""}`,
     stopAll: "Stop all",
-    retryFailed: "Retry failed",
+    retryFailed: "Retry failed tasks in this book (all languages)",
     progress: (
       finished: number,
       total: number,
@@ -400,8 +430,8 @@ export const en = {
         `Sections ${first}–${last} (${total} total)`,
       sectionCheckboxes: "Section selection",
       markerTranslated: "Has translations",
-      summary: (selected: number, translated: number, tasks: number) =>
-        `${selected} selected · ${translated} with translations · ${tasks} with tasks`,
+      selectedSummary: (sections: number) =>
+        `${sections} section${sections === 1 ? "" : "s"} selected · screen pages are set by the current layout when you start`,
       start: (count: number) =>
         `Start translation${count > 0 ? ` (${count} section${count === 1 ? "" : "s"})` : ""}`,
       note: "Starting splits each selected section into the screen pages of the current window size and reading settings, then translates every page on its own. Changing the settings afterwards does not change pages already queued.",
@@ -518,6 +548,12 @@ export const en = {
     languageBlockedAuth: "Finish or cancel the AI sign-in first.",
     languageBlockedDirty: "Save or discard the AI form changes first.",
     aiSection: "AI provider and model",
+    statusNone: "AI is not set up yet. Choose a provider and a vision model.",
+    statusUnsaved: "Your current selection is not saved yet.",
+    statusReady: (provider: string, model: string) => `Ready: ${provider} · ${model}`,
+    statusIncomplete: "Saved, but setup is not finished",
+    advanced: "Advanced settings",
+    done: "Done",
     provider: "Provider",
     model: "Vision model",
     reasoningEffort: "Reasoning effort",

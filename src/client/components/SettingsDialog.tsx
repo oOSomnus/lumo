@@ -53,6 +53,11 @@ function draftFrom(config: AiConfig | null): Draft {
   };
 }
 
+// Optional values that a saved configuration already uses: the advanced settings then start open.
+function usesAdvanced(config: AiConfig | null): boolean {
+  return Boolean(config?.reasoningEffort) || (config?.provider !== "custom" && Boolean(config?.baseUrl));
+}
+
 function sameDraft(a: Draft, b: Draft): boolean {
   return (
     a.provider === b.provider &&
@@ -115,6 +120,8 @@ export interface SettingsDialogProps {
   onApplyUiLocale: (next: UiLocale) => Promise<void>;
   localeApplyBlockedReason: string | null;
   dataDirectory: string;
+  /** Receives every AI settings snapshot the dialog reads or saves, so the reader's readiness stays current. */
+  onSnapshotChange: (snapshot: AiSettingsSnapshot) => void;
 }
 
 export function SettingsDialog({
@@ -124,6 +131,7 @@ export function SettingsDialog({
   onApplyUiLocale,
   localeApplyBlockedReason,
   dataDirectory,
+  onSnapshotChange,
 }: SettingsDialogProps) {
   const { locale, t } = useI18n();
 
@@ -146,6 +154,7 @@ export function SettingsDialog({
   const [actionError, setActionError] = useState<UiError | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const [languageDraft, setLanguageDraft] = useState<UiLocale>(uiLocale);
   const [applyingLanguage, setApplyingLanguage] = useState(false);
@@ -254,6 +263,7 @@ export function SettingsDialog({
       setEndpointConfirm(null);
       setRemoveConfirm(false);
       setLoginError(null);
+      setAdvancedOpen(false);
       stopLogin();
       try {
         const [settings, baseCatalog] = await Promise.all([
@@ -263,6 +273,8 @@ export function SettingsDialog({
         if (signal.aborted) return;
         setSnapshot(settings);
         applyDraft(draftFrom(settings.config));
+        onSnapshotChange(settings);
+        setAdvancedOpen(usesAdvanced(settings.config));
         setCatalog(baseCatalog);
         const selected = settings.config?.provider ?? "";
         if (selected) {
@@ -277,7 +289,7 @@ export function SettingsDialog({
         if (!signal.aborted) setLoading(false);
       }
     },
-    [applyDraft, stopLogin, uiLocale],
+    [applyDraft, onSnapshotChange, stopLogin, uiLocale],
   );
 
   useEffect(() => {
@@ -299,6 +311,13 @@ export function SettingsDialog({
       if (sessionId) void cancelAiLogin(sessionId).catch(() => {});
     };
   }, []);
+
+  // A failed save is explained by a field the user cannot see while the advanced settings are folded away.
+  useEffect(() => {
+    if (formError && (reasoningEffort || (provider !== "custom" && baseUrl.trim()))) {
+      setAdvancedOpen(true);
+    }
+  }, [formError]);
 
   const selectProvider = (next: string): void => {
     const saved = snapshot?.config;
@@ -353,6 +372,7 @@ export function SettingsDialog({
     try {
       const next = await saveAiSettings(config);
       setSnapshot(next);
+      onSnapshotChange(next);
       applyDraft(draftFrom(next.config));
       setNotice(t.settings.configSaved);
       try {
@@ -432,7 +452,9 @@ export function SettingsDialog({
 
     void fetchAiSettings().then(
       (settings) => {
-        if (current()) setSnapshot(settings);
+        if (!current()) return;
+        setSnapshot(settings);
+        onSnapshotChange(settings);
       },
       (error) => {
         if (current()) setActionError(toUiError(error));
@@ -573,6 +595,7 @@ export function SettingsDialog({
           fetchAiCatalog(provider),
         ]);
         setSnapshot(settings);
+        onSnapshotChange(settings);
         setCatalog(nextCatalog);
       } catch (error) {
         setActionError(toUiError(error));
@@ -757,6 +780,25 @@ export function SettingsDialog({
     );
   };
 
+  const savedConfig = snapshot?.config ?? null;
+  const savedProviderName =
+    catalog?.providers.find((entry) => entry.id === savedConfig?.provider)?.name ??
+    savedConfig?.provider ??
+    "";
+  // The headline never calls a draft "ready": only what is saved, and complete, counts.
+  const aiSummary = !snapshot
+    ? null
+    : formDirty
+      ? { title: t.settings.statusUnsaved, detail: null }
+      : !savedConfig
+        ? { title: t.settings.statusNone, detail: null }
+        : snapshot.status.configured
+          ? { title: t.settings.statusReady(savedProviderName, savedConfig.model), detail: null }
+          : {
+              title: t.settings.statusIncomplete,
+              detail: snapshot.status.code ? errorText({ code: snapshot.status.code }, locale) : null,
+            };
+
   const frozen =
     loginActive || saving || removing || endpointConfirm !== null;
 
@@ -788,46 +830,14 @@ export function SettingsDialog({
 
       {!loading && !loadError && snapshot && (
         <div className="settings-sections">
-          <section className="settings-section" aria-labelledby="settings-language">
-            <h3 id="settings-language">{t.settings.languageSection}</h3>
-            <p className="muted">{t.settings.languageDescription}</p>
-            <label>
-              {t.settings.languageSection}
-              <select
-                value={languageDraft}
-                onChange={(event) =>
-                  setLanguageDraft(event.target.value as UiLocale)
-                }
-                disabled={applyingLanguage}
-              >
-                <option value="en">{t.settings.english}</option>
-                <option value="zh-CN">{t.settings.chinese}</option>
-              </select>
-            </label>
-            {languageBlocked && (
-              <p className="field-error" role="status">
-                {languageBlocked}
-              </p>
-            )}
-            {languageError && (
-              <p className="field-error" role="alert">
-                {errorText(languageError, locale)}
-              </p>
-            )}
-            <button
-              type="button"
-              className="primary"
-              disabled={languageDisabled}
-              onClick={() => void applyLanguage()}
-            >
-              {applyingLanguage
-                ? t.settings.applyingLanguage
-                : t.settings.applyLanguage}
-            </button>
-          </section>
-
           <section className="settings-section" aria-labelledby="settings-ai">
             <h3 id="settings-ai">{t.settings.aiSection}</h3>
+            {aiSummary && (
+              <div className="ai-summary" aria-live="polite">
+                <strong>{aiSummary.title}</strong>
+                {aiSummary.detail && <p className="muted">{aiSummary.detail}</p>}
+              </div>
+            )}
             <div className="settings-grid">
               <label>
                 {t.settings.provider}
@@ -874,42 +884,6 @@ export function SettingsDialog({
               </label>
             </div>
 
-            <label>
-              {t.settings.reasoningEffort}
-              <select
-                value={reasoningEffort}
-                onChange={(event) => setReasoningEffort(event.target.value)}
-                disabled={frozen || modelEfforts.length === 0}
-                aria-describedby={
-                  provider === "custom" ||
-                  (provider && model && modelEfforts.length === 0)
-                    ? "settings-reasoning-effort-hint"
-                    : undefined
-                }
-              >
-                <option value="">{t.settings.reasoningEffortDefault}</option>
-                {effortSelection &&
-                  !modelEfforts.includes(effortSelection) && (
-                    <option value={effortSelection} disabled>
-                      {t.settings.reasoningEffortLevels[effortSelection]}
-                    </option>
-                  )}
-                {modelEfforts.map((level) => (
-                  <option key={level} value={level}>
-                    {t.settings.reasoningEffortLevels[level]}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {(provider === "custom" ||
-              (provider && model && modelEfforts.length === 0)) && (
-              <p id="settings-reasoning-effort-hint" className="muted">
-                {provider === "custom"
-                  ? t.settings.reasoningEffortCustomNote
-                  : t.settings.reasoningEffortUnavailable}
-              </p>
-            )}
-
             {catalogLoading && <p className="muted">{t.settings.loading}</p>}
             {catalogError && (
               <div className="inline-error" role="alert">
@@ -923,49 +897,44 @@ export function SettingsDialog({
               <p className="muted">{t.settings.noModels}</p>
             )}
 
-            <label>
-              {provider === "custom"
-                ? t.settings.baseUrlCustom
-                : t.settings.baseUrl}
-              <input
-                type="text"
-                value={baseUrl}
-                onChange={(event) => setBaseUrl(event.target.value)}
-                disabled={frozen}
-                placeholder="https://example.com/v1"
-              />
-            </label>
-
-            {provider === "custom" ? (
-              <div className="settings-grid">
-                <label>
-                  {t.settings.contextWindow}
-                  <input
-                    type="number"
-                    min={1}
-                    step={1}
-                    value={contextWindow}
-                    onChange={(event) => setContextWindow(event.target.value)}
-                    disabled={frozen}
-                  />
-                </label>
-                <label>
-                  {t.settings.maxTokens}
-                  <input
-                    type="number"
-                    min={1}
-                    step={1}
-                    value={maxTokens}
-                    onChange={(event) => setMaxTokens(event.target.value)}
-                    disabled={frozen}
-                  />
-                </label>
-              </div>
-            ) : (
-              <p className="muted">{t.settings.builtinNote}</p>
-            )}
             {provider === "custom" && (
-              <p className="muted">{t.settings.customNote}</p>
+              <>
+                <label>
+                  {t.settings.baseUrlCustom}
+                  <input
+                    type="text"
+                    value={baseUrl}
+                    onChange={(event) => setBaseUrl(event.target.value)}
+                    disabled={frozen}
+                    placeholder="https://example.com/v1"
+                  />
+                </label>
+                <div className="settings-grid">
+                  <label>
+                    {t.settings.contextWindow}
+                    <input
+                      type="number"
+                      min={1}
+                      step={1}
+                      value={contextWindow}
+                      onChange={(event) => setContextWindow(event.target.value)}
+                      disabled={frozen}
+                    />
+                  </label>
+                  <label>
+                    {t.settings.maxTokens}
+                    <input
+                      type="number"
+                      min={1}
+                      step={1}
+                      value={maxTokens}
+                      onChange={(event) => setMaxTokens(event.target.value)}
+                      disabled={frozen}
+                    />
+                  </label>
+                </div>
+                <p className="muted">{t.settings.customNote}</p>
+              </>
             )}
 
             {providerOption?.canRefreshModels && (
@@ -980,6 +949,175 @@ export function SettingsDialog({
               </button>
             )}
 
+            <div className="settings-subsection" role="group" aria-labelledby="settings-auth">
+              <h4 id="settings-auth">{t.settings.authSection}</h4>
+              {providerOption ? (
+                <>
+                  <p>{t.settings.authProvider(providerOption.name)}</p>
+                  {credentialType ? (
+                    <>
+                      <p>
+                        {t.settings.authConfigured(credentialLabel ?? credentialType)}
+                      </p>
+                      <p className="muted">{t.settings.authUnverified}</p>
+                    </>
+                  ) : provider === "custom" ? (
+                    <p className="muted">{t.settings.keylessNote}</p>
+                  ) : (
+                    <p className="muted">{t.settings.authNone}</p>
+                  )}
+
+                  <div className="dialog-actions">
+                    {providerOption.authMethods.includes("api_key") && (
+                      <button
+                        type="button"
+                        disabled={frozen}
+                        onClick={() => void beginLogin("api_key")}
+                      >
+                        {credentialType === "api_key"
+                          ? t.settings.replaceKey
+                          : t.settings.addKey}
+                      </button>
+                    )}
+                    {providerOption.authMethods.includes("oauth") && (
+                      <button
+                        type="button"
+                        disabled={frozen}
+                        onClick={() => void beginLogin("oauth")}
+                      >
+                        {t.settings.signIn}
+                      </button>
+                    )}
+                    {credentialType && (
+                      <button
+                        type="button"
+                        className="danger"
+                        disabled={frozen}
+                        onClick={() => setRemoveConfirm(true)}
+                      >
+                        {credentialType === "oauth"
+                          ? t.settings.signOut
+                          : t.settings.removeCredential}
+                      </button>
+                    )}
+                  </div>
+
+                  {removeConfirm && (
+                    <div className="inline-error">
+                      <strong>{t.confirm.removeCredentialTitle}</strong>
+                      <p>{t.confirm.removeCredentialBody(providerOption.name)}</p>
+                      <div className="inline-actions">
+                        <button
+                          type="button"
+                          className="danger"
+                          onClick={() => void confirmRemove()}
+                        >
+                          {t.confirm.removeCredentialConfirm}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setRemoveConfirm(false)}
+                        >
+                          {t.common.cancel}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {removing && <p className="muted">{t.settings.savingConfig}</p>}
+                  {actionError && (
+                    <p className="field-error" role="alert">
+                      {errorText(actionError, locale)}
+                    </p>
+                  )}
+                  {loginError && (
+                    <p className="field-error" role="alert">
+                      {errorText(loginError, locale)}
+                    </p>
+                  )}
+
+                  {loginActive && (
+                    <div className="login-panel" role="status">
+                      <p>
+                        <strong>{t.settings.loginActive}</strong>
+                      </p>
+                      {loginPrompt ? (
+                        renderPrompt()
+                      ) : (
+                        <p className="muted">{t.settings.loginWaiting}</p>
+                      )}
+                      {renderNotifications()}
+                      <button type="button" onClick={cancelLogin}>
+                        {t.settings.loginCancel}
+                      </button>
+                    </div>
+                  )}
+                  {!loginActive && notifications.length > 0 && renderNotifications()}
+                  <p className="muted">{t.settings.providerContentNote}</p>
+                </>
+              ) : (
+                <p className="muted">{t.settings.chooseProvider}</p>
+              )}
+            </div>
+
+            <details
+              className="settings-advanced"
+              open={advancedOpen}
+              onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}
+            >
+              <summary>{t.settings.advanced}</summary>
+              <label>
+                {t.settings.reasoningEffort}
+                <select
+                  value={reasoningEffort}
+                  onChange={(event) => setReasoningEffort(event.target.value)}
+                  disabled={frozen || modelEfforts.length === 0}
+                  aria-describedby={
+                    provider === "custom" ||
+                    (provider && model && modelEfforts.length === 0)
+                      ? "settings-reasoning-effort-hint"
+                      : undefined
+                  }
+                >
+                  <option value="">{t.settings.reasoningEffortDefault}</option>
+                  {effortSelection &&
+                    !modelEfforts.includes(effortSelection) && (
+                      <option value={effortSelection} disabled>
+                        {t.settings.reasoningEffortLevels[effortSelection]}
+                      </option>
+                    )}
+                  {modelEfforts.map((level) => (
+                    <option key={level} value={level}>
+                      {t.settings.reasoningEffortLevels[level]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {(provider === "custom" ||
+                (provider && model && modelEfforts.length === 0)) && (
+                <p id="settings-reasoning-effort-hint" className="muted">
+                  {provider === "custom"
+                    ? t.settings.reasoningEffortCustomNote
+                    : t.settings.reasoningEffortUnavailable}
+                </p>
+              )}
+              {provider !== "custom" && (
+                <>
+                  <label>
+                    {t.settings.baseUrl}
+                    <input
+                      type="text"
+                      value={baseUrl}
+                      onChange={(event) => setBaseUrl(event.target.value)}
+                      disabled={frozen}
+                      placeholder="https://example.com/v1"
+                    />
+                  </label>
+                  <p className="muted">{t.settings.builtinNote}</p>
+                </>
+              )}
+            </details>
+
             {formError && (
               <p className="field-error" role="alert">
                 {errorText(formError, locale)}
@@ -993,133 +1131,18 @@ export function SettingsDialog({
             <div className="dialog-actions">
               <button
                 type="button"
-                className="primary"
+                className={formDirty || !snapshot.status.configured ? "primary" : undefined}
                 disabled={frozen || !provider || !model.trim()}
                 onClick={handleSave}
               >
                 {saving ? t.settings.savingConfig : t.settings.saveConfig}
               </button>
+              {!formDirty && snapshot.status.configured && !frozen && (
+                <button type="button" className="primary" onClick={handleClose}>
+                  {t.settings.done}
+                </button>
+              )}
             </div>
-          </section>
-
-          <section className="settings-section" aria-labelledby="settings-auth">
-            <h3 id="settings-auth">{t.settings.authSection}</h3>
-            {providerOption ? (
-              <>
-                <p>{t.settings.authProvider(providerOption.name)}</p>
-                {credentialType ? (
-                  <>
-                    <p>
-                      {t.settings.authConfigured(credentialLabel ?? credentialType)}
-                    </p>
-                    {snapshot?.config?.provider === provider &&
-                      !snapshot.status.configured &&
-                      snapshot.status.code && (
-                        <p className="field-error" role="status">
-                          {errorText({ code: snapshot.status.code }, locale)}
-                        </p>
-                      )}
-                    <p className="muted">{t.settings.authUnverified}</p>
-                  </>
-                ) : (
-                  <p className="muted">{t.settings.authNone}</p>
-                )}
-
-                <div className="dialog-actions">
-                  {providerOption.authMethods.includes("api_key") && (
-                    <button
-                      type="button"
-                      disabled={frozen}
-                      onClick={() => void beginLogin("api_key")}
-                    >
-                      {credentialType === "api_key"
-                        ? t.settings.replaceKey
-                        : t.settings.addKey}
-                    </button>
-                  )}
-                  {providerOption.authMethods.includes("oauth") && (
-                    <button
-                      type="button"
-                      disabled={frozen}
-                      onClick={() => void beginLogin("oauth")}
-                    >
-                      {t.settings.signIn}
-                    </button>
-                  )}
-                  {credentialType && (
-                    <button
-                      type="button"
-                      className="danger"
-                      disabled={frozen}
-                      onClick={() => setRemoveConfirm(true)}
-                    >
-                      {credentialType === "oauth"
-                        ? t.settings.signOut
-                        : t.settings.removeCredential}
-                    </button>
-                  )}
-                </div>
-
-                {provider === "custom" && (
-                  <p className="muted">{t.settings.keylessNote}</p>
-                )}
-
-                {removeConfirm && (
-                  <div className="inline-error">
-                    <strong>{t.confirm.removeCredentialTitle}</strong>
-                    <p>{t.confirm.removeCredentialBody(providerOption.name)}</p>
-                    <div className="inline-actions">
-                      <button
-                        type="button"
-                        className="danger"
-                        onClick={() => void confirmRemove()}
-                      >
-                        {t.confirm.removeCredentialConfirm}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setRemoveConfirm(false)}
-                      >
-                        {t.common.cancel}
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {removing && <p className="muted">{t.settings.savingConfig}</p>}
-                {actionError && (
-                  <p className="field-error" role="alert">
-                    {errorText(actionError, locale)}
-                  </p>
-                )}
-                {loginError && (
-                  <p className="field-error" role="alert">
-                    {errorText(loginError, locale)}
-                  </p>
-                )}
-
-                {loginActive && (
-                  <div className="login-panel" role="status">
-                    <p>
-                      <strong>{t.settings.loginActive}</strong>
-                    </p>
-                    {loginPrompt ? (
-                      renderPrompt()
-                    ) : (
-                      <p className="muted">{t.settings.loginWaiting}</p>
-                    )}
-                    {renderNotifications()}
-                    <button type="button" onClick={cancelLogin}>
-                      {t.settings.loginCancel}
-                    </button>
-                  </div>
-                )}
-                {!loginActive && notifications.length > 0 && renderNotifications()}
-                <p className="muted">{t.settings.providerContentNote}</p>
-              </>
-            ) : (
-              <p className="muted">{t.settings.chooseProvider}</p>
-            )}
           </section>
 
           {endpointConfirm && (
@@ -1143,6 +1166,44 @@ export function SettingsDialog({
               </div>
             </section>
           )}
+
+          <section className="settings-section" aria-labelledby="settings-language">
+            <h3 id="settings-language">{t.settings.languageSection}</h3>
+            <p className="muted">{t.settings.languageDescription}</p>
+            <label>
+              {t.settings.languageSection}
+              <select
+                value={languageDraft}
+                onChange={(event) =>
+                  setLanguageDraft(event.target.value as UiLocale)
+                }
+                disabled={applyingLanguage}
+              >
+                <option value="en">{t.settings.english}</option>
+                <option value="zh-CN">{t.settings.chinese}</option>
+              </select>
+            </label>
+            {languageBlocked && (
+              <p className="field-error" role="status">
+                {languageBlocked}
+              </p>
+            )}
+            {languageError && (
+              <p className="field-error" role="alert">
+                {errorText(languageError, locale)}
+              </p>
+            )}
+            <button
+              type="button"
+              className="primary"
+              disabled={languageDisabled}
+              onClick={() => void applyLanguage()}
+            >
+              {applyingLanguage
+                ? t.settings.applyingLanguage
+                : t.settings.applyLanguage}
+            </button>
+          </section>
 
           <section className="settings-section" aria-labelledby="settings-data">
             <h3 id="settings-data">{t.settings.dataSection}</h3>

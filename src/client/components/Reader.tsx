@@ -14,6 +14,7 @@ import {
   outlinePageResultSchema,
   readerViewSchema,
   TARGET_LANGUAGE_LABELS,
+  type AiSettingsSnapshot,
   type DocumentRecord,
   type EpubReaderView,
   type LibrarySnapshot,
@@ -30,6 +31,7 @@ import {
   apiFetch,
   apiJson,
   accessToken,
+  fetchAiSettings,
   fetchTranslation,
   jsonInit,
   requestTranslation,
@@ -62,6 +64,7 @@ import type {
 } from "../epub-bridge";
 import { currentTocId, outlineFromEpubToc } from "../toc";
 import { generationRequest, repairRequest } from "../translation-input";
+import { watchPageKeys, type PageStep } from "../page-keys";
 import { ViewerBridgeError, type ViewerBridge } from "../pdfBridge";
 import { compileTypst, type TypstAsset } from "../typst";
 import { stripPlaceholderControls } from "../../shared/typst";
@@ -86,6 +89,8 @@ import {
   type TranslationTask,
 } from "../translation-queue";
 import { BatchTranslationPanel } from "./BatchTranslationPanel";
+import { AI_SETTINGS_CODES, ErrorDetails } from "./ErrorDetails";
+import { LayoutSwitch, type PaneMode } from "./LayoutSwitch";
 import { Library } from "./Library";
 import { TypstRepairPanel } from "./TypstRepairPanel";
 import { ModalDialog } from "./ModalDialog";
@@ -106,6 +111,16 @@ interface StoredTranslationState {
   record?: TranslationRecord | null;
   message?: UiError;
 }
+
+type AiState =
+  | { state: "loading" }
+  | { state: "error"; error: UiError }
+  | { state: "ready"; snapshot: AiSettingsSnapshot };
+
+// The share of the width the left pane may take, and the splitter's own width.
+const MIN_SPLIT = 0.2;
+const MAX_SPLIT = 0.8;
+const SPLITTER_WIDTH = 6;
 
 interface AskOptions {
   title: string;
@@ -348,9 +363,84 @@ export function Reader() {
   const [rightTab, setRightTab] = useState<"page" | "batch">("page");
   const [narrowTab, setNarrowTab] = useState<"pdf" | "translation" | "batch">("translation");
   const [splitRatio, setSplitRatio] = useState(0.5);
+  const [paneMode, setPaneMode] = useState<PaneMode>("both");
   const [libraryActionError, setLibraryActionError] = useState<UiError | null>(null);
   const libraryRefreshRef = useRef<AbortController | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+
+  // What the server reports about the AI setup; every action that calls the model waits for it.
+  const [ai, setAi] = useState<AiState>({ state: "loading" });
+  const aiAttemptRef = useRef(0);
+  const aiControllerRef = useRef<AbortController | null>(null);
+  const aiGate =
+    ai.state === "loading"
+      ? "checking"
+      : ai.state === "error"
+        ? "failed"
+        : ai.snapshot.status.configured
+          ? "ready"
+          : "unconfigured";
+  const aiGateRef = useRef(aiGate);
+  aiGateRef.current = aiGate;
+
+  // A newer snapshot (from the settings dialog or a fresh read) supersedes any read still in flight.
+  const showAiSnapshot = useCallback((snapshot: AiSettingsSnapshot) => {
+    aiAttemptRef.current += 1;
+    aiControllerRef.current?.abort();
+    aiControllerRef.current = null;
+    setAi({ state: "ready", snapshot });
+  }, []);
+
+  const refreshAiStatus = useCallback(async (retry: boolean): Promise<void> => {
+    const attempt = ++aiAttemptRef.current;
+    aiControllerRef.current?.abort();
+    const controller = new AbortController();
+    aiControllerRef.current = controller;
+    if (retry) setAi({ state: "loading" });
+    try {
+      const snapshot = await fetchAiSettings(controller.signal);
+      if (attempt === aiAttemptRef.current) setAi({ state: "ready", snapshot });
+    } catch (error) {
+      if (attempt !== aiAttemptRef.current) return;
+      // A failed refresh keeps what is known; only a first read or an explicit retry reports the failure.
+      setAi((current) =>
+        current.state === "ready" ? current : { state: "error", error: toUiError(error) },
+      );
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!token) return;
+    void refreshAiStatus(false);
+    return () => {
+      aiAttemptRef.current += 1;
+      aiControllerRef.current?.abort();
+      aiControllerRef.current = null;
+    };
+  }, [refreshAiStatus, token]);
+
+  // Opens the settings when the AI still needs setting up; true only when a model request may go out now.
+  const requireAi = useCallback((): boolean => {
+    const gate = aiGateRef.current;
+    if (gate === "unconfigured") setSettingsOpen(true);
+    else if (gate === "failed") void refreshAiStatus(true);
+    return gate === "ready";
+  }, [refreshAiStatus]);
+
+  const changeLayout = useCallback((mode: PaneMode, ratio?: number) => {
+    setPaneMode(mode);
+    if (ratio !== undefined) setSplitRatio(ratio);
+  }, []);
+
+  // Below 1024px three tabs replace the panes: carry the single-pane choice over, and keep the layout for the way back.
+  const wasNarrowRef = useRef(narrow);
+  useEffect(() => {
+    if (narrow && !wasNarrowRef.current) {
+      if (paneMode === "left") setNarrowTab("pdf");
+      else if (paneMode === "right") setNarrowTab(rightTab === "batch" ? "batch" : "translation");
+    }
+    wasNarrowRef.current = narrow;
+  }, [narrow, paneMode, rightTab]);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportError, setExportError] = useState<UiError | null>(null);
   const [storedReload, setStoredReload] = useState(0);
@@ -405,6 +495,29 @@ export function Reader() {
     },
     [runEpubCommand],
   );
+
+  // The one entry for an arrow-key page turn, from the page, the PDF and EPUB frames and the translation preview.
+  const turnPage = useCallback(
+    (direction: PageStep): boolean => {
+      if (screenRef.current !== "reader" || !viewerReadyRef.current) return false;
+      if (window.document.querySelector("dialog[open]")) return false;
+      if (currentDocumentRef.current?.format === "epub") {
+        const location = epubLocationRef.current;
+        if (!location) return false;
+        // At the first and last page the key is still consumed, so nothing else scrolls or moves.
+        if (!(direction === "next" ? location.atEnd : location.atStart)) stepEpub(direction);
+        return true;
+      }
+      const bridge = bridgeRef.current;
+      if (!bridge || bridge.pageCount <= 0) return false;
+      const target = clamp(bridge.page + (direction === "next" ? 1 : -1), 1, bridge.pageCount);
+      if (target !== bridge.page) bridge.setPage(target);
+      return true;
+    },
+    [stepEpub],
+  );
+
+  useEffect(() => watchPageKeys(window.document, (direction) => turnPage(direction)), [turnPage]);
 
   const clearEpubSelection = useCallback(() => {
     epubSelectionRef.current = null;
@@ -1292,6 +1405,7 @@ export function Reader() {
     ) {
       return;
     }
+    if (!requireAi()) return;
 
     const sessionAtStart = sessionRef.current;
     const pageCount = bridge.pageCount;
@@ -1475,7 +1589,7 @@ export function Reader() {
         outlineControllerRef.current = null;
       }
     }
-  }, [ask, modified, t, tasks]);
+  }, [ask, modified, requireAi, t, tasks]);
 
   const retrySaveOutline = useCallback(async (): Promise<void> => {
     const document = currentDocumentRef.current;
@@ -2163,6 +2277,7 @@ export function Reader() {
       if (document.format === "epub" && (!epubTarget || epubStyleBusy)) return;
       const existing = queue.getTask(currentKey);
       if (existing && hasRetainedDraft(existing)) return;
+      if (!requireAi()) return;
       if (force) {
         const confirmed = await ask({
           title: t.confirm.retranslateTitle,
@@ -2204,6 +2319,7 @@ export function Reader() {
       modified,
       narrow,
       queue,
+      requireAi,
       t,
     ],
   );
@@ -2291,6 +2407,7 @@ export function Reader() {
       ) {
         return;
       }
+      if (!requireAi()) return;
       const language = languageRef.current;
       const controller = new AbortController();
       epubBatchControllerRef.current = controller;
@@ -2342,7 +2459,7 @@ export function Reader() {
         }
       }
     },
-    [ask, captureEpubLayout, queue, t],
+    [ask, captureEpubLayout, queue, requireAi, t],
   );
 
   // Ticks every section that still has a screen page, at the current layout, without a saved translation.
@@ -2889,10 +3006,9 @@ export function Reader() {
     event.currentTarget.setPointerCapture(event.pointerId);
     const rect = workspace.getBoundingClientRect();
     const move = (moveEvent: PointerEvent): void => {
-      const raw = (moveEvent.clientX - rect.left) / rect.width;
-      const min = Math.max(0.35, 320 / rect.width);
-      const max = Math.min(0.65, 1 - 320 / rect.width);
-      setSplitRatio(clamp(raw, min, max));
+      // The ratio is of the width without the splitter, centred under the pointer.
+      const raw = (moveEvent.clientX - rect.left - SPLITTER_WIDTH / 2) / (rect.width - SPLITTER_WIDTH);
+      setSplitRatio(clamp(raw, MIN_SPLIT, MAX_SPLIT));
     };
     const up = (): void => {
       window.removeEventListener("pointermove", move);
@@ -2907,15 +3023,12 @@ export function Reader() {
     let next = splitRatio;
     if (event.key === "ArrowLeft") next -= step;
     else if (event.key === "ArrowRight") next += step;
-    else if (event.key === "Home") next = 0.35;
-    else if (event.key === "End") next = 0.65;
+    else if (event.key === "Home") next = MIN_SPLIT;
+    else if (event.key === "End") next = MAX_SPLIT;
     else if (event.key === "Enter") next = 0.5;
     else return;
     event.preventDefault();
-    const width = workspaceRef.current?.clientWidth ?? 1024;
-    const min = Math.max(0.35, 320 / width);
-    const max = Math.min(0.65, 1 - 320 / width);
-    setSplitRatio(clamp(next, min, max));
+    setSplitRatio(clamp(next, MIN_SPLIT, MAX_SPLIT));
   };
 
   const toggleFullscreen = () => {
@@ -2950,7 +3063,19 @@ export function Reader() {
     epubLocatingReason ??
     (currentTask && hasRetainedDraft(currentTask)
       ? t.page.disabled.unsavedDraft
-      : null);
+      : null) ??
+    (aiGate === "checking" ? t.ai.checking : null);
+  // Until the AI is ready, the main button leads the way there instead of failing on its first request.
+  const translateLabel =
+    !translationDisabledReason && aiGate === "unconfigured"
+      ? t.ai.configure
+      : !translationDisabledReason && aiGate === "failed"
+        ? t.ai.retryCheck
+        : canRegenerate
+          ? t.page.retranslate
+          : currentUnit && !isEpubPageUnit(currentUnit)
+            ? t.page.translateSelection
+            : t.page.translate;
 
   const outlineGenerationDisabledReason =
     !currentDocument || currentDocument.format === "epub"
@@ -2989,25 +3114,21 @@ export function Reader() {
       (latestRound?.status === "compile-failed" ||
         latestRound?.status === "request-failed") &&
       ["validating", "preparing", "repairing"].includes(error.stage ?? "");
-    const detail = summaryOnly
-      ? t.page.errorDetail(
-          errorText({ code: error.code, params: error.params }, locale),
-          error.code,
-        )
-      : errorText(
-          { code: error.code, detail: error.detail, params: error.params },
-          locale,
-        );
+    const detail = errorText({ code: error.code, params: error.params }, locale);
+    const failure = (text: string) => ({
+      text,
+      error: summaryOnly ? { code: error.code } : error,
+    });
     switch (error.stage) {
       case "validating":
-        return t.page.unsaved.validationFailed(detail);
+        return failure(t.page.unsaved.validationFailed(detail));
       case "preparing":
       case "repairing":
-        return t.page.unsaved.repairFailed(detail);
+        return failure(t.page.unsaved.repairFailed(detail));
       case "saving":
-        return t.page.unsaved.saveFailed(detail);
+        return failure(t.page.unsaved.saveFailed(detail));
       default:
-        return t.page.unsaved.operationFailed(detail);
+        return failure(t.page.unsaved.operationFailed(detail));
     }
   })();
 
@@ -3197,10 +3318,13 @@ export function Reader() {
     );
   }
 
-  const workspaceStyle = narrow
+  const showLeft = narrow ? narrowTab === "pdf" : paneMode !== "right";
+  const showRight = narrow ? narrowTab !== "pdf" : paneMode !== "left";
+  const singlePane = narrow || paneMode !== "both";
+  const panesStyle = singlePane
     ? undefined
     : {
-        gridTemplateColumns: `minmax(320px, ${splitRatio}fr) 6px minmax(320px, ${
+        gridTemplateColumns: `minmax(0, ${splitRatio}fr) ${SPLITTER_WIDTH}px minmax(0, ${
           1 - splitRatio
         }fr)`,
       };
@@ -3346,7 +3470,6 @@ export function Reader() {
           <main
             ref={workspaceRef}
             className={`workspace${narrow ? " narrow" : ""}${screen === "library" ? " is-hidden" : ""}`}
-            style={workspaceStyle}
             tabIndex={-1}
             inert={screen === "library"}
             aria-hidden={screen === "library"}
@@ -3390,11 +3513,15 @@ export function Reader() {
           </nav>
         )}
 
+        {!narrow && <LayoutSwitch mode={paneMode} ratio={splitRatio} onChange={changeLayout} />}
+
+        <div className={`workspace-panes${singlePane ? " single" : ""}`} style={panesStyle}>
+
         <section
           className={`pdf-pane${isEpubDocument ? " epub-pane" : ""}`}
           aria-label={t.tabs.original}
-          inert={narrow && narrowTab !== "pdf"}
-          aria-hidden={narrow && narrowTab !== "pdf"}
+          inert={!showLeft}
+          aria-hidden={!showLeft}
         >
           {currentDocument?.format === "epub" ? (
             <>
@@ -3433,6 +3560,7 @@ export function Reader() {
                   onRelocated={handleEpubRelocated}
                   onSelection={handleEpubSelection}
                   onError={handleViewerError}
+                  onStep={turnPage}
                 />
                 {epubTocOpen && (
                   <EpubTocPanel
@@ -3456,6 +3584,7 @@ export function Reader() {
               onViewChange={handleViewChange}
               onError={handleViewerError}
               onFilePicked={(file) => void openPreview(file)}
+              onTurnPage={turnPage}
               onPassword={(password) => {
                 passwordRef.current = password;
               }}
@@ -3490,14 +3619,14 @@ export function Reader() {
           )}
         </section>
 
-        {!narrow && (
+        {!narrow && paneMode === "both" && (
           <div
             className="splitter"
             role="separator"
             aria-orientation="vertical"
             aria-label={t.splitter}
-            aria-valuemin={35}
-            aria-valuemax={65}
+            aria-valuemin={Math.round(MIN_SPLIT * 100)}
+            aria-valuemax={Math.round(MAX_SPLIT * 100)}
             aria-valuenow={Math.round(splitRatio * 100)}
             tabIndex={0}
             onPointerDown={beginResize}
@@ -3509,8 +3638,8 @@ export function Reader() {
         <section
           className="side-pane"
           aria-label={t.tabs.translation}
-          inert={narrow && narrowTab === "pdf"}
-          aria-hidden={narrow && narrowTab === "pdf"}
+          inert={!showRight}
+          aria-hidden={!showRight}
         >
           {!narrow && (
             <div
@@ -3564,6 +3693,10 @@ export function Reader() {
                 onStartEpubBatch={(options) => void startEpubBatch(options)}
                 onSelectUntranslatedEpub={(saved) => void selectUntranslatedEpubSections(saved)}
                 onStopAll={stopAllTranslation}
+                aiStatus={ai.state === "ready" ? ai.snapshot.status : null}
+                aiStatusError={ai.state === "error" ? ai.error : null}
+                onConfigureAi={() => setSettingsOpen(true)}
+                onRetryAiStatus={() => void refreshAiStatus(true)}
               />
             ) : (
               <div className="pane-placeholder">
@@ -3616,11 +3749,7 @@ export function Reader() {
                     title={canRegenerate ? t.page.regenerateHint : undefined}
                     onClick={() => void translateCurrent(canRegenerate)}
                   >
-                    {canRegenerate
-                      ? t.page.retranslate
-                      : currentUnit && !isEpubPageUnit(currentUnit)
-                        ? t.page.translateSelection
-                        : t.page.translate}
+                    {translateLabel}
                   </button>
                   <button
                     type="button"
@@ -3681,6 +3810,18 @@ export function Reader() {
               {translationDisabledReason && (
                 <p className="field-error" role="status">
                   {translationDisabledReason}
+                </p>
+              )}
+
+              {!translationDisabledReason && aiGate === "unconfigured" && (
+                <p className="field-error muted" role="status">
+                  {t.ai.notConfigured}
+                </p>
+              )}
+
+              {!translationDisabledReason && ai.state === "error" && (
+                <p className="field-error" role="alert">
+                  {t.ai.checkFailed(errorText(ai.error, locale))}
                 </p>
               )}
 
@@ -3757,25 +3898,28 @@ export function Reader() {
                                 : t.page.failed}
                           </strong>
                           {currentTask.error && (
-                            <span>
-                              {t.page.errorDetail(
-                                errorText(
-                                  {
-                                    code: currentTask.error.code,
-                                    detail: currentTask.error.detail,
-                                    params: currentTask.error.params,
-                                  },
+                            <>
+                              <span>
+                                {errorText(
+                                  { code: currentTask.error.code, params: currentTask.error.params },
                                   locale,
-                                ),
-                                currentTask.error.code,
-                              )}
-                            </span>
+                                )}
+                              </span>
+                              <ErrorDetails error={currentTask.error} />
+                            </>
                           )}
                           <div className="inline-actions">
+                            {currentTask.error && AI_SETTINGS_CODES[currentTask.error.code] === true && (
+                              <button type="button" onClick={() => setSettingsOpen(true)}>
+                                {t.ai.openSettings}
+                              </button>
+                            )}
                             <button
                               type="button"
                               disabled={Boolean(translationDisabledReason)}
-                              onClick={() => queue.retry(currentTask.key)}
+                              onClick={() => {
+                                if (requireAi()) queue.retry(currentTask.key);
+                              }}
                             >
                               {t.page.retry}
                             </button>
@@ -3797,7 +3941,10 @@ export function Reader() {
                               </strong>
                               <p>{t.page.unsaved.body}</p>
                               {draftFailure && (
-                                <p role="alert">{draftFailure}</p>
+                                <div role="alert">
+                                  <p>{draftFailure.text}</p>
+                                  <ErrorDetails error={draftFailure.error} />
+                                </div>
                               )}
                               <div className="inline-actions">
                                 <button
@@ -3809,7 +3956,9 @@ export function Reader() {
                                 <button
                                   type="button"
                                   disabled={Boolean(pageDisabledReason)}
-                                  onClick={() => queue.repair(retainedDraft.key)}
+                                  onClick={() => {
+                                    if (requireAi()) queue.repair(retainedDraft.key);
+                                  }}
                                 >
                                   {retainedDraft.repairRounds?.length
                                     ? t.page.continueRepair
@@ -3854,6 +4003,7 @@ export function Reader() {
                             onEdit={editCurrentSource}
                             onSave={saveCurrentDraft}
                             onDiscard={discardCurrentDraft}
+                            onTurnPage={turnPage}
                           />
                           {!retainedDraft && savedRecord && (
                             <>
@@ -3899,8 +4049,12 @@ export function Reader() {
                             )}
                             {storedState.status === "ready" && !storedState.record && (
                               <>
-                                <p>{t.page.noTranslation}</p>
-                                <p className="muted">{t.page.consent}</p>
+                                <p>{t.page.emptyGuide}</p>
+                                <p className="muted">{t.page.consentSummary}</p>
+                                <details className="consent-details">
+                                  <summary>{t.page.consentDetails}</summary>
+                                  <p className="muted">{t.page.consent}</p>
+                                </details>
                               </>
                             )}
                             {storedState.status === "idle" && isEpubDocument && (
@@ -3916,6 +4070,7 @@ export function Reader() {
             </div>
           )}
         </section>
+        </div>
       </main>
         )}
       </div>
@@ -3946,7 +4101,11 @@ export function Reader() {
 
       <SettingsDialog
         open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
+        onClose={() => {
+          setSettingsOpen(false);
+          void refreshAiStatus(false);
+        }}
+        onSnapshotChange={showAiSnapshot}
         uiLocale={locale}
         onApplyUiLocale={applyUiLocale}
         localeApplyBlockedReason={localeApplyBlockedReason}

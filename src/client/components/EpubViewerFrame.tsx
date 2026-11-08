@@ -9,6 +9,7 @@ import type {
 } from "../epub-bridge";
 import { EpubBridgeClient } from "../epub-bridge-client";
 import { toUiError, type UiError } from "../i18n";
+import type { PageStep } from "../page-keys";
 
 interface EpubViewerFrameProps {
   sessionKey: number;
@@ -18,6 +19,7 @@ interface EpubViewerFrameProps {
   onReady: (info: EpubReadyInfo) => void;
   onRelocated: (relocation: EpubRelocation) => void;
   onSelection: (selection: EpubSelection | null) => void;
+  onStep: (direction: PageStep) => void;
   onError: (error: UiError) => void;
 }
 
@@ -29,13 +31,14 @@ export function EpubViewerFrame({
   onReady,
   onRelocated,
   onSelection,
+  onStep,
   onError,
 }: EpubViewerFrameProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const clientRef = useRef<EpubBridgeClient | null>(null);
   const [loaded, setLoaded] = useState(false);
-  const callbacks = useRef({ onBridge, onReady, onRelocated, onSelection, onError });
-  callbacks.current = { onBridge, onReady, onRelocated, onSelection, onError };
+  const callbacks = useRef({ onBridge, onReady, onRelocated, onSelection, onStep, onError });
+  callbacks.current = { onBridge, onReady, onRelocated, onSelection, onStep, onError };
   const documentId = document?.format === "epub" ? document.id : null;
 
   useEffect(() => {
@@ -46,6 +49,7 @@ export function EpubViewerFrame({
       onReady: (info) => callbacks.current.onReady(info),
       onRelocated: (relocation) => callbacks.current.onRelocated(relocation),
       onSelection: (selection) => callbacks.current.onSelection(selection),
+      onStep: (direction) => callbacks.current.onStep(direction),
       onFatal: ({ code, message }) =>
         callbacks.current.onError({ code, detail: message }),
     });

@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReaderView, UiLocale } from "../../shared/contracts";
-import { toUiError, type UiError } from "../i18n";
+import { toUiError, useI18n, type UiError } from "../i18n";
+import { watchPageKeys, type PageStep } from "../page-keys";
+import { adaptPdfToolbar } from "../pdf-toolbar";
 import { waitForViewer, type ViewerBridge } from "../pdfBridge";
 
 const VIEWER_OPTIONS = {
@@ -29,6 +31,7 @@ interface PdfViewerFrameProps {
   onViewChange: (view: ReaderView) => void;
   onError: (error: UiError) => void;
   onFilePicked: (file: File) => void;
+  onTurnPage: (direction: PageStep) => boolean;
   onPassword?: (password: string) => void;
 }
 
@@ -39,7 +42,7 @@ function isPdfFile(file: File): boolean {
   );
 }
 
-function applyViewerOptions(source: Window, locale: UiLocale): void {
+function setViewerOptions(source: Window, values: Record<string, unknown>): void {
   if (!("PDFViewerApplicationOptions" in source)) return;
   const options = source.PDFViewerApplicationOptions;
   if (
@@ -48,11 +51,20 @@ function applyViewerOptions(source: Window, locale: UiLocale): void {
     "setAll" in options &&
     typeof options.setAll === "function"
   ) {
-    options.setAll({
-      ...VIEWER_OPTIONS,
-      localeProperties: { lang: locale === "en" ? "en-US" : "zh-CN" },
-    });
+    options.setAll(values);
   }
+}
+
+// PDF.js sizes its toolbar for the pointer: 0 is the stock size, 2 the 44px size for fingers.
+const toolbarDensity = (source: Window): number =>
+  source.matchMedia("(pointer: coarse)").matches ? 2 : 0;
+
+function applyViewerOptions(source: Window, locale: UiLocale): void {
+  setViewerOptions(source, {
+    ...VIEWER_OPTIONS,
+    localeProperties: { lang: locale === "en" ? "en-US" : "zh-CN" },
+    toolbarDensity: toolbarDensity(source),
+  });
 }
 
 export function PdfViewerFrame({
@@ -65,6 +77,7 @@ export function PdfViewerFrame({
   onViewChange,
   onError,
   onFilePicked,
+  onTurnPage,
   onPassword,
 }: PdfViewerFrameProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -72,6 +85,9 @@ export function PdfViewerFrame({
   const loadIdRef = useRef(0);
   const localeRef = useRef(locale);
   localeRef.current = locale;
+  const { t } = useI18n();
+  const toolsLabelRef = useRef(t.viewer.tools);
+  toolsLabelRef.current = t.viewer.tools;
   const [listenerReady, setListenerReady] = useState(false);
   const callbacks = useRef({
     onBridge,
@@ -80,6 +96,7 @@ export function PdfViewerFrame({
     onViewChange,
     onError,
     onFilePicked,
+    onTurnPage,
     onPassword,
   });
   callbacks.current = {
@@ -89,6 +106,7 @@ export function PdfViewerFrame({
     onViewChange,
     onError,
     onFilePicked,
+    onTurnPage,
     onPassword,
   };
 
@@ -183,6 +201,17 @@ export function PdfViewerFrame({
     document.addEventListener("drop", onDrop, true);
     document.addEventListener("input", onPasswordInput, true);
     document.addEventListener("click", onPasswordSubmit, true);
+    const stopKeys = watchPageKeys(document, (direction, event) => {
+      // PDF.js dialogs and annotation editors keep their own arrow keys.
+      if (document.querySelector("dialog[open]")) return false;
+      if ((event.target as Element | null)?.closest?.(".annotationEditorLayer")) return false;
+      return callbacks.current.onTurnPage(direction);
+    });
+    const stopToolbar = adaptPdfToolbar(window, toolsLabelRef.current);
+    const coarse = window.matchMedia("(pointer: coarse)");
+    const onCoarseChange = (): void =>
+      setViewerOptions(window, { toolbarDensity: toolbarDensity(window) });
+    coarse.addEventListener("change", onCoarseChange);
 
     let cancelled = false;
     let bridge: ViewerBridge | null = null;
@@ -194,6 +223,9 @@ export function PdfViewerFrame({
       document.removeEventListener("drop", onDrop, true);
       document.removeEventListener("input", onPasswordInput, true);
       document.removeEventListener("click", onPasswordSubmit, true);
+      stopKeys();
+      stopToolbar();
+      coarse.removeEventListener("change", onCoarseChange);
       unsubscribe?.();
       bridge?.destroy();
     };

@@ -7,6 +7,7 @@ export const zhCN: Messages = {
     close: "关闭",
     confirm: "确认",
     retry: "重试",
+    technicalDetails: "技术详情",
     save: "保存",
     delete: "删除",
     download: "下载",
@@ -69,6 +70,22 @@ export const zhCN: Messages = {
     batchTranslation: "批量翻译",
   },
   splitter: "调整原文与译文宽度",
+  layout: {
+    label: "分栏布局",
+    leftOnly: "仅左侧",
+    rightOnly: "仅右侧",
+    equal: "均分",
+    leftWide: "左侧优先",
+    rightWide: "右侧优先",
+  },
+  ai: {
+    checking: "正在读取 AI 配置…",
+    checkFailed: (detail) => `无法读取 AI 配置：${detail}`,
+    retryCheck: "重试读取配置",
+    notConfigured: "尚未配置 AI 翻译。",
+    configure: "配置 AI 后翻译",
+    openSettings: "打开 AI 设置",
+  },
   empty: {
     openPdf: "打开文档开始阅读。也可以把文件拖到这里。",
     noPdfOpen: "还没有打开文档。",
@@ -77,6 +94,7 @@ export const zhCN: Messages = {
   },
   viewer: {
     reopen: "重新打开",
+    tools: "阅读工具",
   },
   translation: {
     preview: "预览",
@@ -88,6 +106,8 @@ export const zhCN: Messages = {
     previewLabel: "Typst 预览",
     compiling: "正在编译预览…",
     compileFailed: "Typst 源码尚未通过编译；草稿已保留，可继续编辑。",
+    liveSource: "实时 Typst 源码",
+    highlightUnavailable: "语法高亮不可用，源码已保留。",
   },
   page: {
     actualOrder: "（实际页序）",
@@ -111,9 +131,11 @@ export const zhCN: Messages = {
     continueRepair: "继续修复",
     readingStored: "正在读取已存译文…",
     storedReadFailedTitle: "读取已存译文失败",
-    noTranslation: "这一页还没有译文。",
+    emptyGuide: "点击上方按钮翻译本页，译文会显示在这里。",
     consent:
       "翻译会把当前页，连同前一页末尾和后一页开头的少量参考内容（有文字时发送文字，没有文字时发送一条窄图像），发送给已配置的 AI 服务。参考内容只用来衔接上下文，不会被翻译或保存；不会发送整本文件。",
+    consentSummary: "会把本页及相邻页的少量摘录发送给你配置的 AI 服务。",
+    consentDetails: "发送范围",
     cacheHint: "使用已有译文",
     contextWarning: "部分跨页参考内容读取失败，这一页是在较少上下文下翻译的。",
     originalRange: "原页面范围",
@@ -149,7 +171,6 @@ export const zhCN: Messages = {
     cancelled: "已取消",
     failedKept: "重新生成失败，旧译文保留",
     failed: "翻译失败",
-    errorDetail: (detail, code) => `${detail}（${code}）`,
   },
   repair: {
     title: "Typst 修复",
@@ -342,15 +363,24 @@ export const zhCN: Messages = {
     pageCheckboxes: "页码选择",
     markerTranslated: "已译",
     markerTask: "任务",
-    summary: (selected, saved, tasks, candidates) =>
-      `已选 ${selected} 页 · 已有译文 ${saved} 页 · 已有任务 ${tasks} 页 · 本次新增 ${candidates} 页`,
+    method: {
+      legend: "选择方式",
+      outline: "按目录",
+      pages: "按页码",
+      sections: "按章节编号",
+      useSections: "改用章节编号选择",
+    },
+    pdfSummary: (selected, blocked, saved, candidates) =>
+      `已选 ${selected} 页 · 跳过 ${blocked} 页（已有任务或未保存草稿）· 跳过 ${saved} 页（已有译文）· 将翻译 ${candidates} 页`,
+    cost: (candidates) =>
+      `预计翻译 ${candidates} 页，可能产生服务商费用；自动修复可能增加调用。`,
     retranslateSaved: "重新生成已保存页（会产生费用）",
     allCovered:
       "所选页均已有译文或任务；勾选“重新生成已保存页”可重新生成已有结果。",
     resumeQueue: "恢复队列",
     start: (count) => `开始翻译${count > 0 ? ` (${count})` : ""}`,
     stopAll: "停止全部",
-    retryFailed: "重试失败",
+    retryFailed: "重试本书失败任务（所有语言）",
     progress: (finished, total, active, queued, failed) =>
       `已完成 ${finished} / 共 ${total}，进行中 ${active}，排队 ${queued}，失败 ${failed}（每个窗口最多 3 页并行）`,
     tasks: "翻译任务",
@@ -366,8 +396,8 @@ export const zhCN: Messages = {
         `第 ${first}–${last} 节（共 ${total} 节）`,
       sectionCheckboxes: "章节选择",
       markerTranslated: "已有译文",
-      summary: (selected, translated, tasks) =>
-        `已选 ${selected} 节 · 已有译文 ${translated} 节 · 已有任务 ${tasks} 节`,
+      selectedSummary: (sections) =>
+        `已选 ${sections} 节 · 屏幕页数按当前版面展开后确定`,
       start: (count) =>
         `开始翻译${count > 0 ? `（${count} 节）` : ""}`,
       note: "开始时，每个选中的章节会按当前窗口大小和阅读设置拆成屏幕页，再逐页单独翻译。之后更改设置不会影响已排队的页面。",
@@ -470,6 +500,12 @@ export const zhCN: Messages = {
     languageBlockedAuth: "请先完成或取消 AI 登录。",
     languageBlockedDirty: "请先保存或放弃 AI 表单的修改。",
     aiSection: "AI 服务与模型",
+    statusNone: "尚未配置 AI。请选择服务和视觉模型。",
+    statusUnsaved: "当前选择尚未保存。",
+    statusReady: (provider, model) => `已就绪：${provider} · ${model}`,
+    statusIncomplete: "配置已保存，但还未完成",
+    advanced: "高级设置",
+    done: "完成",
     provider: "服务",
     model: "视觉模型",
     reasoningEffort: "推理强度",

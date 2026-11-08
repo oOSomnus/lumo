@@ -16,6 +16,7 @@ import type {
   ParentMessage,
   ViewerMessage,
 } from "./epub-protocol";
+import type { PageStep } from "./page-keys";
 import type { TypstAsset } from "./typst";
 
 export interface EpubBridgeEvents {
@@ -24,6 +25,8 @@ export interface EpubBridgeEvents {
   onReady(info: EpubReadyInfo): void;
   onRelocated(relocation: EpubRelocation): void;
   onSelection(selection: EpubSelection | null): void;
+  /** A plain arrow key press inside the book asked for a page turn. */
+  onStep(direction: PageStep): void;
   /** The book itself could not be opened. */
   onFatal(failure: { code: EpubFailureCode; message: string }): void;
 }
@@ -208,6 +211,9 @@ export class EpubBridgeClient implements EpubBridge {
       case "ready":
         this.ready = true;
         this.events.onReady(message.info);
+        break;
+      case "step":
+        if (this.ready) this.events.onStep(message.direction);
         break;
       case "relocated":
         this.events.onRelocated(message.relocation);

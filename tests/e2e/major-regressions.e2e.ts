@@ -6,7 +6,9 @@ import {
   noteField,
   openApp,
   openFromLibrary,
+  openTranslatedPage,
   saveCopyButton,
+  translationPath,
   fixturePdf,
   test,
   uploadPdf,
@@ -454,10 +456,6 @@ test("R3 fingerprint reads only close their own image copies", async ({ page, co
   await other.close();
 });
 
-function translationPath(documentId: string, page: number, language: string): string {
-  return `/api/documents/${documentId}/translations/${page}/${language}`;
-}
-
 function waitForTranslationRead(
   page: Page,
   path: string,
@@ -483,6 +481,18 @@ test("R4 a manual retry resumes a paused queue and reads the cache", async ({ pa
   const first = await initialRead;
   expect(await first.json()).toBeNull();
 
+  // Credentials the provider no longer accepts: the server answers AI_AUTH_FAILED, which pauses the queue.
+  const rejected = /\/api\/translate$/;
+  await page.route(rejected, (route) =>
+    route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({
+        error: { code: "AI_AUTH_FAILED", message: "The provider rejected the credentials." },
+      }),
+    }),
+  );
+
   const errorRead = waitForTranslationRead(page, path);
   const translateResponse = page.waitForResponse(
     (response) =>
@@ -494,9 +504,15 @@ test("R4 a manual retry resumes a paused queue and reads the cache", async ({ pa
   const failed = await translateResponse;
   expect(failed.status()).toBe(503);
   expect(((await failed.json()) as { error: { code: string } }).error.code).toBe(
-    "AI_NOT_CONFIGURED",
+    "AI_AUTH_FAILED",
   );
   expect(await (await errorRead).json()).toBeNull();
+
+  // The failure reads as a sentence with a way out; the code and the raw detail wait behind "Technical details".
+  await expect(page.getByRole("button", { name: "Open AI settings" })).toBeVisible();
+  await page.getByText("Technical details").click();
+  await expect(page.locator(".error-details code")).toHaveText("AI_AUTH_FAILED");
+  await page.unroute(rejected);
 
   const seeded = await lumo.api.put(path, {
     data: { typst: "= cached recovery", provider: "custom", model: "smoke" },
@@ -597,100 +613,6 @@ test("R5 narrow layout keeps the batch panel on a language change", async ({ pag
   await expect(page.locator("#batch-expression")).toBeVisible();
 });
 
-test("R6 clearing the provider keeps the provider options", async ({ page, lumo }) => {
-  const catalogResponse = await lumo.api.get("/api/ai/catalog?provider=openai");
-  expect(catalogResponse.ok()).toBe(true);
-  const openAiCatalog = await catalogResponse.json();
-
-  await openApp(page, lumo.url);
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const settings = page.getByRole("dialog", { name: "Settings" });
-  const provider = settings.getByRole("combobox", { name: /^Provider/ });
-  await expect(provider.locator('option[value="openai"]')).toBeAttached();
-  const initialOptions = await provider
-    .locator("option")
-    .evaluateAll((options) =>
-      options.map((option) => (option as HTMLOptionElement).value),
-    );
-  expect(initialOptions).toEqual(expect.arrayContaining(["", "openai", "custom"]));
-
-  await provider.selectOption("openai");
-  const model = settings.getByRole("combobox", { name: /^Vision model/ });
-  await expect(model).toBeEnabled();
-
-  await provider.selectOption("");
-  await expect(provider.locator('option[value="openai"]')).toBeAttached();
-  await expect(provider.locator('option[value="custom"]')).toBeAttached();
-  await expect(provider).toHaveValue("");
-  await expect(model).toBeDisabled();
-  await expect(
-    settings.getByRole("button", { name: "Save AI settings" }),
-  ).toBeDisabled();
-
-  await provider.selectOption("openai");
-  await expect(model).toBeEnabled();
-
-  const routePattern = /\/api\/ai\/catalog\?provider=openai$/;
-  const captured = Promise.withResolvers<void>();
-  const release = Promise.withResolvers<void>();
-  const served = Promise.withResolvers<void>();
-  await page.route(routePattern, async (route) => {
-    if (route.request().method() !== "GET") {
-      await route.fallback();
-      return;
-    }
-    captured.resolve();
-    await release.promise;
-    await route
-      .fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify(openAiCatalog),
-      })
-      .catch(() => {});
-    served.resolve();
-  });
-
-  const customCatalog = page.waitForResponse(
-    (response) =>
-      response.request().method() === "GET" &&
-      response.url().endsWith("/api/ai/catalog?provider=custom"),
-  );
-  await provider.selectOption("custom");
-  await customCatalog;
-  await provider.selectOption("openai");
-  await captured.promise;
-  await provider.selectOption("");
-  release.resolve();
-  await served.promise;
-  await page.unroute(routePattern);
-
-  await expect(provider.locator('option[value="openai"]')).toBeAttached();
-  await expect(settings.getByRole("alert")).toHaveCount(0);
-  await expect(provider).toHaveValue("");
-  await expect(
-    settings.getByRole("button", { name: "Save AI settings" }),
-  ).toBeDisabled();
-
-  await page.route(routePattern, async (route) => {
-    if (route.request().method() !== "GET") {
-      await route.fallback();
-      return;
-    }
-    await route.fulfill({
-      status: 500,
-      contentType: "application/json",
-      body: JSON.stringify({ error: { code: "HTTP_ERROR", message: "injected" } }),
-    });
-  });
-  await provider.selectOption("openai");
-  await expect(settings.getByRole("alert")).toBeVisible();
-  await provider.selectOption("");
-  await expect(settings.getByRole("alert")).toHaveCount(0);
-  await expect(provider.locator('option[value="openai"]')).toBeAttached();
-  await page.unroute(routePattern);
-});
-
 test("R3 native viewer download keeps the app edits unsaved", async ({ page, lumo }) => {
   await uploadPdf(lumo.api, "download.pdf", 2, "download");
   await openApp(page, lumo.url);
@@ -753,12 +675,6 @@ async function darkPixels(page: Page, png: Buffer): Promise<number> {
   } finally {
     await scratch.close();
   }
-}
-
-async function openTranslatedPage(page: Page, url: string, name: string): Promise<void> {
-  await openApp(page, url);
-  await openFromLibrary(page, name);
-  await page.getByRole("combobox", { name: /^Target language/ }).selectOption("en");
 }
 
 /** Width the right pane offers its content: .page-body minus padding (clientWidth already excludes a scrollbar). */
@@ -877,7 +793,7 @@ test("Typst preview renders glyphs and fills the translation pane", async ({ pag
 
   const splitter = page.locator(".splitter");
   await splitter.press("End");
-  await expect(splitter).toHaveAttribute("aria-valuenow", "65");
+  await expect(splitter).toHaveAttribute("aria-valuenow", "80");
   await expectPreviewFillsPane(page, [1400, 900]);
   await splitter.press("Enter");
   await expect(splitter).toHaveAttribute("aria-valuenow", "50");
@@ -923,7 +839,7 @@ self.onmessage = (event) => {
   await openTranslatedPage(page, lumo.url, "sanitize.pdf");
   const preview = page.locator(".typst-preview iframe");
   await expect(preview).toBeVisible();
-  await expect(preview).toHaveAttribute("sandbox", "");
+  await expect(preview).toHaveAttribute("sandbox", "allow-same-origin");
   await expect
     .poll(async () => darkPixels(page, await preview.screenshot()), { timeout: 20_000 })
     .toBeGreaterThan(100);
@@ -1078,6 +994,11 @@ test("Typst repair goes on round after round until the page compiles, and every 
 
   await expect(panel.locator("details")).toHaveCount(3);
   await expect(panel.locator("details").nth(1).locator(".typst-repair-after")).toHaveText(paragraphs[1][1]);
+  // Once the page is saved every round is folded; opening one shows its coloured before/after lines.
+  await panel.locator("details").nth(1).locator("summary").click();
+  await expect(
+    panel.locator("details").nth(1).locator(".typst-repair-after span[style*='color']").first(),
+  ).toBeVisible();
   await expect(panel.locator("details").nth(1).locator("pre").last()).toContainText("line 3, column 4");
   await expect(panel.locator(".typst-repair-outcome")).toHaveText("Saved");
   // The request for round 3 also carried what round 2 had changed.

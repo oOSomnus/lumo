@@ -239,6 +239,7 @@ test("EPUB batch translates every screen page of a section once", async ({ page,
   expect(pages).toBeGreaterThan(2);
 
   await page.getByRole("tab", { name: "Batch translation" }).click();
+  await page.getByRole("radio", { name: "By section number" }).check();
   await page.getByRole("button", { name: "Current section", exact: true }).click();
   await page.getByRole("button", { name: /^Start translation/ }).click();
   await expect.poll(() => requests.length, { timeout: 90_000 }).toBe(pages);
@@ -495,6 +496,7 @@ test("EPUB batch still translates every screen page while a narrow screen hides 
   await page.getByRole("tab", { name: "Batch", exact: true }).click();
   const panel = page.locator(".batch-panel");
   await panel.getByRole("combobox", { name: /^Target language/ }).selectOption("en");
+  await panel.getByRole("radio", { name: "By section number" }).check();
   await panel.getByRole("button", { name: "Current section", exact: true }).click();
   await panel.getByRole("button", { name: /^Start translation/ }).click();
   await expect.poll(() => requests.length, { timeout: 90_000 }).toBe(before.pages);
@@ -858,6 +860,7 @@ test("an EPUB batch still looking for its pages blocks the interface language sw
   const pages = await holdFirstRequest(page, "pages");
   await openBook(page, lumo.url, "long.epub");
   await page.getByRole("tab", { name: "Batch translation" }).click();
+  await page.getByRole("radio", { name: "By section number" }).check();
   await page.getByRole("button", { name: "Current section", exact: true }).click();
   await page.getByRole("button", { name: /^Start translation/ }).click();
   // No page is found, so no task exists yet: only the running batch stands in the way.
@@ -895,6 +898,7 @@ test("EPUB 'Untranslated sections' also selects a section whose other screen pag
   expect(await savedLocations(lumo.api, document.id)).toHaveLength(1);
 
   await page.getByRole("tab", { name: "Batch translation" }).click();
+  await page.getByRole("radio", { name: "By section number" }).check();
   await page.getByRole("button", { name: "Untranslated sections", exact: true }).click();
   const start = page.getByRole("button", { name: /^Start translation/ });
   await expect(start).toHaveText("Start translation (2 sections)", { timeout: 30_000 });
@@ -918,6 +922,7 @@ test("EPUB 'Untranslated sections' counts the pages of the current layout, not t
   const before = await readPosition(page);
 
   await page.getByRole("tab", { name: "Batch translation" }).click();
+  await page.getByRole("radio", { name: "By section number" }).check();
   await page.getByRole("button", { name: "All sections", exact: true }).click();
   await page.getByRole("button", { name: /^Start translation/ }).click();
   await expect.poll(() => requests.length, { timeout: 90_000 }).toBe(before.pages + 1);
@@ -956,6 +961,7 @@ test("the EPUB 'Untranslated sections' shortcut shows its progress, blocks a sec
   const pages = await holdFirstRequest(page, "pages");
   await openBook(page, lumo.url, "long.epub");
   await page.getByRole("tab", { name: "Batch translation" }).click();
+  await page.getByRole("radio", { name: "By section number" }).check();
 
   const shortcut = page.getByRole("button", { name: "Untranslated sections", exact: true });
   await shortcut.click();
@@ -1137,4 +1143,91 @@ test("an EPUB translation that finishes while the Library is showing is saved an
   await expect(page.locator(".typst-preview iframe")).toBeVisible();
   expect(await readPosition(page)).toEqual(before);
   expect(requests).toHaveLength(1);
+});
+
+test("ArrowLeft and ArrowRight turn EPUB pages from the viewer, the chapter frame and the translation, cross into the next section and stop at the book's edges", async ({
+  page,
+  lumo,
+}) => {
+  const document = await uploadEpub(lumo.api, "long.epub", { long: true });
+  await fakeModel(page, document.id);
+  await openBook(page, lumo.url, "long.epub");
+  const first = await readPosition(page);
+  expect(first.pages).toBeGreaterThan(3);
+  const at = (section: number, current: number) =>
+    expect
+      .poll(async () => {
+        const position = await readPosition(page);
+        return [position.section, position.page];
+      })
+      .toEqual([section, current]);
+
+  // The viewer's own document: the first page is the book's edge, and the next press turns exactly one page.
+  await page.locator("iframe.epub-frame").focus();
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.press("ArrowRight");
+  await at(1, 2);
+
+  // The chapter's frame inside the viewer; its body is a strip of columns, so the frame is focused rather than clicked.
+  await page.frameLocator("iframe.epub-frame").locator("iframe").focus();
+  await page.keyboard.press("ArrowRight");
+  await at(1, 3);
+
+  // The translation's preview frame.
+  await page.getByRole("button", { name: "Translate this page" }).click();
+  await expect(page.locator(".page-status")).toHaveText(/Saved/, SAVED);
+  const preview = page.frameLocator(".typst-preview iframe");
+  await expect(preview.locator("body > svg")).toBeVisible();
+  await preview.locator("body").click();
+  await page.keyboard.press("ArrowRight");
+  await at(1, 4);
+  await page.keyboard.press("ArrowLeft");
+  await at(1, 3);
+
+  // Through the rest of the section, then into the next one.
+  for (let next = 4; next <= first.pages; next += 1) {
+    await page.keyboard.press("ArrowRight");
+    await at(1, next);
+  }
+  await page.keyboard.press("ArrowRight");
+  await at(2, 1);
+  const last = await readPosition(page);
+  for (let next = 2; next <= last.pages; next += 1) {
+    await page.keyboard.press("ArrowRight");
+    await at(2, next);
+  }
+
+  // The end of the book: ArrowRight stays, so ArrowLeft goes back exactly one page.
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("ArrowLeft");
+  await (last.pages > 1 ? at(2, last.pages - 1) : at(1, first.pages));
+});
+
+test("EPUB pane layouts reflow the book in place and keep the page's first text on screen", async ({
+  page,
+  lumo,
+}) => {
+  const document = await uploadEpub(lumo.api, "long.epub", { long: true });
+  const requests = await fakeModel(page, document.id);
+  await openBook(page, lumo.url, "long.epub");
+  await openContentsEntry(page, "Part A");
+  await expect.poll(async () => (await readPosition(page)).page).toBeGreaterThan(1);
+  const before = await readPosition(page);
+  const layout = page.getByRole("group", { name: "Pane layout" });
+  const choose = (name: string) => layout.getByRole("button", { name, exact: true }).click();
+
+  // The 40% preset is a narrower column than half the window: the section needs more pages; the 60% one needs fewer.
+  await choose("Right wider");
+  await expect.poll(async () => (await readPosition(page)).pages).toBeGreaterThan(before.pages);
+  const narrow = (await readPosition(page)).pages;
+  await choose("Left wider");
+  await expect.poll(async () => (await readPosition(page)).pages).toBeLessThan(narrow);
+  for (const name of ["Left only", "Right only", "Equal split"]) await choose(name);
+
+  // Back at the first layout the book is back on the same page of the same section, and that page still starts at its heading.
+  await expect.poll(() => readPosition(page)).toEqual(before);
+  await page.getByRole("button", { name: "Translate this page" }).click();
+  await expect.poll(() => requests.length).toBe(1);
+  expect(requests[0]!.xhtml).toContain("Part A");
+  await expect(page.locator(".page-status")).toHaveText(/Saved/, SAVED);
 });

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   TARGET_LANGUAGE_LABELS,
+  type AiSettingsSnapshot,
   type DocumentRecord,
   type TargetLanguage,
   type TranslationLocationSummary,
@@ -22,6 +23,7 @@ import {
   type TranslationQueue,
   type TranslationTask,
 } from "../translation-queue";
+import { AI_SETTINGS_CODES, ErrorDetails } from "./ErrorDetails";
 import { TypstRepairSummary } from "./TypstRepairPanel";
 
 interface BatchTranslationPanelProps {
@@ -58,6 +60,11 @@ interface BatchTranslationPanelProps {
   /** Ticks the EPUB sections that still have an untranslated screen page; needs the pages located first. */
   onSelectUntranslatedEpub: (saved: ReadonlySet<string>) => void;
   onStopAll: () => void;
+  /** What the server says about the AI setup; null without an error while it is being read. */
+  aiStatus: AiSettingsSnapshot["status"] | null;
+  aiStatusError: UiError | null;
+  onConfigureAi: () => void;
+  onRetryAiStatus: () => void;
 }
 
 const PAGE_GROUP_SIZE = 100;
@@ -88,6 +95,10 @@ export function BatchTranslationPanel({
   onStartEpubBatch,
   onSelectUntranslatedEpub,
   onStopAll,
+  aiStatus,
+  aiStatusError,
+  onConfigureAi,
+  onRetryAiStatus,
 }: BatchTranslationPanelProps) {
   const { locale, t } = useI18n();
   const isEpub = document.format === "epub";
@@ -127,6 +138,10 @@ export function BatchTranslationPanel({
   const [expressionError, setExpressionError] = useState<UiError | null>(null);
   const [groupIndex, setGroupIndex] = useState(0);
   const [retranslate, setRetranslate] = useState(false);
+  // PDFs are picked by page number, books by outline; both methods edit the same selection.
+  const [selectionMethod, setSelectionMethod] = useState<"outline" | "numbers">(
+    isEpub ? "outline" : "numbers",
+  );
   const [collapsed, setCollapsed] = useState<Set<number>>(new Set());
   const [translated, setTranslated] = useState<{
     key: string;
@@ -144,6 +159,7 @@ export function BatchTranslationPanel({
     setGroupIndex(0);
     setRetranslate(false);
     setCollapsed(new Set());
+    setSelectionMethod(isEpub ? "outline" : "numbers");
   }, [document.id]);
 
   useEffect(() => {
@@ -283,6 +299,13 @@ export function BatchTranslationPanel({
     [candidatePages, savedPages],
   );
 
+  // What the selected PDF pages come to: pages with a task or draft and, unless regenerating, saved pages are skipped.
+  const blockedPages = isEpub ? 0 : selectedPages.filter((page) => issuePages.has(page)).length;
+  const savedSkipped =
+    isEpub || retranslate
+      ? 0
+      : selectedPages.filter((page) => !issuePages.has(page) && savedPages.has(page)).length;
+
   const documentTasks = useMemo(
     () =>
       pageTasks.filter(
@@ -304,6 +327,22 @@ export function BatchTranslationPanel({
   const failed = languageTasks.filter(
     (task) => task.stage === "error" || hasRetainedDraft(task),
   ).length;
+  const working = tasks.some((task) => isActiveStage(task.stage)) || epubBatch.status === "running";
+  const hasErrors = documentTasks.some((task) => task.stage === "error");
+  const aiGate = aiStatus
+    ? aiStatus.configured
+      ? "ready"
+      : "unconfigured"
+    : aiStatusError
+      ? "failed"
+      : "checking";
+  // An AI action that is not possible yet becomes the step that makes it possible.
+  const aiStep =
+    aiGate === "unconfigured"
+      ? { label: t.ai.configure, run: onConfigureAi }
+      : aiGate === "failed"
+        ? { label: t.ai.retryCheck, run: onRetryAiStatus }
+        : null;
 
   const togglePage = (page: number): void => {
     const next = new Set(selection);
@@ -322,7 +361,7 @@ export function BatchTranslationPanel({
   };
 
   const startBatch = async (): Promise<void> => {
-    if (candidatePages.length === 0) return;
+    if (candidatePages.length === 0 || aiGate !== "ready") return;
     if (isEpub) {
       onStartEpubBatch({
         sections: candidatePages,
@@ -375,6 +414,29 @@ export function BatchTranslationPanel({
         </label>
       </div>
 
+      <fieldset className="batch-method">
+        <legend>{t.batch.method.legend}</legend>
+        <label className="radio-row">
+          <input
+            type="radio"
+            name="batch-method"
+            checked={selectionMethod === "outline"}
+            onChange={() => setSelectionMethod("outline")}
+          />
+          {t.batch.method.outline}
+        </label>
+        <label className="radio-row">
+          <input
+            type="radio"
+            name="batch-method"
+            checked={selectionMethod === "numbers"}
+            onChange={() => setSelectionMethod("numbers")}
+          />
+          {isEpub ? t.batch.method.sections : t.batch.method.pages}
+        </label>
+      </fieldset>
+
+      {selectionMethod === "outline" && (
       <section
         className="batch-outline"
         aria-labelledby="batch-outline-title"
@@ -521,14 +583,16 @@ export function BatchTranslationPanel({
                     {errorText(outline.error, locale)}
                   </p>
                 )}
+                <p className="muted">{t.outline.generateBody(pageCount)}</p>
                 <button
                   type="button"
-                  disabled={Boolean(outlineGenerationDisabledReason)}
-                  onClick={onGenerateOutline}
+                  disabled={
+                    aiStep ? false : Boolean(outlineGenerationDisabledReason) || aiGate === "checking"
+                  }
+                  onClick={aiStep?.run ?? onGenerateOutline}
                 >
-                  {outline.error
-                    ? t.outline.retryGenerate
-                    : t.outline.generate}
+                  {aiStep?.label ??
+                    (outline.error ? t.outline.retryGenerate : t.outline.generate)}
                 </button>
                 {outlineGenerationDisabledReason && (
                   <p className="muted">
@@ -538,12 +602,19 @@ export function BatchTranslationPanel({
               </>
             )}
             {isEpub && outline.entries.length === 0 && (
-              <p className="muted">{t.epub.noContents}</p>
+              <>
+                <p className="muted">{t.epub.noContents}</p>
+                <button type="button" onClick={() => setSelectionMethod("numbers")}>
+                  {t.batch.method.useSections}
+                </button>
+              </>
             )}
           </>
         )}
       </section>
+      )}
 
+      {selectionMethod === "numbers" && (
       <section className="batch-selector" aria-labelledby="batch-selector-title">
         <h3 id="batch-selector-title">{copy.select}</h3>
         {isEpub && <p className="outline-note">{t.batch.epub.note}</p>}
@@ -679,19 +750,16 @@ export function BatchTranslationPanel({
           ))}
         </div>
       </section>
+      )}
 
       <section className="batch-summary">
         <p>
           {isEpub
-            ? t.batch.epub.summary(
+            ? t.batch.epub.selectedSummary(selectedPages.length)
+            : t.batch.pdfSummary(
                 selectedPages.length,
-                savedPages.size,
-                issuePages.size,
-              )
-            : t.batch.summary(
-                selectedPages.length,
-                savedPages.size,
-                issuePages.size,
+                blockedPages,
+                savedSkipped,
                 candidatePages.length,
               )}
         </p>
@@ -716,51 +784,76 @@ export function BatchTranslationPanel({
           )}
         {queue.halt && (
           <div className="inline-error" role="alert">
-            {errorText(
-              {
-                code: queue.halt.code,
-                detail: queue.halt.detail,
-                params: queue.halt.params,
-              },
-              locale,
-            )}{" "}
-            ({queue.halt.code})
-            <button type="button" onClick={() => queue.resume()}>
-              {t.batch.resumeQueue}
-            </button>
+            {errorText({ code: queue.halt.code, params: queue.halt.params }, locale)}
+            <ErrorDetails error={queue.halt} />
+            <div className="inline-actions">
+              {AI_SETTINGS_CODES[queue.halt.code] === true && (
+                <button type="button" onClick={onConfigureAi}>
+                  {t.ai.openSettings}
+                </button>
+              )}
+              <button type="button" disabled={aiGate !== "ready"} onClick={() => queue.resume()}>
+                {t.batch.resumeQueue}
+              </button>
+            </div>
           </div>
         )}
+        {aiGate === "checking" && (
+          <p className="muted" aria-live="polite">
+            {t.ai.checking}
+          </p>
+        )}
+        {aiGate === "unconfigured" && <p className="muted">{t.ai.notConfigured}</p>}
+        {aiGate === "failed" && aiStatusError && (
+          <p className="field-error" role="alert">
+            {t.ai.checkFailed(errorText(aiStatusError, locale))}
+          </p>
+        )}
+        {!isEpub && aiGate === "ready" && candidatePages.length > 0 && (
+          <p className="muted">{t.batch.cost(candidatePages.length)}</p>
+        )}
         <div className="batch-start">
-          <button
-            type="button"
-            className="primary"
-            disabled={
-              candidatePages.length === 0 ||
-              activeTranslated.status !== "ready" ||
-              Boolean(disabledReason) ||
-              epubBatch.status === "running"
-            }
-            onClick={() => void startBatch()}
-          >
-            {isEpub
-              ? t.batch.epub.start(candidatePages.length)
-              : t.batch.start(candidatePages.length)}
-          </button>
-          <button type="button" onClick={onStopAll}>
-            {t.batch.stopAll}
-          </button>
-          <button
-            type="button"
-            disabled={Boolean(disabledReason)}
-            onClick={() => {
-              queue.resume();
-              for (const task of documentTasks) {
-                if (task.stage === "error") queue.retry(task.key);
+          {aiStep ? (
+            <button type="button" className="primary" onClick={aiStep.run}>
+              {aiStep.label}
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="primary"
+              disabled={
+                candidatePages.length === 0 ||
+                activeTranslated.status !== "ready" ||
+                Boolean(disabledReason) ||
+                epubBatch.status === "running" ||
+                aiGate === "checking"
               }
-            }}
-          >
-            {t.batch.retryFailed}
-          </button>
+              onClick={() => void startBatch()}
+            >
+              {isEpub
+                ? t.batch.epub.start(candidatePages.length)
+                : t.batch.start(candidatePages.length)}
+            </button>
+          )}
+          {working && (
+            <button type="button" onClick={onStopAll}>
+              {t.batch.stopAll}
+            </button>
+          )}
+          {hasErrors && (
+            <button
+              type="button"
+              disabled={Boolean(disabledReason) || aiGate !== "ready"}
+              onClick={() => {
+                queue.resume();
+                for (const task of documentTasks) {
+                  if (task.stage === "error") queue.retry(task.key);
+                }
+              }}
+            >
+              {t.batch.retryFailed}
+            </button>
+          )}
         </div>
         {isEpub && epubBatch.status === "running" && (
           <p className="muted" aria-live="polite">
@@ -810,26 +903,10 @@ export function BatchTranslationPanel({
                 <span className="muted">{t.batch.existing}</span>
               )}
               {task.error && (
-                <span
-                  className="task-error"
-                  title={errorText(
-                    {
-                      code: task.error.code,
-                      detail: task.error.detail,
-                      params: task.error.params,
-                    },
-                    locale,
-                  )}
-                >
-                  {errorText(
-                    {
-                      code: task.error.code,
-                      detail: task.error.detail,
-                      params: task.error.params,
-                    },
-                    locale,
-                  )}
-                </span>
+                <div className="task-error">
+                  {errorText({ code: task.error.code, params: task.error.params }, locale)}
+                  <ErrorDetails error={task.error} />
+                </div>
               )}
               <TypstRepairSummary task={task} />
               <span className="task-actions">
@@ -838,11 +915,16 @@ export function BatchTranslationPanel({
                     {t.common.cancel}
                   </button>
                 )}
+                {task.error && AI_SETTINGS_CODES[task.error.code] === true && (
+                  <button type="button" onClick={onConfigureAi}>
+                    {t.ai.openSettings}
+                  </button>
+                )}
                 {(task.stage === "error" ||
                   (task.stage === "cancelled" && !hasRetainedDraft(task))) && (
                   <button
                     type="button"
-                    disabled={Boolean(disabledReason)}
+                    disabled={Boolean(disabledReason) || aiGate !== "ready"}
                     onClick={() => queue.retry(task.key)}
                   >
                     {t.common.retry}
@@ -855,7 +937,7 @@ export function BatchTranslationPanel({
                     </button>
                     <button
                       type="button"
-                      disabled={Boolean(disabledReason)}
+                      disabled={Boolean(disabledReason) || aiGate !== "ready"}
                       title={t.repair.note}
                       onClick={() => queue.repair(task.key)}
                     >

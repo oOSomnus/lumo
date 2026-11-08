@@ -1,6 +1,7 @@
 import type { TypstRepairProgress } from "../../shared/contracts";
 import { errorText, useI18n, type Messages } from "../i18n";
 import type { TranslationTask, TypstRepairRound } from "../translation-queue";
+import { TypstSource } from "./TypstSource";
 
 function progressText(progress: TypstRepairProgress, t: Messages): string {
   switch (progress.phase) {
@@ -36,15 +37,11 @@ function RoundDetails({ round }: { round: TypstRepairRound }) {
           <div className="typst-repair-pair">
             <figure>
               <figcaption>{t.repair.before}</figcaption>
-              <pre className="typst-source typst-repair-before" tabIndex={0}>
-                {round.change.before}
-              </pre>
+              <TypstSource className="typst-repair-before" tabIndex={0} source={round.change.before} />
             </figure>
             <figure>
               <figcaption>{t.repair.after}</figcaption>
-              <pre className="typst-source typst-repair-after" tabIndex={0}>
-                {round.change.after}
-              </pre>
+              <TypstSource className="typst-repair-after" tabIndex={0} source={round.change.after} />
             </figure>
           </div>
         </div>

@@ -34,13 +34,15 @@ bun install
 bun run dev
 ```
 
-The terminal prints a URL containing an access code, for example `http://127.0.0.1:12345/?token=...`. The server listens on `127.0.0.1` only, so open that URL in a browser on the same machine. In **Settings**, pick a model that accepts image input, then add an API key or sign in with OAuth.
+The terminal prints a URL containing an access code, for example `http://127.0.0.1:12345/?token=...`. The server listens on `127.0.0.1` only, so open that URL in a browser on the same machine. In **Settings** (the first **Translate** press opens it for you), pick a model that accepts image input, then add an API key or sign in with OAuth.
 
 The first run downloads the pinned PDF.js viewer into `vendor/pdfjs/` and prepares the Typst runtime and fonts in `vendor/typst/`; this needs `unzip`. epub.js and JSZip are copied from `node_modules`.
 
 PDF and EPUB files have no application-imposed limit on their total size; available memory and disk space still constrain large files. An EPUB package may hold at most 20,000 entries, and its container and package (OPF) XML files at most 2,097,152 characters each, counted as JavaScript string length rather than bytes.
 
 Lumo opens on a bookshelf with a cover for each document: the first PDF page, or a generated EPUB card. Selecting a book resumes its saved PDF page or EPUB reading position and view; **Library** in the top bar returns to the shelf without ending the current session.
+
+Panes can be arranged as left only, right only, equal split, or 60/40 either way with the buttons above them; ArrowLeft and ArrowRight turn pages from anywhere in the reader. Typst source is syntax-highlighted while it streams in, in the source view and in repair snippets. Touch screens get 44 px targets and a **Reading tools** menu in narrow viewers. Details: [docs/manual.md](docs/manual.md#reading-and-translation).
 
 ## Documentation
 

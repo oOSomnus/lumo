@@ -56,6 +56,8 @@ export interface RenditionLike {
   off(name: string, listener: (...args: never[]) => void): void;
   currentLocation(): LocatedLike | undefined;
   getContents(): ContentsLike[];
+  /** `content` runs for each section's document as it is shown; a hook returns nothing, so epub.js does not wait on it. */
+  hooks: { content: { register(hook: (contents: ContentsLike) => void): void } };
   /** Set while a display is pending; epub.js never settles that display when the section fails to load. */
   displaying?: { resolve(): void };
   destroy(): void;

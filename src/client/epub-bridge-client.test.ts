@@ -54,6 +54,7 @@ function setup() {
     onReady: () => events.push("ready"),
     onRelocated: () => events.push("relocated"),
     onSelection: () => events.push("selection"),
+    onStep: (direction) => events.push(`step:${direction}`),
     onFatal: ({ code }) => events.push(`fatal:${code}`),
   });
   const deliver = (message: ViewerMessage, source: unknown = contentWindow): void => {
@@ -109,6 +110,24 @@ describe("EpubBridgeClient requests", () => {
     await expect(current).resolves.toBeUndefined();
   });
 
+  test("a key press in the book reaches the reader only for the current book once it is ready", () => {
+    const { client, events, deliver, openBook } = setup();
+    client.open(new ArrayBuffer(8));
+    deliver({ type: "step", generation: 1, direction: "next" });
+    expect(events).toEqual([]);
+
+    deliver({ type: "ready", generation: 1, info });
+    deliver({ type: "step", generation: 1, direction: "next" });
+    deliver({ type: "step", generation: 1, direction: "prev" });
+    deliver({ type: "step", generation: 0, direction: "next" });
+    deliver({ type: "step", generation: 2, direction: "prev" });
+    expect(events).toEqual(["ready", "step:next", "step:prev"]);
+
+    openBook(2);
+    deliver({ type: "step", generation: 1, direction: "prev" });
+    expect(events.at(-1)).toBe("ready");
+  });
+
   test("invalidating ends the old book's events at once, before the next book is opened", async () => {
     const { client, sent, events, deliver, requests, openBook } = setup();
     openBook();
@@ -120,6 +139,7 @@ describe("EpubBridgeClient requests", () => {
     const before = events.length;
     deliver({ type: "relocated", generation: 1, relocation: { ...pageAt(1), atStart: true, atEnd: false } });
     deliver({ type: "selection", generation: 1, selection: null });
+    deliver({ type: "step", generation: 1, direction: "next" });
     deliver({ type: "ready", generation: 1, info });
     deliver({ type: "failure", generation: 1, id: null, code: "EPUB_OPEN_FAILED", message: "bad zip" });
     deliver({ type: "reply", generation: 1, id: request!.id, result: undefined });

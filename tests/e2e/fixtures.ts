@@ -236,8 +236,34 @@ export async function openFromLibrary(page: Page, name: string): Promise<void> {
     .click();
 }
 
-export const test = base.extend<{ lumo: LumoApp }>({
-  lumo: async ({}, use, testInfo) => {
+/** Opens a book from the Library and chooses English as the target language. */
+export async function openTranslatedPage(page: Page, url: string, name: string): Promise<void> {
+  await openApp(page, url);
+  await openFromLibrary(page, name);
+  await page.getByRole("combobox", { name: /^Target language/ }).selectOption("en");
+}
+
+export function translationPath(documentId: string, pageNumber: number, language: string): string {
+  return `/api/documents/${documentId}/translations/${pageNumber}/${language}`;
+}
+
+/** A keyless custom endpoint is a complete AI configuration. Nothing listens on the default port: the model's answer is always faked or served by a test's own server. */
+export async function configureCustomAi(
+  api: APIRequestContext,
+  baseUrl = "http://127.0.0.1:9/v1",
+): Promise<void> {
+  const response = await api.put("/api/ai/settings", {
+    data: { provider: "custom", model: "smoke", baseUrl, contextWindow: 128000, maxTokens: 4096 },
+  });
+  expect(response.ok(), `saving the AI settings failed with HTTP ${response.status()}`).toBe(true);
+  const saved = (await response.json()) as { status: { configured: boolean } };
+  expect(saved.status.configured).toBe(true);
+}
+
+export const test = base.extend<{ lumo: LumoApp; aiConfigured: boolean }>({
+  // Most tests read and translate books, which needs a ready AI; `test.use({ aiConfigured: false })` starts from a fresh install instead.
+  aiConfigured: [true, { option: true }],
+  lumo: async ({ aiConfigured }, use, testInfo) => {
     const directory = mkdtempSync(join(tmpdir(), "lumo-major-"));
     const standalone = testInfo.project.name === "standalone";
     const command = standalone ? resolve("dist/lumo") : "bun";
@@ -316,6 +342,7 @@ export const test = base.extend<{ lumo: LumoApp }>({
           `GET /api/library failed with HTTP ${library.status()}: ${redact(await library.text())}`,
         );
       }
+      if (aiConfigured) await configureCustomAi(api);
       await use({ url, api });
     } finally {
       await api?.dispose().catch(() => {});

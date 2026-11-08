@@ -8,6 +8,7 @@ import type {
   EpubRelocation,
   EpubSelection,
 } from "./epub-bridge";
+import type { PageStep } from "./page-keys";
 import type { TypstAsset } from "./typst";
 
 /**
@@ -62,6 +63,8 @@ export type ViewerMessage =
   /** Always posted before the `reply` of the display, next, prev or setView that caused it. */
   | { type: "relocated"; generation: number; relocation: EpubRelocation }
   | { type: "selection"; generation: number; selection: EpubSelection | null }
+  /** A plain left or right key press inside the book; the reader page decides whether it turns the page. */
+  | { type: "step"; generation: number; direction: PageStep }
   | { type: "reply"; generation: number; id: number; result: EpubReplies[keyof EpubReplies] }
   | { type: "page"; generation: number; id: number; page: EpubPageLocation }
   | { type: "done"; generation: number; id: number }

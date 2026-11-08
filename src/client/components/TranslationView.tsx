@@ -1,8 +1,10 @@
 import DOMPurify from "dompurify";
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import { compileTypst, type TypstAsset } from "../typst";
 import { stripPlaceholderControls } from "../../shared/typst";
+import { watchPageKeys, type PageStep } from "../page-keys";
+import { TypstSource } from "./TypstSource";
 
 type LoadAssets = (signal: AbortSignal) => Promise<readonly TypstAsset[]>;
 
@@ -67,6 +69,8 @@ interface TranslationViewProps {
   onEdit?: (typst: string) => void;
   onSave?: () => void;
   onDiscard?: () => void;
+  /** Turns the book page for a plain arrow key pressed inside the preview; true when it did. */
+  onTurnPage?: (direction: PageStep) => boolean;
 }
 
 type PreviewState =
@@ -89,12 +93,32 @@ export const TranslationView = memo(function TranslationView({
   onEdit,
   onSave,
   onDiscard,
+  onTurnPage,
 }: TranslationViewProps) {
   const { t } = useI18n();
   const [mode, setMode] = useState<"preview" | "source">("preview");
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(typst);
   const [preview, setPreview] = useState<PreviewState>({ status: "compiling" });
+  const [liveOpen, setLiveOpen] = useState(true);
+
+  // The preview document belongs to the model's output: the page only listens there for arrow keys,
+  // and stops when the document is replaced or the frame is gone.
+  const turnPageRef = useRef(onTurnPage);
+  turnPageRef.current = onTurnPage;
+  const stopKeysRef = useRef<(() => void) | null>(null);
+  const attachKeys = useCallback((frame: HTMLIFrameElement): void => {
+    stopKeysRef.current?.();
+    stopKeysRef.current = null;
+    const doc = frame.contentDocument;
+    if (!doc) return;
+    stopKeysRef.current = watchPageKeys(doc, (direction) => turnPageRef.current?.(direction) ?? false);
+  }, []);
+  const frameRef = useCallback((frame: HTMLIFrameElement | null): void => {
+    if (frame) return;
+    stopKeysRef.current?.();
+    stopKeysRef.current = null;
+  }, []);
 
   const previewRef = useRef(preview);
   previewRef.current = preview;
@@ -219,10 +243,17 @@ export const TranslationView = memo(function TranslationView({
             onEdit?.(event.target.value);
           }}
         />
+      ) : streaming ? (
+        <details
+          className="live-source"
+          open
+          onToggle={(event) => setLiveOpen(event.currentTarget.open)}
+        >
+          <summary>{t.translation.liveSource}</summary>
+          {liveOpen && <TypstSource source={typst} label={t.translation.sourceLabel} />}
+        </details>
       ) : showSource ? (
-        <pre className="typst-source" aria-label={t.translation.sourceLabel}>
-          {visibleSource}
-        </pre>
+        <TypstSource source={visibleSource} label={t.translation.sourceLabel} />
       ) : null}
 
       {!streaming && showPreview && preview.status === "compiling" && (
@@ -244,10 +275,12 @@ export const TranslationView = memo(function TranslationView({
           }
         >
           <iframe
+            ref={frameRef}
             title={t.translation.previewLabel}
             aria-label={t.translation.previewLabel}
-            sandbox=""
+            sandbox="allow-same-origin"
             srcDoc={previewHtml}
+            onLoad={(event) => attachKeys(event.currentTarget)}
           />
         </div>
       )}
