@@ -2,6 +2,36 @@
 
 [README](../README.zh-CN.md) · [English](manual.md)
 
+## 概述
+
+Lumo 是本地 PDF / EPUB 阅读器，用视觉模型翻译每一页：PDF 的一页，或 EPUB 屏幕上正在显示的那一页。每次请求还会附带相邻页的简短摘录以保持上下文连贯，摘录只作参考，不会被翻译或保存。每页译文会生成为独立 Typst 文档（标题、列表、表格、公式、图形、保留的图片或明确的占位说明），在模型能看清时保留原文的分栏、表格结构、颜色和粗斜体，保存在本地 SQLite 中并在应用内渲染。无法通过本地编译的文档会自动发回模型修正，一轮接一轮，直到编译通过或你取消（可能产生费用），页面面板会显示最近五轮的诊断与改动的行。PDF 没有可用目录时，Lumo 可以用同一视觉模型生成目录，并按目录选择批量翻译的页码范围；EPUB 提供由自身目录生成的目录面板，以及字号、字体、行距和主题的阅读设置。
+
+![Lumo 把教材中的一页从英文翻译为简体中文：Typst 源码流式生成，随后在原页旁显示已保存的预览](assets/page-generation-demo.gif)
+
+录制使用当前版本，模型为 OpenAI GPT-6.1 Sol（推理强度 low），把一页从英文翻译为简体中文。Typst 源码随模型输出流式显示；随后 Lumo 校验、保存，并显示编译后的预览。生成阶段按 2–3 倍速播放，因此动图不代表真实耗时（这次从点击到出现预览约 26 秒）。[示例 PDF](assets/page-generation-demo.pdf) 即录制所用的页面。
+
+该页是 [*Introductory Statistics*](https://openstax.org/details/books/introductory-statistics) 第 248 页，作者 Barbara Illowsky、Susan Dean（OpenStax，© 2018 Rice University），采用 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) 许可，不在本项目 MIT 许可范围内。示例为单页摘录，并新增了署名页脚；译文由 Lumo 调用 GPT-6.1 Sol 生成，未获作者或 OpenStax 认可。
+
+## 安装
+
+从[最新 Release](https://github.com/oOSomnus/lumo/releases/latest) 下载适合你系统的文件，用 `SHA256SUMS` 校验后安装。无需额外安装任何东西：Bun、PDF.js、epub.js 和 Typst 运行时已内置，Windows 安装包还附带 WebView2 运行时。
+
+| 系统 | 下载 | 要求 |
+| --- | --- | --- |
+| Windows x64 | `lumo-v<版本>-windows-x64-setup.exe` | Windows 10 1809 或更新 |
+| Windows ARM64 | `lumo-v<版本>-windows-arm64-setup.exe` | Windows 11 |
+| macOS Intel / Apple 芯片 | `lumo-v<版本>-macos-x64.dmg` / `lumo-v<版本>-macos-arm64.dmg` | macOS 13 或更新 |
+| Linux x64 / ARM64 | `lumo-v<版本>-linux-<架构>.deb`、`.rpm` 或 `.AppImage` | 桌面会话、默认网页浏览器和 WebKitGTK 4.1（Ubuntu 22.04、Debian 12 或更新） |
+
+- **Windows：** 运行安装程序（按当前用户安装，不需要管理员权限），从开始菜单启动 Lumo。在“设置 → 应用”中卸载。
+- **macOS：** 打开 DMG，把 `Lumo.app` 拖到“应用程序”，从“应用程序”或启动台打开。删除 `Lumo.app` 即卸载。
+- **Linux：** `sudo apt install ./lumo-v<版本>-linux-x64.deb` 或 `sudo dnf install ./lumo-v<版本>-linux-x64.rpm` 会把 Lumo 加入应用菜单，用包管理器卸载。AppImage 先 `chmod +x` 再直接运行，不会添加菜单项；系统没有 FUSE 时用 `--appimage-extract-and-run` 启动。删除该文件即卸载。
+
+只有 Release 说明和 `SIGNING.txt` 明确写明时，安装包才经过签名；否则系统会给出提示：
+
+- **Windows（未签名）：** SmartScreen 可能显示“Windows 已保护你的电脑”，选择 **更多信息 → 仍要运行**。由 Smart App Control 或组织策略管理的设备可能直接拒绝未签名应用，Lumo 无法改变这一点。
+- **macOS（ad-hoc 签名，未公证）：** Gatekeeper 会阻止首次启动。按住 Control 点按 `Lumo.app` 选择 **打开**，或在 **系统设置 → 隐私与安全性** 中对这一个应用选择 **仍要打开**。无需关闭 Gatekeeper。
+
 ## 设置
 
 设置中只有一个“AI 服务与模型”区域，之后是界面语言和数据工具。区域顶部的状态行会告诉你现在的情况：`已就绪：<服务> · <模型>`、尚未配置、配置已保存但还未完成（例如还缺凭证），或当前选择尚未保存。只有存在待保存内容时“保存”才是主按钮；已保存的配置完整后，“完成”会关闭对话框。
@@ -38,6 +68,7 @@
 - **按目录选择** — PDF 没有可用目录时，批量面板可以用当前视觉模型生成目录。它会逐页发送页面图像和文字，调用次数等于页数，可能产生费用。生成的目录保存在 `reader.sqlite`，再次打开文档时复用；不会修改 PDF 字节，也不会写入 PDF.js 侧栏。目录生成仅用于 PDF；EPUB 直接使用包内目录。勾选章或节会把其完整物理页范围加入同一个选页集合。父章节包括全部子章节；同页开始的章节可能重叠；翻译仍以完整 PDF 页为单位。生成目录是需要核对的推断结果，翻译前请先检查。PDF 有可用原生目录时会直接显示原生目录。
 - 译文持久化到 SQLite；再次打开同一页优先显示已保存结果。“导出全部译文”会把已保存的页面源码导出为 ZIP，内含逐页 `.typ` 文件和图片资源：PDF 为 `p<页码>-<语言>.typ`，EPUB 为 `<序号>-s<章节>-<语言>.typ`，序号按阅读顺序给已保存的屏幕页编号；选择译文不包含在该文件中。
 - 修改表单或批注后，“保存修改副本”会生成新文档并保留原件；有未保存修改时会阻止产生新译文。
+- **文件上限** — PDF 和 EPUB 文件的总大小不设应用层上限；大文件仍受可用内存和磁盘空间限制。EPUB 包最多包含 20,000 个条目，其 container 与包（OPF）XML 文件各自最多 2,097,152 个字符（按 JavaScript 字符串长度计数，不是字节数）。
 
 ## 桌面应用与独立服务
 
@@ -59,6 +90,20 @@ LUMO_DATA_DIR=/absolute/path ./dist/sidecar/lumo-server-<triple>
 ```
 
 不带参数手动启动时，服务会像源码模式一样打印浏览器地址。`--desktop` 是窗口使用的私有协议（stdout 上的 JSON 事件和 stdin 上的一条停止命令），不供手动使用。
+
+## 从源码构建
+
+要求 Bun 1.4.2 或更新版本。桌面窗口还需要 Rust 1.90 或更新版本，以及所在系统的 [Tauri 系统依赖](https://tauri.app/start/prerequisites/)。
+
+```bash
+bun install
+bun run dev          # 构建服务并打开桌面窗口
+bun run dev:server   # 仅运行服务，不需要 Rust
+```
+
+`bun run dev:server` 会打印带访问码的地址，例如 `http://127.0.0.1:12345/?token=...`。服务只监听 `127.0.0.1`，请在同一台机器的浏览器中打开该地址；桌面窗口的“打开 WebUI”按钮效果相同。在“设置”中（第一次点击“翻译”时会自动为你打开）选择支持图像输入的模型，再配置 API key 或 OAuth 登录。
+
+首次运行会把固定版本的 PDF.js viewer 下载到 `vendor/pdfjs/`，并在 `vendor/typst/` 准备 Typst 运行时与字体；压缩包由脚本自行解压，无需系统安装 `unzip`。epub.js 与 JSZip 从 `node_modules` 复制。
 
 ## 数据与安全
 
