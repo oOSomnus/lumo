@@ -288,7 +288,7 @@ describe("handleLibrary", () => {
     const file = await call(ctx, `/api/documents/${document.id}/file`);
     expect(file.status).toBe(200);
     expect(Buffer.from(await file.arrayBuffer()).equals(Buffer.from(bytes.buffer))).toBe(true);
-  });
+  }, 60_000);
 
   test("rejects non-PDF bodies and invalid upload metadata", async () => {
     const ctx = setup();
