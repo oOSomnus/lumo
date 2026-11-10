@@ -351,6 +351,32 @@ describe("readerViewSchema", () => {
     expect(() => readerViewSchema.parse({ ...epubView, scaleValue: "page-fit" })).toThrow();
   });
 
+  test("keeps at most five recent positions per side", () => {
+    const memory = {
+      pdf: [{ page: 1, left: 10, top: 20 }],
+      translation: [
+        { key: "book-1-zh-CN-page", offset: 0.5 },
+      ],
+    };
+    expect(readerViewSchema.parse({ ...view, scrollMemory: memory })).toMatchObject({ scrollMemory: memory });
+    expect(readerViewSchema.parse({ ...epubView, scrollMemory: memory })).toMatchObject({ scrollMemory: memory });
+
+    const fivePdf = Array.from({ length: 5 }, (_, index) => ({ page: index + 1, left: 0, top: 0 }));
+    expect(() =>
+      readerViewSchema.parse({ ...view, scrollMemory: { pdf: [...fivePdf, { page: 6, left: 0, top: 0 }], translation: [] } }),
+    ).toThrow();
+    for (const bad of [
+      { pdf: [{ page: 0, left: 0, top: 0 }], translation: [] },
+      { pdf: [{ page: 1, left: Number.NaN, top: 0 }], translation: [] },
+      { pdf: [], translation: [{ key: "", offset: 0 }] },
+      { pdf: [], translation: [{ key: "x".repeat(257), offset: 0 }] },
+      { pdf: [], translation: [{ key: "key", offset: 1.1 }] },
+      { pdf: [], translation: [{ key: "key", offset: -0.1 }] },
+    ]) {
+      expect(() => readerViewSchema.parse({ ...view, scrollMemory: bad })).toThrow();
+    }
+  });
+
   test("requires explicit EPUB reading settings within their presets", () => {
     expect(() => readerViewSchema.parse({ format: "epub", cfi: null })).toThrow();
     for (const bad of [

@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReaderView, UiLocale } from "../../shared/contracts";
 import { toUiError, useI18n, type UiError } from "../i18n";
-import { watchPageKeys, type PageStep } from "../page-keys";
+import { watchReaderKeys, type ReaderShortcut } from "../page-keys";
 import { adaptPdfToolbar } from "../pdf-toolbar";
-import { waitForViewer, type ViewerBridge } from "../pdfBridge";
+import {
+  waitForViewer,
+  type PdfScrollLocation,
+  type ViewerBridge,
+} from "../pdfBridge";
 
 const VIEWER_OPTIONS = {
   defaultUrl: "",
@@ -25,13 +29,17 @@ interface PdfViewerFrameProps {
   sessionKey: number;
   locale: UiLocale;
   title: string;
+  immersive: boolean;
   onBridge: (bridge: ViewerBridge | null) => void;
   onDocumentInit: (bridge: ViewerBridge) => void;
-  onPageChange: (page: number) => void;
+  onPageChange: (page: number, previous: number | undefined) => void;
   onViewChange: (view: ReaderView) => void;
+  onViewArea: (location: PdfScrollLocation) => void;
+  onPageRendered: (page: number) => void;
+  onUserScroll: () => void;
   onError: (error: UiError) => void;
   onFilePicked: (file: File) => void;
-  onTurnPage: (direction: PageStep) => boolean;
+  onShortcut: (shortcut: ReaderShortcut) => boolean;
   onPassword?: (password: string) => void;
 }
 
@@ -71,13 +79,17 @@ export function PdfViewerFrame({
   sessionKey,
   locale,
   title,
+  immersive,
   onBridge,
   onDocumentInit,
   onPageChange,
   onViewChange,
+  onViewArea,
+  onPageRendered,
+  onUserScroll,
   onError,
   onFilePicked,
-  onTurnPage,
+  onShortcut,
   onPassword,
 }: PdfViewerFrameProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -85,6 +97,8 @@ export function PdfViewerFrame({
   const loadIdRef = useRef(0);
   const localeRef = useRef(locale);
   localeRef.current = locale;
+  const immersiveRef = useRef(immersive);
+  immersiveRef.current = immersive;
   const { t } = useI18n();
   const toolsLabelRef = useRef(t.viewer.tools);
   toolsLabelRef.current = t.viewer.tools;
@@ -94,9 +108,12 @@ export function PdfViewerFrame({
     onDocumentInit,
     onPageChange,
     onViewChange,
+    onViewArea,
+    onPageRendered,
+    onUserScroll,
     onError,
     onFilePicked,
-    onTurnPage,
+    onShortcut,
     onPassword,
   });
   callbacks.current = {
@@ -104,9 +121,12 @@ export function PdfViewerFrame({
     onDocumentInit,
     onPageChange,
     onViewChange,
+    onViewArea,
+    onPageRendered,
+    onUserScroll,
     onError,
     onFilePicked,
-    onTurnPage,
+    onShortcut,
     onPassword,
   };
 
@@ -121,6 +141,13 @@ export function PdfViewerFrame({
     setListenerReady(true);
     return () => document.removeEventListener("webviewerloaded", onViewerLoaded);
   }, []);
+
+  useEffect(() => {
+    iframeRef.current?.contentDocument?.documentElement.classList.toggle(
+      "lumo-immersive",
+      immersive,
+    );
+  }, [immersive, sessionKey, listenerReady]);
 
   useEffect(() => {
     return () => {
@@ -138,6 +165,7 @@ export function PdfViewerFrame({
     if (!iframe || !window || !document) return null;
     document.documentElement.lang =
       localeRef.current === "en" ? "en-US" : "zh-CN";
+    document.documentElement.classList.toggle("lumo-immersive", immersiveRef.current);
 
     const onFileInput = (event: Event): void => {
       const target = event.target;
@@ -197,15 +225,27 @@ export function PdfViewerFrame({
       if (input?.value) callbacks.current.onPassword?.(input.value);
     };
 
+    const onUserScroll = (): void => callbacks.current.onUserScroll();
     document.addEventListener("change", onFileInput, true);
     document.addEventListener("drop", onDrop, true);
     document.addEventListener("input", onPasswordInput, true);
     document.addEventListener("click", onPasswordSubmit, true);
-    const stopKeys = watchPageKeys(document, (direction, event) => {
-      // PDF.js dialogs and annotation editors keep their own arrow keys.
+    document.addEventListener("wheel", onUserScroll, { capture: true, passive: true });
+    document.addEventListener("touchstart", onUserScroll, { capture: true, passive: true });
+    document.addEventListener("pointerdown", onUserScroll, true);
+    const inAnnotationEditor = (target: EventTarget | null): boolean =>
+      Boolean(
+        target &&
+          typeof target === "object" &&
+          "closest" in target &&
+          typeof target.closest === "function" &&
+          target.closest(".annotationEditorLayer"),
+      );
+    const stopKeys = watchReaderKeys(document, (_shortcut, event) => {
+      // PDF.js dialogs and annotation editors keep their own keys.
       if (document.querySelector("dialog[open]")) return false;
-      if ((event.target as Element | null)?.closest?.(".annotationEditorLayer")) return false;
-      return callbacks.current.onTurnPage(direction);
+      if (inAnnotationEditor(event.target)) return false;
+      return callbacks.current.onShortcut(_shortcut);
     });
     const stopToolbar = adaptPdfToolbar(window, toolsLabelRef.current);
     const coarse = window.matchMedia("(pointer: coarse)");
@@ -223,6 +263,9 @@ export function PdfViewerFrame({
       document.removeEventListener("drop", onDrop, true);
       document.removeEventListener("input", onPasswordInput, true);
       document.removeEventListener("click", onPasswordSubmit, true);
+      document.removeEventListener("wheel", onUserScroll, true);
+      document.removeEventListener("touchstart", onUserScroll, true);
+      document.removeEventListener("pointerdown", onUserScroll, true);
       stopKeys();
       stopToolbar();
       coarse.removeEventListener("change", onCoarseChange);
@@ -242,7 +285,10 @@ export function PdfViewerFrame({
       const currentBridge = bridge;
       unsubscribe = currentBridge.subscribe({
         onDocumentInit: () => callbacks.current.onDocumentInit(currentBridge),
-        onPageChanging: (page) => callbacks.current.onPageChange(page),
+        onPageChanging: (page, previous) =>
+          callbacks.current.onPageChange(page, previous),
+        onViewArea: (location) => callbacks.current.onViewArea(location),
+        onPageRendered: (page) => callbacks.current.onPageRendered(page),
         onViewChanging: (view) => callbacks.current.onViewChange(view),
         onDocumentError: (failure) => callbacks.current.onError(toUiError(failure)),
       });

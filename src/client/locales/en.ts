@@ -43,7 +43,8 @@ export const en = {
     saveModifiedCopy: "Save edited copy",
     savingCopy: "Saving copy…",
     discardChanges: "Discard changes",
-    fullscreen: "Full-screen compare",
+    immersive: "Immersive reading",
+    exitImmersive: "Exit immersive reading",
     settings: "Settings",
   },
   gates: {
@@ -113,7 +114,10 @@ export const en = {
     highlightUnavailable: "Syntax highlighting is unavailable; the source is kept in full.",
   },
   page: {
-    actualOrder: "(actual page order)",
+    details: "Page details",
+    detailsLanguage: "Target language",
+    detailsModel: "Model",
+    detailsGenerated: "Generated",
     targetLanguage: "Target language",
     retranslate: "Regenerate translation",
     regenerateHint:
@@ -526,6 +530,18 @@ export const en = {
     title: "Settings",
     open: "Settings",
     close: "Close",
+    shortcuts: "Keyboard shortcuts",
+    shortcutsAction: "Action",
+    shortcutsKeys: "Keys",
+    shortcutsPrevious: "Previous page",
+    shortcutsNext: "Next page",
+    shortcutsTranslate: "Translate this page",
+    shortcutsEnterImmersive: "Enter or leave immersive reading",
+    shortcutsImmersive: "Leave immersive reading",
+    shortcutsInputs:
+      "Text fields, editors, dialogs and buttons keep their own keys.",
+    shortcutsBrowser:
+      "On macOS use Cmd instead of Ctrl. Ctrl+Shift+1–5 also work. Browsers may reserve Ctrl+1–5, and immersive reading may need permission to hold them.",
     loading: "Loading settings…",
     loadFailed: (detail: string) => `Could not load settings: ${detail}`,
     retry: "Retry",
@@ -676,6 +692,30 @@ export const en = {
     quitConfirm: "Quit Lumo",
     ipcFailed:
       "This window could not reach the Lumo launcher. Quit Lumo and open it again.",
+    update: {
+      title: "App update",
+      available: (version: string) => `Version ${version} is available.`,
+      downloading: "Downloading and verifying the update…",
+      ready: "The update is downloaded and verified.",
+      installing: "Installing the update and restarting Lumo…",
+      downloadUpdate: "Download update",
+      downloadInstaller: "Open download page",
+      installNow: "Restart and install",
+      later: "Later",
+      checkFailed: "Could not check for updates. Check your connection and try again.",
+      downloadFailed: "Could not download the update. Try again.",
+      shutdownFailed:
+        "The local service did not stop cleanly, so the update was not installed. Try again.",
+      installFailed: "The update could not be installed. Try again.",
+      retryCheck: "Check again",
+      retryDownload: "Download again",
+      retryInstall: "Try installing again",
+      installTitle: "Install the update?",
+      installBody:
+        "Lumo stops the local service, installs the verified update and restarts. Save unsaved work in the WebUI first.",
+      installBack: "Go back",
+      installConfirm: "Install and restart",
+    },
     logs: {
       starting: "Starting Lumo…",
       reader_ready: "Library database opened.",

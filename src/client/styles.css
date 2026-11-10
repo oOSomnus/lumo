@@ -367,6 +367,64 @@ input:not([type]) {
   background: var(--surface);
 }
 
+.workspace:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  background: var(--surface);
+}
+
+/* Immersive reading: the selected panes only; a running page keeps its source and status. */
+.app-shell.immersive .app-bar,
+.workspace.immersive .layout-switch,
+.workspace.immersive .mobile-tabs,
+.workspace.immersive .pane-tabs,
+.workspace.immersive .epub-toolbar,
+.workspace.immersive .page-toolbar,
+.workspace.immersive .epub-selection,
+.workspace.immersive .page-warning,
+.workspace.immersive .field-error,
+.workspace.immersive .splitter,
+.workspace.immersive .stream-preview > button {
+  display: none;
+}
+
+/* Immersive mode has no app bar; this stays reachable in fullscreen and on touch screens. */
+.immersive-exit {
+  position: fixed;
+  inset-block-start: 12px;
+  inset-inline-end: 12px;
+  z-index: 20;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--paper);
+  color: var(--fg);
+  opacity: 0.75;
+}
+
+.immersive-exit:hover,
+.immersive-exit:focus-visible {
+  opacity: 1;
+}
+
+.workspace.immersive .page-body {
+  padding: 0;
+  scrollbar-width: none;
+}
+
+.workspace.immersive .page-body::-webkit-scrollbar {
+  display: none;
+}
+
+.workspace.immersive .typst-preview {
+  border: 0;
+  border-radius: 0;
+}
+
+.workspace.immersive .pdf-pane {
+  scrollbar-width: none;
+}
+
 .pdf-pane {
   position: relative;
   min-width: 0;
@@ -446,6 +504,18 @@ input:not([type]) {
 /* The side pane's own width, not the window's, decides how tightly its tools pack (rules at the end of this file): it can be a fifth of the screen. */
 .side-pane {
   container-type: inline-size;
+}
+
+/* The page and batch views share one cell; the hidden one keeps its state (a batch draft must survive immersive reading). */
+.side-view {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.side-view[hidden] {
+  display: none;
 }
 
 .pane-tabs,
@@ -598,10 +668,15 @@ input:not([type]) {
 }
 
 .page-status {
-  min-height: 1.5em;
-  margin: 6px 24px 0;
   color: var(--muted);
   font-size: 12px;
+}
+
+.immersive-status {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 8px 24px 0;
+  text-align: center;
 }
 
 .page-body {
@@ -721,14 +796,6 @@ input:not([type]) {
   font-size: 13px;
   line-height: 1.55;
   resize: vertical;
-}
-
-.translation-meta {
-  margin: 24px 0 0;
-  padding-top: 10px;
-  border-top: 1px solid var(--border);
-  color: var(--muted);
-  font-size: 12px;
 }
 
 .stream-preview {
@@ -1321,6 +1388,73 @@ input:not([type]) {
   font-weight: 600;
 }
 
+.settings-shortcuts {
+  margin: 12px 0;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.settings-shortcuts > summary {
+  padding: 10px 0;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.settings-shortcuts > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.settings-shortcuts table {
+  width: 100%;
+  margin-bottom: 8px;
+  border-collapse: collapse;
+}
+
+.settings-shortcuts th,
+.settings-shortcuts td {
+  padding: 6px 8px 6px 0;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.settings-shortcuts th {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settings-shortcuts kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--chrome);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.page-details-dialog {
+  max-width: min(640px, 94vw);
+}
+
+.page-details {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 16px;
+  margin: 12px 0 16px;
+}
+
+.page-details dt {
+  color: var(--muted);
+}
+
+.page-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
 .login-panel,
 .login-notifications,
 .login-prompt {
@@ -1441,7 +1575,7 @@ input:not([type]) {
   }
 
   .fullscreen-button {
-    display: none;
+    flex: 1 1 auto;
   }
 
   .page-toolbar {
@@ -1459,11 +1593,6 @@ input:not([type]) {
   .page-body {
     padding-top: 16px;
     padding-bottom: 32px;
-  }
-
-  .page-status {
-    margin-left: 14px;
-    margin-right: 14px;
   }
 
   .field-error {
@@ -1549,7 +1678,8 @@ input:not([type]) {
   .live-source > summary,
   .consent-details > summary,
   .error-details > summary,
-  .settings-advanced > summary {
+  .settings-advanced > summary,
+  .settings-shortcuts > summary {
     min-height: 44px;
     padding-block: 12px;
   }
@@ -1793,7 +1923,6 @@ input:not([type]) {
     padding-right: 12px;
   }
 
-  .page-status,
   .field-error {
     margin-left: 12px;
     margin-right: 12px;

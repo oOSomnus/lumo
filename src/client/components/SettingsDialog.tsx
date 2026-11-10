@@ -21,6 +21,7 @@ import {
   startAiLogin,
 } from "../api";
 import { errorText, toUiError, useI18n, type UiError } from "../i18n";
+import { LAYOUT_PRESETS } from "./LayoutSwitch";
 import { ModalDialog } from "./ModalDialog";
 
 type LoginNotification = Extract<AiLoginEvent, { type: "notification" }>["event"];
@@ -134,6 +135,11 @@ export function SettingsDialog({
   onSnapshotChange,
 }: SettingsDialogProps) {
   const { locale, t } = useI18n();
+  const shortcutsRef = useRef<HTMLDetailsElement>(null);
+
+  useEffect(() => {
+    if (open && shortcutsRef.current) shortcutsRef.current.open = false;
+  }, [open]);
 
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<UiError | null>(null);
@@ -817,6 +823,50 @@ export function SettingsDialog({
           {t.settings.close}
         </button>
       </div>
+
+      <details className="settings-shortcuts" ref={shortcutsRef}>
+        <summary>{t.settings.shortcuts}</summary>
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">{t.settings.shortcutsAction}</th>
+              <th scope="col">{t.settings.shortcutsKeys}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>{t.settings.shortcutsPrevious}</td>
+              <td><kbd>←</kbd></td>
+            </tr>
+            <tr>
+              <td>{t.settings.shortcutsNext}</td>
+              <td><kbd>→</kbd></td>
+            </tr>
+            <tr>
+              <td>{t.settings.shortcutsTranslate}</td>
+              <td><kbd>Enter</kbd></td>
+            </tr>
+            {LAYOUT_PRESETS.map((preset) => (
+              <tr key={preset.preset}>
+                <td>{t.layout[preset.label]}</td>
+                <td>
+                  <kbd>Ctrl</kbd> + <kbd>{preset.preset}</kbd>
+                </td>
+              </tr>
+            ))}
+            <tr>
+              <td>{t.settings.shortcutsEnterImmersive}</td>
+              <td><kbd>F</kbd></td>
+            </tr>
+            <tr>
+              <td>{t.settings.shortcutsImmersive}</td>
+              <td><kbd>Esc</kbd></td>
+            </tr>
+          </tbody>
+        </table>
+        <p className="muted">{t.settings.shortcutsInputs}</p>
+        <p className="muted">{t.settings.shortcutsBrowser}</p>
+      </details>
 
       {loading && <p>{t.settings.loading}</p>}
       {loadError && (

@@ -21,6 +21,7 @@ import {
   type OutlineEntry,
   type OutlinePageInput,
   type ReaderUpdate,
+  type ReaderScrollMemory,
   type ReaderView,
   type TargetLanguage,
   type TranslationContent,
@@ -64,8 +65,16 @@ import type {
 } from "../epub-bridge";
 import { currentTocId, outlineFromEpubToc } from "../toc";
 import { generationRequest, repairRequest } from "../translation-input";
-import { watchPageKeys, type PageStep } from "../page-keys";
-import { ViewerBridgeError, type ViewerBridge } from "../pdfBridge";
+import { watchReaderKeys, type PageStep, type ReaderShortcut } from "../page-keys";
+import { ViewerBridgeError, type PdfScrollLocation, type ViewerBridge } from "../pdfBridge";
+import {
+  rememberPdfScroll,
+  rememberTranslationScroll,
+  sameScrollMemory,
+  scrollMemoryOf,
+  touchPdfScroll,
+  touchTranslationScroll,
+} from "../scroll-memory";
 import { compileTypst, type TypstAsset } from "../typst";
 import { stripPlaceholderControls } from "../../shared/typst";
 import {
@@ -90,7 +99,7 @@ import {
 } from "../translation-queue";
 import { BatchTranslationPanel } from "./BatchTranslationPanel";
 import { AI_SETTINGS_CODES, ErrorDetails } from "./ErrorDetails";
-import { LayoutSwitch, type PaneMode } from "./LayoutSwitch";
+import { LAYOUT_PRESETS, LayoutSwitch, type PaneMode } from "./LayoutSwitch";
 import { Library } from "./Library";
 import { TypstRepairPanel } from "./TypstRepairPanel";
 import { ModalDialog } from "./ModalDialog";
@@ -136,6 +145,7 @@ function clamp(value: number, min: number, max: number): number {
 
 function sameReaderView(a: ReaderView, b: ReaderView): boolean {
   if (a.format !== b.format) return false;
+  if (!sameScrollMemory(a.scrollMemory, b.scrollMemory)) return false;
   if (a.format === "epub" && b.format === "epub") {
     return (
       a.cfi === b.cfi &&
@@ -367,6 +377,26 @@ export function Reader() {
   const [libraryActionError, setLibraryActionError] = useState<UiError | null>(null);
   const libraryRefreshRef = useRef<AbortController | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [immersive, setImmersive] = useState(false);
+  const immersiveRef = useRef(false);
+  const fullscreenPendingRef = useRef(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const scrollMemoryRef = useRef<Map<string, ReaderScrollMemory>>(new Map());
+  const lastPdfLocationRef = useRef<PdfScrollLocation | null>(null);
+  const pdfRestoreRef = useRef<{
+    session: number;
+    documentId: string;
+    page: number;
+    bridge: ViewerBridge;
+  } | null>(null);
+  const translationScrollReadyRef = useRef(false);
+  const translationRestoreRef = useRef<{
+    session: number;
+    documentId: string;
+    key: string;
+  } | null>(null);
+  const translationTouchedRef = useRef(false);
+  const translationIgnoreScrollRef = useRef(false);
 
   // What the server reports about the AI setup; every action that calls the model waits for it.
   const [ai, setAi] = useState<AiState>({ state: "loading" });
@@ -419,13 +449,25 @@ export function Reader() {
     };
   }, [refreshAiStatus, token]);
 
+  // Leaving immersive first keeps a dialog or error visible in the normal reading layout.
+  const exitImmersive = useCallback(async (): Promise<void> => {
+    immersiveRef.current = false;
+    setImmersive(false);
+    if (!document.fullscreenElement) return;
+    try {
+      await document.exitFullscreen();
+    } catch {
+      // The browser already left it; fullscreenchange is the source of truth.
+    }
+  }, []);
+
   // Opens the settings when the AI still needs setting up; true only when a model request may go out now.
   const requireAi = useCallback((): boolean => {
     const gate = aiGateRef.current;
-    if (gate === "unconfigured") setSettingsOpen(true);
+    if (gate === "unconfigured") void exitImmersive().then(() => setSettingsOpen(true));
     else if (gate === "failed") void refreshAiStatus(true);
     return gate === "ready";
-  }, [refreshAiStatus]);
+  }, [exitImmersive, refreshAiStatus]);
 
   const changeLayout = useCallback((mode: PaneMode, ratio?: number) => {
     setPaneMode(mode);
@@ -516,8 +558,6 @@ export function Reader() {
     },
     [stepEpub],
   );
-
-  useEffect(() => watchPageKeys(window.document, (direction) => turnPage(direction)), [turnPage]);
 
   const clearEpubSelection = useCallback(() => {
     epubSelectionRef.current = null;
@@ -811,6 +851,14 @@ export function Reader() {
       ? translationKey(currentDocument.id, targetPage, language, currentUnit)
       : "";
   const currentTask = tasks.find((task) => task.key === currentKey);
+  const currentKeyRef = useRef(currentKey);
+  currentKeyRef.current = currentKey;
+  useEffect(() => {
+    translationScrollReadyRef.current = false;
+    translationRestoreRef.current = null;
+    translationTouchedRef.current = false;
+    translationIgnoreScrollRef.current = false;
+  }, [currentKey]);
   const storedState =
     currentDocument && stored.key === currentKey
       ? stored
@@ -962,20 +1010,99 @@ export function Reader() {
 
   const currentViewSnapshot = useCallback((): ReaderView | null => {
     if (!viewerReadyRef.current) return null;
-    if (currentDocumentRef.current?.format === "epub") {
+    const document = currentDocumentRef.current;
+    if (!document) return null;
+    const memory = scrollMemoryRef.current.get(document.id);
+    const withMemory = memory ? { scrollMemory: memory } : {};
+    if (document.format === "epub") {
       // Until a page is located there is no position to store; never overwrite one with none.
       const location = epubLocationRef.current;
       return location
-        ? { format: "epub", cfi: location.startCfi, ...epubStyleRef.current }
+        ? { format: "epub", cfi: location.startCfi, ...epubStyleRef.current, ...withMemory }
         : null;
     }
     const bridge = bridgeRef.current;
     if (!bridge) return null;
     try {
-      return bridge.getView();
+      return { ...bridge.getView(), ...withMemory };
     } catch {
       return null;
     }
+  }, []);
+
+  // Queues the current view after a scroll; visual settings make the same round trip through handleViewChange.
+  const queueCurrentView = useCallback(() => {
+    const document = currentDocumentRef.current;
+    const view = currentViewSnapshot();
+    if (!document || !view || previewOnlyRef.current) return;
+    const saved = savedViewsRef.current.get(document.id);
+    if (saved && sameReaderView(saved, view)) return;
+    pendingViewsRef.current.set(document.id, view);
+    failedViewsRef.current.delete(document.id);
+    scheduleViewSave();
+  }, [currentViewSnapshot, scheduleViewSave]);
+
+  const attemptPdfRestore = useCallback((): void => {
+    const token = pdfRestoreRef.current;
+    if (!token) return;
+    if (
+      sessionRef.current !== token.session ||
+      currentDocumentRef.current?.id !== token.documentId ||
+      bridgeRef.current !== token.bridge
+    ) {
+      pdfRestoreRef.current = null;
+      return;
+    }
+    const position = scrollMemoryRef.current
+      .get(token.documentId)
+      ?.pdf.find((entry) => entry.page === token.page);
+    if (!position) {
+      pdfRestoreRef.current = null;
+      return;
+    }
+    if (
+      token.bridge.restoreScroll(token.page, {
+        left: position.left,
+        top: position.top,
+      })
+    ) {
+      pdfRestoreRef.current = null;
+      lastPdfLocationRef.current = {
+        pageNumber: token.page,
+        left: position.left,
+        top: position.top,
+      };
+    }
+  }, []);
+
+  const requestPdfRestore = useCallback(
+    (documentId: string, page: number) => {
+      const bridge = bridgeRef.current;
+      if (!bridge || previewOnlyRef.current) {
+        pdfRestoreRef.current = null;
+        return;
+      }
+      const position = scrollMemoryRef.current
+        .get(documentId)
+        ?.pdf.find((entry) => entry.page === page);
+      if (!position) {
+        pdfRestoreRef.current = null;
+        return;
+      }
+      pdfRestoreRef.current = {
+        session: sessionRef.current,
+        documentId,
+        page,
+        bridge,
+      };
+      requestAnimationFrame(attemptPdfRestore);
+    },
+    [attemptPdfRestore],
+  );
+
+  // A real scroll or touch in a pane means the reader chose a position; its pending restore must not pull them back.
+  const cancelPdfRestore = useCallback(() => {
+    pdfRestoreRef.current = null;
   }, []);
 
   const commitCurrentView = useCallback(async (): Promise<boolean> => {
@@ -999,7 +1126,12 @@ export function Reader() {
       const cached =
         pendingViewsRef.current.get(documentId) ??
         savedViewsRef.current.get(documentId);
-      if (cached) return cached;
+      if (cached) {
+        if (cached.scrollMemory) {
+          scrollMemoryRef.current.set(documentId, cached.scrollMemory);
+        }
+        return cached;
+      }
       try {
         const result = await apiJson<{ view: ReaderView | null }>(
           `/api/documents/${documentId}/view`,
@@ -1011,6 +1143,9 @@ export function Reader() {
         setViewRestoreFailed(false);
         if (!stored?.success) return fallback;
         savedViewsRef.current.set(documentId, stored.data);
+        if (stored.data.scrollMemory) {
+          scrollMemoryRef.current.set(documentId, stored.data.scrollMemory);
+        }
         return stored.data;
       } catch {
         if (sessionAtStart === sessionRef.current) setViewRestoreFailed(true);
@@ -1026,19 +1161,21 @@ export function Reader() {
       // PDF.js applies its own initial zoom while opening; the saved view is
       // restored synchronously at documentinit, so ignore events until then.
       if (!viewerReadyRef.current) return;
+      const document = currentDocumentRef.current;
+      const memory = document && scrollMemoryRef.current.get(document.id);
+      const next = memory ? { ...view, scrollMemory: memory } : view;
       const previous = lastViewRef.current;
-      if (previous && sameReaderView(previous, view)) return;
-      lastViewRef.current = view;
+      if (previous && sameReaderView(previous, next)) return;
+      lastViewRef.current = next;
       viewTouchedRef.current = true;
       setViewRestoreFailed(false);
-      const document = currentDocumentRef.current;
       if (!document || previewOnlyRef.current) return;
       const saved = savedViewsRef.current.get(document.id);
-      if (saved && sameReaderView(saved, view)) {
+      if (saved && sameReaderView(saved, next)) {
         pendingViewsRef.current.delete(document.id);
         return;
       }
-      pendingViewsRef.current.set(document.id, view);
+      pendingViewsRef.current.set(document.id, next);
       failedViewsRef.current.delete(document.id);
       scheduleViewSave();
     },
@@ -1060,6 +1197,9 @@ export function Reader() {
         : null;
       if (!stored?.success) return;
       savedViewsRef.current.set(document.id, stored.data);
+      if (stored.data.scrollMemory) {
+        scrollMemoryRef.current.set(document.id, stored.data.scrollMemory);
+      }
       if (viewTouchedRef.current) {
         const view = currentViewSnapshot();
         if (view) {
@@ -1076,11 +1216,12 @@ export function Reader() {
         await restoreEpubView(bridge, stored.data, sessionAtStart);
       } else {
         bridgeRef.current?.restoreView(stored.data);
+        requestPdfRestore(document.id, pageRef.current);
       }
     } catch {
       if (sessionAtStart === sessionRef.current) setViewRestoreFailed(true);
     }
-  }, [currentViewSnapshot, drainViewSaves, restoreEpubView]);
+  }, [currentViewSnapshot, drainViewSaves, requestPdfRestore, restoreEpubView]);
 
   const captureCurrentView = useCallback((documentId: string): boolean => {
     const view = currentViewSnapshot();
@@ -1097,15 +1238,20 @@ export function Reader() {
     screenRef.current = "reader";
     setScreen("reader");
     const bridge = bridgeRef.current;
+    const document = currentDocumentRef.current;
     if (bridge && viewerReadyRef.current) {
       bridge.setPage(pageRef.current);
       if (lastViewRef.current) bridge.restoreView(lastViewRef.current);
+      if (document?.format === "pdf") {
+        requestPdfRestore(document.id, pageRef.current);
+      }
     }
     requestAnimationFrame(() => workspaceRef.current?.focus());
-  }, []);
+  }, [requestPdfRestore]);
 
   const openLibrary = useCallback(() => {
     if (screenRef.current === "library") return;
+    void exitImmersive();
     const document = currentDocumentRef.current;
     if (document) captureCurrentView(document.id);
     screenRef.current = "library";
@@ -1147,7 +1293,7 @@ export function Reader() {
         setLibraryActionError(toUiError(error));
       }
     })();
-  }, [captureCurrentView, flushViewSaves]);
+  }, [captureCurrentView, exitImmersive, flushViewSaves]);
 
   const drainProgress = useCallback((): Promise<void> => {
     if (progressDrainRef.current) return progressDrainRef.current;
@@ -1250,9 +1396,9 @@ export function Reader() {
   const ask = useCallback((options: AskOptions): Promise<boolean> => {
     const { promise, resolve } = Promise.withResolvers<boolean>();
     askResolver.current = resolve;
-    setAskState(options);
+    void exitImmersive().then(() => setAskState(options));
     return promise;
-  }, []);
+  }, [exitImmersive]);
 
   const settleAsk = useCallback((confirmed: boolean) => {
     const resolve = askResolver.current;
@@ -1681,15 +1827,17 @@ export function Reader() {
       if (document.format === "epub") {
         navigateEpub(target - 1);
       } else {
-        if (bridgeRef.current && viewerReadyRef.current) {
-          bridgeRef.current.setPage(target);
+        const bridge = bridgeRef.current;
+        if (bridge && viewerReadyRef.current && bridge.page !== target) {
+          bridge.setPage(target);
         }
         setPageValue(target);
         saveProgress(document.id, target, languageRef.current);
+        requestPdfRestore(document.id, target);
       }
       if (narrow) setNarrowTab("pdf");
     },
-    [narrow, navigateEpub, pageCount, saveProgress, setPageValue],
+    [narrow, navigateEpub, pageCount, requestPdfRestore, saveProgress, setPageValue],
   );
 
   const currentHasWork = useCallback(
@@ -2053,6 +2201,18 @@ export function Reader() {
       const target =
         pending?.kind === "library" ? clamp(pending.page, 1, count) : actual;
 
+      lastPdfLocationRef.current = null;
+      pdfRestoreRef.current = null;
+      translationScrollReadyRef.current = false;
+      translationRestoreRef.current = null;
+      translationTouchedRef.current = false;
+      const initialDocumentId =
+        pending?.kind === "library"
+          ? pending.document.id
+          : pending
+            ? null
+            : currentDocumentRef.current?.id;
+      if (initialDocumentId) requestPdfRestore(initialDocumentId, target);
       if (bridge.page !== target) bridge.setPage(target);
       bridge.restoreView(initialViewRef.current);
       lastViewRef.current = initialViewRef.current;
@@ -2095,6 +2255,7 @@ export function Reader() {
     },
     [
       loadOutline,
+      requestPdfRestore,
       saveProgress,
       selectDocument,
       setPageCount,
@@ -2228,25 +2389,148 @@ export function Reader() {
     [],
   );
 
-  useEffect(() => {
-    if (pageBodyRef.current) pageBodyRef.current.scrollTop = 0;
-  }, [currentKey]);
-
   const handlePageChange = useCallback(
-    (nextPage: number) => {
+    (nextPage: number, previous: number | undefined) => {
       const total = bridgeRef.current?.pageCount ?? 0;
       const clamped = total > 0 ? clamp(nextPage, 1, total) : nextPage;
+      const document = currentDocumentRef.current;
+      if (document?.format === "pdf") {
+        const last = lastPdfLocationRef.current;
+        if (last && (previous === undefined || last.pageNumber === previous)) {
+          const memory =
+            scrollMemoryRef.current.get(document.id) ?? { pdf: [], translation: [] };
+          scrollMemoryRef.current.set(
+            document.id,
+            rememberPdfScroll(memory, {
+              page: last.pageNumber,
+              left: last.left,
+              top: last.top,
+            }),
+          );
+        }
+        lastPdfLocationRef.current = null;
+        if (viewerReadyRef.current && !previewOnlyRef.current) {
+          const memory = scrollMemoryRef.current.get(document.id);
+          if (memory) {
+            scrollMemoryRef.current.set(
+              document.id,
+              touchPdfScroll(memory, clamped),
+            );
+          }
+          requestPdfRestore(document.id, clamped);
+          queueCurrentView();
+        }
+      }
       setPageValue(clamped);
-      if (viewerReadyRef.current && currentDocumentRef.current) {
-        saveProgress(
-          currentDocumentRef.current.id,
-          clamped,
-          languageRef.current,
-        );
+      if (viewerReadyRef.current && document) {
+        saveProgress(document.id, clamped, languageRef.current);
       }
     },
-    [saveProgress, setPageValue],
+    [queueCurrentView, requestPdfRestore, saveProgress, setPageValue],
   );
+
+  const handleViewArea = useCallback(
+    (location: PdfScrollLocation) => {
+      const document = currentDocumentRef.current;
+      if (
+        !document ||
+        document.format !== "pdf" ||
+        previewOnlyRef.current ||
+        !viewerReadyRef.current
+      ) {
+        return;
+      }
+      const token = pdfRestoreRef.current;
+      if (
+        token &&
+        token.documentId === document.id &&
+        token.page === location.pageNumber
+      ) {
+        return;
+      }
+      lastPdfLocationRef.current = location;
+      const memory =
+        scrollMemoryRef.current.get(document.id) ?? { pdf: [], translation: [] };
+      scrollMemoryRef.current.set(
+        document.id,
+        rememberPdfScroll(memory, {
+          page: location.pageNumber,
+          left: location.left,
+          top: location.top,
+        }),
+      );
+      queueCurrentView();
+    },
+    [queueCurrentView],
+  );
+
+  const handlePageRendered = useCallback(
+    (pageNumber: number) => {
+      const token = pdfRestoreRef.current;
+      if (token && token.page === pageNumber) attemptPdfRestore();
+    },
+    [attemptPdfRestore],
+  );
+
+  // The preview iframe or source body is laid out; restore this translation's position once.
+  const handleTranslationRendered = useCallback(() => {
+    const document = currentDocumentRef.current;
+    const key = currentKeyRef.current;
+    const body = pageBodyRef.current;
+    if (!document || !key || !body) return;
+    translationScrollReadyRef.current = true;
+    if (translationTouchedRef.current) return;
+    const entry = scrollMemoryRef.current
+      .get(document.id)
+      ?.translation.find((item) => item.key === key);
+    const offset = entry?.offset ?? 0;
+    translationRestoreRef.current = {
+      session: sessionRef.current,
+      documentId: document.id,
+      key,
+    };
+    translationIgnoreScrollRef.current = true;
+    body.scrollTop = offset * Math.max(0, body.scrollHeight - body.clientHeight);
+    requestAnimationFrame(() => {
+      if (translationRestoreRef.current?.key === key) {
+        translationRestoreRef.current = null;
+      }
+    });
+  }, []);
+
+  const handleBodyUserIntent = useCallback(() => {
+    translationRestoreRef.current = null;
+    translationTouchedRef.current = true;
+    translationIgnoreScrollRef.current = false;
+  }, []);
+
+  const handleBodyScroll = useCallback(() => {
+    if (translationIgnoreScrollRef.current) {
+      translationIgnoreScrollRef.current = false;
+      return;
+    }
+    const document = currentDocumentRef.current;
+    const key = currentKeyRef.current;
+    const body = pageBodyRef.current;
+    if (!document || !key || !body || previewOnlyRef.current) return;
+    translationRestoreRef.current = null;
+    if (
+      !translationScrollReadyRef.current ||
+      (currentTask && isActiveStage(currentTask.stage))
+    ) {
+      return;
+    }
+    translationTouchedRef.current = true;
+    const max = body.scrollHeight - body.clientHeight;
+    const offset = max > 0 ? clamp(body.scrollTop / max, 0, 1) : 0;
+    const memory =
+      scrollMemoryRef.current.get(document.id) ?? { pdf: [], translation: [] };
+    scrollMemoryRef.current.set(
+      document.id,
+      rememberTranslationScroll(memory, { key, offset }),
+    );
+    queueCurrentView();
+  }, [currentTask, queueCurrentView]);
 
   const handleLanguageChange = useCallback(
     (nextLanguage: TargetLanguage) => {
@@ -2887,6 +3171,7 @@ export function Reader() {
         pendingViewsRef.current.delete(document.id);
         failedViewsRef.current.delete(document.id);
         savedViewsRef.current.delete(document.id);
+        scrollMemoryRef.current.delete(document.id);
         setViewSaveFailed(
           pendingViewsRef.current.size > 0 || failedViewsRef.current.size > 0,
         );
@@ -3031,13 +3316,70 @@ export function Reader() {
     setSplitRatio(clamp(next, MIN_SPLIT, MAX_SPLIT));
   };
 
-  const toggleFullscreen = () => {
-    if (!document.fullscreenElement) {
-      void workspaceRef.current?.requestFullscreen();
-    } else {
-      void document.exitFullscreen();
+  const enterImmersive = useCallback(() => {
+    const workspace = workspaceRef.current;
+    if (!workspace) return;
+    setEpubTocOpen(false);
+    immersiveRef.current = true;
+    setImmersive(true);
+    // Fullscreen hides the browser chrome where it is allowed; the reading layout is immersive either way.
+    if (document.fullscreenEnabled) {
+      fullscreenPendingRef.current = true;
+      void workspace
+        .requestFullscreen()
+        .catch(() => {})
+        .finally(() => {
+          fullscreenPendingRef.current = false;
+        });
     }
-  };
+  }, []);
+
+  const toggleImmersive = useCallback(() => {
+    if (immersiveRef.current) void exitImmersive();
+    else enterImmersive();
+  }, [enterImmersive, exitImmersive]);
+
+  useEffect(() => {
+    const onChange = (): void => {
+      const fullscreen =
+        workspaceRef.current !== null &&
+        document.fullscreenElement === workspaceRef.current;
+      if (fullscreen) {
+        if (!immersiveRef.current) {
+          // The user left immersive reading before the fullscreen request finished.
+          void document.exitFullscreen().catch(() => {});
+          return;
+        }
+        immersiveRef.current = true;
+        setImmersive(true);
+      } else if (immersiveRef.current && !fullscreenPendingRef.current) {
+        // Esc or the browser's own exit ends immersive reading too, not just the fullscreen request.
+        immersiveRef.current = false;
+        setImmersive(false);
+      }
+      if ("keyboard" in navigator) {
+        const keyboard = navigator.keyboard as {
+          lock?: (codes?: string[]) => Promise<void>;
+          unlock?: () => void;
+        };
+        if (fullscreen) {
+          // Digits only: Escape stays the browser's way out of fullscreen.
+          void keyboard
+            .lock?.(["Digit1", "Digit2", "Digit3", "Digit4", "Digit5"])
+            ?.catch(() => {});
+        } else {
+          keyboard.unlock?.();
+        }
+      }
+    };
+    document.addEventListener("fullscreenchange", onChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", onChange);
+      if ("keyboard" in navigator) {
+        (navigator.keyboard as { unlock?: () => void }).unlock?.();
+      }
+    };
+  }, []);
 
   const outlineBusy =
     outline.stage === "generating" || outline.stage === "saving";
@@ -3161,6 +3503,86 @@ export function Reader() {
     return t.page.mode.notTranslated;
   })();
 
+  const handleReaderShortcut = useCallback(
+    (shortcut: ReaderShortcut): boolean => {
+      if (screenRef.current !== "reader" || !viewerReadyRef.current) return false;
+      if (window.document.querySelector("dialog[open]")) return false;
+      switch (shortcut.type) {
+        case "step":
+          return turnPage(shortcut.direction);
+        case "exit-immersive":
+          if (!immersiveRef.current) return false;
+          void exitImmersive();
+          return true;
+        case "toggle-immersive":
+          toggleImmersive();
+          return true;
+        case "layout": {
+          const preset = LAYOUT_PRESETS.find(
+            (entry) => entry.preset === shortcut.preset,
+          );
+          if (!preset) return false;
+          changeLayout(preset.mode, preset.ratio);
+          if (narrow && !immersiveRef.current) {
+            if (preset.mode === "left") setNarrowTab("pdf");
+            else if (preset.mode === "right") setNarrowTab("translation");
+          }
+          return true;
+        }
+        case "translate":
+          if (!currentDocumentRef.current) return false;
+          if (
+            translationDisabledReason ||
+            (currentTask && isActiveStage(currentTask.stage))
+          ) {
+            return true;
+          }
+          void translateCurrent(canRegenerate);
+          return true;
+      }
+    },
+    [
+      canRegenerate,
+      changeLayout,
+      currentTask,
+      exitImmersive,
+      narrow,
+      t,
+      translateCurrent,
+      translationDisabledReason,
+      turnPage,
+      toggleImmersive,
+    ],
+  );
+
+  useEffect(
+    () => watchReaderKeys(window.document, (shortcut) => handleReaderShortcut(shortcut)),
+    [handleReaderShortcut],
+  );
+
+  // A failure or a draft that needs a decision leaves immersive mode, where the error and its actions are visible.
+  useEffect(() => {
+    if (!immersiveRef.current) return;
+    if (
+      currentTask &&
+      (hasRetainedDraft(currentTask) ||
+        currentTask.stage === "error" ||
+        currentTask.stage === "cancelled" ||
+        currentTask.stage === "unsaved")
+    ) {
+      void exitImmersive();
+    }
+  }, [currentTask, exitImmersive, immersive]);
+
+  const detailsTask =
+    currentTask?.repairRounds?.length && currentTask.repairRounds.length > 0
+      ? currentTask
+      : null;
+  const hasDetails = Boolean(savedRecord || detailsTask);
+  useEffect(() => {
+    setDetailsOpen(false);
+  }, [currentKey, screen, session]);
+
   const openTaskPage = useCallback(
     (task: TranslationTask) => {
       const document = currentDocumentRef.current;
@@ -3183,16 +3605,28 @@ export function Reader() {
           void runEpubCommand((bridge) => bridge.display(sourceCfi));
         }
       } else {
-        if (bridgeRef.current && viewerReadyRef.current) {
+        if (
+          bridgeRef.current &&
+          viewerReadyRef.current &&
+          bridgeRef.current.page !== task.pageNumber
+        ) {
           bridgeRef.current.setPage(task.pageNumber);
         }
         setPageValue(task.pageNumber);
         saveProgress(task.documentId, task.pageNumber, task.targetLanguage);
+        requestPdfRestore(task.documentId, task.pageNumber);
       }
       setRightTab("page");
       setNarrowTab("translation");
     },
-    [clearEpubSelection, handleLanguageChange, runEpubCommand, saveProgress, setPageValue],
+    [
+      clearEpubSelection,
+      handleLanguageChange,
+      requestPdfRestore,
+      runEpubCommand,
+      saveProgress,
+      setPageValue,
+    ],
   );
 
   const closeEpubToc = useCallback(() => {
@@ -3318,19 +3752,33 @@ export function Reader() {
     );
   }
 
-  const showLeft = narrow ? narrowTab === "pdf" : paneMode !== "right";
-  const showRight = narrow ? narrowTab !== "pdf" : paneMode !== "left";
-  const singlePane = narrow || paneMode !== "both";
+  const showBatch = narrow ? narrowTab === "batch" : rightTab === "batch";
+  const showLeft = immersive
+    ? paneMode !== "right"
+    : narrow
+      ? narrowTab === "pdf"
+      : paneMode !== "right";
+  const showRight = immersive
+    ? paneMode !== "left"
+    : narrow
+      ? narrowTab !== "pdf"
+      : paneMode !== "left";
+  const singlePane = immersive ? paneMode !== "both" : narrow || paneMode !== "both";
+  const splitterWidth = immersive ? 0 : SPLITTER_WIDTH;
   const panesStyle = singlePane
     ? undefined
-    : {
-        gridTemplateColumns: `minmax(0, ${splitRatio}fr) ${SPLITTER_WIDTH}px minmax(0, ${
+    : immersive
+      ? {
+          gridTemplateColumns: `minmax(0, ${splitRatio}fr) minmax(0, ${1 - splitRatio}fr)`,
+        }
+      : {
+        gridTemplateColumns: `minmax(0, ${splitRatio}fr) ${splitterWidth}px minmax(0, ${
           1 - splitRatio
         }fr)`,
       };
 
   return (
-    <div className="app-shell">
+    <div className={immersive ? "app-shell immersive" : "app-shell"}>
       <header className="app-bar">
         <span className="brand">{t.gates.accessTitle}</span>
         <button
@@ -3402,9 +3850,11 @@ export function Reader() {
           <button
             type="button"
             className="app-button fullscreen-button"
-            onClick={toggleFullscreen}
+            aria-pressed={immersive}
+            aria-keyshortcuts="F"
+            onClick={toggleImmersive}
           >
-            {t.appBar.fullscreen}
+            {t.appBar.immersive}
           </button>
         )}
         <button
@@ -3469,7 +3919,7 @@ export function Reader() {
         {session > 0 && (
           <main
             ref={workspaceRef}
-            className={`workspace${narrow ? " narrow" : ""}${screen === "library" ? " is-hidden" : ""}`}
+            className={`workspace${narrow ? " narrow" : ""}${immersive ? " immersive" : ""}${screen === "library" ? " is-hidden" : ""}`}
             tabIndex={-1}
             inert={screen === "library"}
             aria-hidden={screen === "library"}
@@ -3480,6 +3930,15 @@ export function Reader() {
               if (file) openFile(file);
             }}
           >
+            {immersive && (
+              <button
+                type="button"
+                className="immersive-exit"
+                onClick={() => void exitImmersive()}
+              >
+                {t.appBar.exitImmersive}
+              </button>
+            )}
         {narrow && (
           <nav
             className="mobile-tabs"
@@ -3560,7 +4019,7 @@ export function Reader() {
                   onRelocated={handleEpubRelocated}
                   onSelection={handleEpubSelection}
                   onError={handleViewerError}
-                  onStep={turnPage}
+                  onShortcut={(shortcut) => void handleReaderShortcut(shortcut)}
                 />
                 {epubTocOpen && (
                   <EpubTocPanel
@@ -3578,13 +4037,17 @@ export function Reader() {
               sessionKey={session}
               locale={locale}
               title={currentDocument?.name ?? t.appBar.noPdf}
+              immersive={immersive}
               onBridge={handleBridge}
               onDocumentInit={handleDocumentInit}
               onPageChange={handlePageChange}
               onViewChange={handleViewChange}
+              onViewArea={handleViewArea}
+              onPageRendered={handlePageRendered}
+              onUserScroll={cancelPdfRestore}
               onError={handleViewerError}
               onFilePicked={(file) => void openPreview(file)}
-              onTurnPage={turnPage}
+              onShortcut={handleReaderShortcut}
               onPassword={(password) => {
                 passwordRef.current = password;
               }}
@@ -3619,7 +4082,7 @@ export function Reader() {
           )}
         </section>
 
-        {!narrow && paneMode === "both" && (
+        {!narrow && !immersive && paneMode === "both" && (
           <div
             className="splitter"
             role="separator"
@@ -3666,44 +4129,53 @@ export function Reader() {
             </div>
           )}
 
-          {(narrow ? narrowTab === "batch" : rightTab === "batch") ? (
-            currentDocument ? (
-              <BatchTranslationPanel
-                document={currentDocument}
-                pageCount={pageCount}
-                currentPage={page}
-                language={language}
-                onLanguageChange={handleLanguageChange}
-                tasks={tasks}
-                queue={queue}
-                onOpenTaskPage={openTaskPage}
-                onConfirm={ask}
-                disabledReason={pageDisabledReason}
-                selection={selection}
-                onSelectionChange={setSelection}
-                outline={outline}
-                outlineGenerationDisabledReason={outlineGenerationDisabledReason}
-                onGenerateOutline={() => void generateOutline()}
-                onCancelOutline={cancelOutlineGeneration}
-                onReloadOutline={reloadOutline}
-                onRetrySaveOutline={() => void retrySaveOutline()}
-                onDiscardOutline={discardOutline}
-                onOpenOutlinePage={openOutlinePage}
-                epubBatch={epubBatch}
-                onStartEpubBatch={(options) => void startEpubBatch(options)}
-                onSelectUntranslatedEpub={(saved) => void selectUntranslatedEpubSections(saved)}
-                onStopAll={stopAllTranslation}
-                aiStatus={ai.state === "ready" ? ai.snapshot.status : null}
-                aiStatusError={ai.state === "error" ? ai.error : null}
-                onConfigureAi={() => setSettingsOpen(true)}
-                onRetryAiStatus={() => void refreshAiStatus(true)}
-              />
-            ) : (
-              <div className="pane-placeholder">
-                <p>{t.empty.batchHint}</p>
-              </div>
-            )
-          ) : (
+          {showBatch && (
+            <div
+              className="side-view"
+              hidden={immersive}
+              inert={immersive}
+              aria-hidden={immersive}
+            >
+              {currentDocument ? (
+                <BatchTranslationPanel
+                  document={currentDocument}
+                  pageCount={pageCount}
+                  currentPage={page}
+                  language={language}
+                  onLanguageChange={handleLanguageChange}
+                  tasks={tasks}
+                  queue={queue}
+                  onOpenTaskPage={openTaskPage}
+                  onConfirm={ask}
+                  disabledReason={pageDisabledReason}
+                  selection={selection}
+                  onSelectionChange={setSelection}
+                  outline={outline}
+                  outlineGenerationDisabledReason={outlineGenerationDisabledReason}
+                  onGenerateOutline={() => void generateOutline()}
+                  onCancelOutline={cancelOutlineGeneration}
+                  onReloadOutline={reloadOutline}
+                  onRetrySaveOutline={() => void retrySaveOutline()}
+                  onDiscardOutline={discardOutline}
+                  onOpenOutlinePage={openOutlinePage}
+                  epubBatch={epubBatch}
+                  onStartEpubBatch={(options) => void startEpubBatch(options)}
+                  onSelectUntranslatedEpub={(saved) => void selectUntranslatedEpubSections(saved)}
+                  onStopAll={stopAllTranslation}
+                  aiStatus={ai.state === "ready" ? ai.snapshot.status : null}
+                  aiStatusError={ai.state === "error" ? ai.error : null}
+                  onConfigureAi={() => setSettingsOpen(true)}
+                  onRetryAiStatus={() => void refreshAiStatus(true)}
+                />
+              ) : (
+                <div className="pane-placeholder">
+                  <p>{t.empty.batchHint}</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {(!showBatch || immersive) && (
             <div className="page-panel">
               <div className="page-toolbar">
                 <div className="page-position">
@@ -3720,9 +4192,15 @@ export function Reader() {
                       : t.common.pageOf(page, pageCount)}
                   </strong>
                   <span className="muted">
-                    {isEpubDocument ? epubChapter : t.page.actualOrder}
+                    {isEpubDocument && epubChapter ? epubChapter : null}
                   </span>
                 </div>
+                <span className="page-status" aria-live="polite">
+                  {pageStatus}
+                  {currentTask?.cacheHit && currentTask.stage === "saved"
+                    ? t.page.existingTranslation
+                    : ""}
+                </span>
                 <label className="language-field">
                   {t.page.targetLanguage}
                   <select
@@ -3761,15 +4239,23 @@ export function Reader() {
                   >
                     {t.page.export}
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => setDetailsOpen(true)}
+                    disabled={!hasDetails}
+                  >
+                    {t.page.details}
+                  </button>
                 </div>
               </div>
 
-              <p className="page-status" aria-live="polite">
-                {pageStatus}
-                {currentTask?.cacheHit && currentTask.stage === "saved"
-                  ? t.page.existingTranslation
-                  : ""}
-              </p>
+              {immersive &&
+                currentTask &&
+                isActiveStage(currentTask.stage) && (
+                  <p className="page-status immersive-status" aria-live="polite">
+                    {pageStatus}
+                  </p>
+                )}
 
               {epubSelection && (
                 <div className="epub-selection" role="status">
@@ -3825,7 +4311,14 @@ export function Reader() {
                 </p>
               )}
 
-              <div className="page-body" ref={pageBodyRef}>
+              <div
+                className="page-body"
+                ref={pageBodyRef}
+                onScroll={handleBodyScroll}
+                onWheel={handleBodyUserIntent}
+                onTouchStart={handleBodyUserIntent}
+                onPointerDown={handleBodyUserIntent}
+              >
                 {(!currentDocument || pageCount === 0) && (
                   <div className="pane-placeholder">
                     <p>{t.empty.noPdfOpen}</p>
@@ -3838,10 +4331,6 @@ export function Reader() {
                     </button>
                     <p className="muted">{t.empty.filesSaved}</p>
                   </div>
-                )}
-
-                {currentTask?.repairRounds && isActiveStage(currentTask.stage) && (
-                  <TypstRepairPanel task={currentTask} />
                 )}
 
                 {currentDocument &&
@@ -3988,9 +4477,6 @@ export function Reader() {
                                 </button>
                               </div>
                               <p className="muted">{t.repair.note}</p>
-                              {retainedDraft.repairRounds && (
-                                <TypstRepairPanel task={retainedDraft} />
-                              )}
                             </>
                           )}
                           {/* One mount for the saved text and its draft: the first keystroke turns one into the other and must not close the editor. */}
@@ -4003,21 +4489,11 @@ export function Reader() {
                             onEdit={editCurrentSource}
                             onSave={saveCurrentDraft}
                             onDiscard={discardCurrentDraft}
-                            onTurnPage={turnPage}
+                            immersive={immersive}
+                            onShortcut={handleReaderShortcut}
+                            onRendered={handleTranslationRendered}
+                            onPreviewError={() => void exitImmersive()}
                           />
-                          {!retainedDraft && savedRecord && (
-                            <>
-                              <p className="translation-meta">
-                                {TARGET_LANGUAGE_LABELS[savedRecord.targetLanguage]} ·{" "}
-                                {savedRecord.provider}/{savedRecord.model} ·{" "}
-                                {formatDateTime(locale, savedRecord.translatedAt)}
-                              </p>
-                              {currentTask?.stage === "saved" &&
-                                currentTask.repairRounds && (
-                                  <TypstRepairPanel task={currentTask} />
-                                )}
-                            </>
-                          )}
                         </div>
                       )}
 
@@ -4097,6 +4573,33 @@ export function Reader() {
             {t.common.cancel}
           </button>
         </div>
+      </ModalDialog>
+
+      <ModalDialog
+        open={detailsOpen}
+        onClose={() => setDetailsOpen(false)}
+        label={t.page.details}
+        className="page-details-dialog"
+      >
+        <div className="dialog-heading">
+          <h2>{t.page.details}</h2>
+          <button type="button" onClick={() => setDetailsOpen(false)}>
+            {t.common.close}
+          </button>
+        </div>
+        {savedRecord && (
+          <dl className="page-details">
+            <dt>{t.page.detailsLanguage}</dt>
+            <dd>{TARGET_LANGUAGE_LABELS[savedRecord.targetLanguage]}</dd>
+            <dt>{t.page.detailsModel}</dt>
+            <dd>
+              {savedRecord.provider}/{savedRecord.model}
+            </dd>
+            <dt>{t.page.detailsGenerated}</dt>
+            <dd>{formatDateTime(locale, savedRecord.translatedAt)}</dd>
+          </dl>
+        )}
+        {detailsTask && <TypstRepairPanel task={detailsTask} />}
       </ModalDialog>
 
       <SettingsDialog

@@ -1,6 +1,6 @@
 import { rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { signingPlan, signingStatus, windowsSigningCommand, windowsSigningEnvironment } from "./signing";
+import { mergeBuildConfigs, signingPlan, signingStatus, updaterPlan, windowsSigningCommand, windowsSigningEnvironment } from "./signing";
 import { getBuildTarget } from "./targets";
 
 const root = resolve(import.meta.dir, "..");
@@ -55,6 +55,7 @@ async function main(): Promise<void> {
   const bun = process.execPath;
   // Half a credential set must stop the build before any slow step runs.
   const signing = mode === "build" ? signingPlan(target.platform, process.env) : null;
+  const updater = mode === "build" ? updaterPlan(process.env) : null;
 
   await run("PDF.js preparation", [bun, "scripts/fetch-pdfjs.ts"]);
   await run("Typst preparation", [bun, "scripts/prepare-typst.ts"]);
@@ -67,9 +68,10 @@ async function main(): Promise<void> {
   const tauri = [bun, "run", "tauri", mode, "--target", target.triple];
   if (mode === "build" && signing) {
     tauri.push("--bundles", BUNDLES[target.platform]);
-    if (signing.config) {
+    const config = mergeBuildConfigs(signing.config, updater);
+    if (Object.keys(config).length > 0) {
       const configPath = join(root, "dist", "tauri-signing.json");
-      writeFileSync(configPath, JSON.stringify(signing.config));
+      writeFileSync(configPath, JSON.stringify(config));
       tauri.push("--config", configPath);
     }
     // linuxdeploy's own error is otherwise discarded, leaving "failed to run linuxdeploy".

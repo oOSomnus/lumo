@@ -19,7 +19,7 @@ Download the file for your system from the [latest release](https://github.com/o
 | macOS Intel / Apple silicon | `lumo-v<version>-macos-x64.dmg` / `lumo-v<version>-macos-arm64.dmg` | macOS 13 or newer |
 | Linux x64 / ARM64 | `lumo-v<version>-linux-<arch>.deb`, `.rpm` or `.AppImage` | A desktop session, a default web browser and WebKitGTK 4.1 (Ubuntu 22.04, Debian 12 or newer) |
 
-Per-system steps and what to do when the system warns about an unsigned build: [docs/manual.md#install](docs/manual.md#install).
+Per-system steps and what to do when the system warns about an unsigned build: [docs/manual.md#install](docs/manual.md#install). Windows, macOS and AppImage builds check the signed release feed at startup and daily; a download starts only when you choose **Download update**, and installation only after **Restart and install**. deb and rpm builds open the release download page. [docs/manual.md#desktop-app-and-standalone-server](docs/manual.md#desktop-app-and-standalone-server)
 
 ## Run from source
 
@@ -50,6 +50,8 @@ bun scripts/smoke-desktop.ts                    # runs the built server the way 
 ```
 
 `bun run build --target <triple>` builds another architecture of the same OS; `bun run build:server` builds only the standalone server in `dist/sidecar/`. CI builds all six targets (Windows, macOS, Linux × x64, ARM64) on native runners, and a `v*` tag drafts a release; see `.github/workflows/`.
+
+A release build with in-app updates needs `LUMO_UPDATER_PUBLIC_KEY`, `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` in its environment. A partial set fails the build. The private key and password are build secrets; never commit them or expose them to the launcher panel.
 
 Source layout and invariants: [AGENTS.md](AGENTS.md).
 

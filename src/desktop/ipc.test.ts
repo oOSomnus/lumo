@@ -12,6 +12,7 @@ function snapshot(overrides: Partial<LauncherSnapshot>): LauncherSnapshot {
     uiLocale: null,
     failureCode: null,
     canRetry: false,
+    update: { phase: "disabled", version: null, installMode: "in-app", errorCode: null },
     logs: [],
     ...overrides,
   };

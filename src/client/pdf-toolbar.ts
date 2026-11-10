@@ -25,6 +25,17 @@ html[data-toolbar-density="touch"] .dropdownToolbarButton > select {
 html[data-toolbar-density="touch"] .toolbarField { min-width: 56px; }
 html.lumo-pages-hidden #numPages { display: none; }
 
+/* Immersive reading: only the pages, still scrollable, with no browser-like chrome. */
+html.lumo-immersive #toolbarContainer,
+html.lumo-immersive #secondaryToolbar,
+html.lumo-immersive #sidebarContainer,
+html.lumo-immersive #loadingBar,
+html.lumo-immersive #findbar,
+html.lumo-immersive .editorParamsToolbar { display: none !important; }
+html.lumo-immersive #mainContainer { min-width: 0; }
+html.lumo-immersive #viewerContainer { inset-block-start: 0; scrollbar-width: none; }
+html.lumo-immersive #viewerContainer::-webkit-scrollbar { display: none; }
+
 #lumo-pdf-tools { display: flex; flex: none; height: 100%; aspect-ratio: 1; }
 #lumo-pdf-tools[hidden] { display: none; }
 #lumo-pdf-tools > summary { list-style: none; cursor: pointer; }

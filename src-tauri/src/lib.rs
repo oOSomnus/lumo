@@ -2,6 +2,7 @@
 //! the browser the access link. The reader itself stays in the system browser.
 
 mod launcher;
+mod updater;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -14,9 +15,10 @@ use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
 use launcher::{
-    take_run, Level, LineOutcome, Phase, Snapshot, State, StopPlan, Termination, SHUTDOWN_COMMAND,
-    SHUTDOWN_TIMEOUT_SECS, STARTUP_TIMEOUT_SECS,
+    take_run, Level, LineOutcome, Phase, Snapshot, State, StopPlan, StopPurpose, Termination,
+    SHUTDOWN_COMMAND, SHUTDOWN_TIMEOUT_SECS, STARTUP_TIMEOUT_SECS,
 };
+use updater::LauncherUpdateState;
 
 const STATE_EVENT: &str = "launcher-state";
 const QUIT_EVENT: &str = "quit-requested";
@@ -50,6 +52,22 @@ fn update<T>(app: &AppHandle, change: impl FnOnce(&mut State) -> T) -> T {
     result
 }
 
+pub(crate) fn set_update_state(app: &AppHandle, next: LauncherUpdateState) {
+    update(app, |state| state.set_update(next));
+}
+
+pub(crate) fn launcher_phase(app: &AppHandle) -> Phase {
+    lock(&app.state::<Shared>().state).phase()
+}
+
+pub(crate) fn set_quitting(app: &AppHandle, value: bool) {
+    app.state::<Shared>().quitting.store(value, Ordering::SeqCst);
+}
+
+pub(crate) fn update_install_failed(app: &AppHandle) {
+    update(app, |state| state.update_install_failed());
+}
+
 fn kill_child(app: &AppHandle, generation: u64) {
     let child = take_run(&mut lock(&app.state::<Shared>().child), generation);
     if let Some(child) = child {
@@ -65,11 +83,16 @@ fn finish_exit(app: &AppHandle) {
     app.exit(0);
 }
 
-fn handle_terminated(app: &AppHandle, generation: u64) {
+fn handle_terminated(app: &AppHandle, generation: u64, success: bool) {
     // Dropping the handle also clears anything left in the server's process group.
     drop(take_run(&mut lock(&app.state::<Shared>().child), generation));
-    if update(app, |state| state.on_terminated(now_ms(), generation)) == Termination::Quit {
-        finish_exit(app);
+    match update(app, |state| {
+        state.on_terminated(now_ms(), generation, success)
+    }) {
+        Termination::Quit => finish_exit(app),
+        Termination::UpdateReady => updater::install_pending(app),
+        Termination::UpdateAborted => updater::shutdown_failed(app),
+        Termination::Ignored | Termination::Failed => {}
     }
 }
 
@@ -104,15 +127,19 @@ fn start_server(app: &AppHandle) {
 
     let reader = app.clone();
     tauri::async_runtime::spawn(async move {
+        let mut success = false;
         while let Some(event) = events.recv().await {
             match event {
                 CommandEvent::Stdout(bytes) => handle_stdout(&reader, generation, &bytes),
-                CommandEvent::Terminated(_) => break,
+                CommandEvent::Terminated(payload) => {
+                    success = payload.code == Some(0);
+                    break;
+                }
                 // Server stderr is drained so the pipe never blocks, and never shown.
                 _ => {}
             }
         }
-        handle_terminated(&reader, generation);
+        handle_terminated(&reader, generation, success);
     });
 
     let watchdog = app.clone();
@@ -124,10 +151,16 @@ fn start_server(app: &AppHandle) {
     });
 }
 
-fn request_exit(app: &AppHandle) {
-    match update(app, |state| state.begin_stop()) {
+pub(crate) fn request_stop(app: &AppHandle, purpose: StopPurpose) {
+    match update(app, |state| state.begin_stop(purpose)) {
         StopPlan::AlreadyStopping => {}
-        StopPlan::ExitNow => finish_exit(app),
+        StopPlan::ExitNow => {
+            if purpose == StopPurpose::Update {
+                updater::install_pending(app);
+            } else {
+                finish_exit(app);
+            }
+        }
         StopPlan::SendShutdown { generation } => {
             let asked = lock(&app.state::<Shared>().child)
                 .as_mut()
@@ -165,7 +198,7 @@ fn handle_quit_request(app: &AppHandle) {
         focus_main(app);
         let _ = app.emit(QUIT_EVENT, ());
     } else {
-        request_exit(app);
+        request_stop(app, StopPurpose::Quit);
     }
 }
 
@@ -218,7 +251,7 @@ fn retry_start(app: AppHandle) {
 
 #[tauri::command]
 fn confirm_exit(app: AppHandle) {
-    request_exit(&app);
+    request_stop(&app, StopPurpose::Quit);
 }
 
 pub fn run() {
@@ -230,17 +263,23 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Shared {
             state: Mutex::new(State::new(env!("CARGO_PKG_VERSION"))),
             child: Mutex::new(None),
             quitting: AtomicBool::new(false),
         })
+        .manage(updater::UpdateShared::default())
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
             open_webui,
             copy_webui_url,
             retry_start,
-            confirm_exit
+            confirm_exit,
+            updater::check_updates,
+            updater::download_update,
+            updater::install_update,
+            updater::open_update_download
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
@@ -251,6 +290,7 @@ pub fn run() {
         .setup(|app| {
             // A failed start is shown in the panel with a retry button, not fatal here.
             start_server(app.handle());
+            updater::initialize(app.handle());
             Ok(())
         })
         .build(tauri::generate_context!())

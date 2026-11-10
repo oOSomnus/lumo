@@ -49,6 +49,92 @@ export function allInstallerNames(version: string): string[] {
   return BUILD_TARGETS.flatMap((target) => installerNames(target, version));
 }
 
+const DOWNLOADS = "https://github.com/oOSomnus/lumo/releases/download";
+
+function updaterPlatform(target: BuildTarget): string {
+  return `${target.platform === "macos" ? "darwin" : target.platform}-${target.arch === "x64" ? "x86_64" : "aarch64"}`;
+}
+
+function only(directory: string, predicate: (file: string) => boolean, label: string): string {
+  const matches = existsSync(directory) ? readdirSync(directory).filter(predicate) : [];
+  if (matches.length !== 1) {
+    throw new Error(`expected exactly one ${label} in ${directory}, found ${matches.length}${matches.length ? `: ${matches.join(", ")}` : ""}`);
+  }
+  return join(directory, matches[0]!);
+}
+
+function signature(source: string): string {
+  if (!existsSync(`${source}.sig`)) {
+    throw new Error(`${basename(source)} has no updater signature; build with the updater signing key`);
+  }
+  return readFileSync(`${source}.sig`, "utf8").trim();
+}
+
+export interface UpdaterFragment {
+  platform: string;
+  url: string;
+  signature: string;
+  /** Release files the manifest points at; copied next to the installers. */
+  files: string[];
+}
+
+/**
+ * Copies the package the in-app updater installs, plus its signature, and describes one manifest
+ * platform entry. The deb and rpm are installers only; they are not in-app update packages.
+ */
+export function collectUpdaterArtifact(
+  bundleRoot: string,
+  target: BuildTarget,
+  version: string,
+  outputDir: string,
+): UpdaterFragment {
+  mkdirSync(outputDir, { recursive: true });
+  if (target.platform === "windows") {
+    const directory = join(bundleRoot, "nsis");
+    const source = only(directory, (file) => file.includes(version) && file.endsWith("-setup.exe"), `${version} NSIS installer`);
+    const name = INSTALLERS.windows[0]!.name(version, target);
+    copyFileSync(source, join(outputDir, name));
+    const signatureText = signature(source);
+    writeFileSync(join(outputDir, `${name}.sig`), `${signatureText}\n`);
+    return {
+      platform: updaterPlatform(target),
+      url: `${DOWNLOADS}/v${version}/${name}`,
+      signature: signatureText,
+      files: [name, `${name}.sig`],
+    };
+  }
+  if (target.platform === "macos") {
+    const directory = join(bundleRoot, "macos");
+    const source = only(directory, (file) => file.endsWith(".app.tar.gz"), "macOS updater archive");
+    const name = `lumo-v${version}-macos-${target.arch}.app.tar.gz`;
+    copyFileSync(source, join(outputDir, name));
+    const signatureText = signature(source);
+    writeFileSync(join(outputDir, `${name}.sig`), `${signatureText}\n`);
+    return {
+      platform: updaterPlatform(target),
+      url: `${DOWNLOADS}/v${version}/${name}`,
+      signature: signatureText,
+      files: [name, `${name}.sig`],
+    };
+  }
+  const directory = join(bundleRoot, "appimage");
+  const source = only(
+    directory,
+    (file) => file.includes(version) && file.endsWith(".AppImage"),
+    `${version} AppImage`,
+  );
+  const name = INSTALLERS.linux[2]!.name(version, target);
+  copyFileSync(source, join(outputDir, name));
+  const signatureText = signature(source);
+  writeFileSync(join(outputDir, `${name}.sig`), `${signatureText}\n`);
+  return {
+    platform: updaterPlatform(target),
+    url: `${DOWNLOADS}/v${version}/${name}`,
+    signature: signatureText,
+    files: [name, `${name}.sig`],
+  };
+}
+
 export function assertTagMatches(tag: string, version: string): void {
   if (tag !== `v${version}`) {
     throw new Error(`tag ${tag} does not match package.json version ${version} (expected v${version})`);
@@ -101,6 +187,29 @@ export function finalizeRelease(inputDir: string, outputDir: string, version: st
     assets.push(name);
   }
 
+  const platforms: Record<string, { url: string; signature: string }> = {};
+  for (const target of BUILD_TARGETS) {
+    const fragmentFile = named(`update-${target.triple}.json`);
+    if (fragmentFile.length !== 1) {
+      throw new Error(`expected exactly one update manifest for ${target.triple}, found ${fragmentFile.length}`);
+    }
+    const fragment = JSON.parse(readFileSync(fragmentFile[0]!, "utf8")) as UpdaterFragment;
+    if (platforms[fragment.platform]) throw new Error(`duplicate update platform ${fragment.platform}`);
+    platforms[fragment.platform] = { url: fragment.url, signature: fragment.signature };
+    for (const name of fragment.files) {
+      const found = named(name);
+      if (found.length !== 1) throw new Error(`expected exactly one update file ${name}, found ${found.length}`);
+      if (!assets.includes(name)) {
+        copyFileSync(found[0]!, join(outputDir, name));
+        assets.push(name);
+      }
+    }
+  }
+  writeFileSync(
+    join(outputDir, "latest.json"),
+    `${JSON.stringify({ version, pub_date: new Date().toISOString(), platforms })}\n`,
+  );
+
   const notices = named("THIRD_PARTY_NOTICES.txt");
   if (notices.length === 0) throw new Error("no THIRD_PARTY_NOTICES.txt among the downloads");
   if (new Set(notices.map(sha256)).size !== 1) throw new Error("the targets produced different third-party notices");
@@ -114,7 +223,7 @@ export function finalizeRelease(inputDir: string, outputDir: string, version: st
   });
   writeFileSync(join(outputDir, "SIGNING.txt"), `${signing.join("\n")}\n`);
 
-  const listed = [...assets, "THIRD_PARTY_NOTICES.txt", "LICENSE", "SIGNING.txt"];
+  const listed = [...assets, "THIRD_PARTY_NOTICES.txt", "LICENSE", "SIGNING.txt", "latest.json"];
   writeFileSync(
     join(outputDir, "SHA256SUMS"),
     `${listed.map((name) => `${sha256(join(outputDir, name))}  ${name}`).join("\n")}\n`,
@@ -132,6 +241,8 @@ function main(): void {
     const output = join(root, "dist", "release", target.triple);
     const bundles = join(root, "src-tauri", "target", target.triple, "release", "bundle");
     const names = collectInstallers(bundles, target, version, output);
+    const updater = collectUpdaterArtifact(bundles, target, version, output);
+    writeFileSync(join(output, `update-${target.triple}.json`), `${JSON.stringify(updater)}\n`);
     for (const [source, name] of [
       [join(root, "dist", "notices", "THIRD_PARTY_NOTICES.txt"), "THIRD_PARTY_NOTICES.txt"],
       [join(root, "dist", "signing-status.txt"), `signing-${target.triple}.txt`],
@@ -139,7 +250,7 @@ function main(): void {
       if (!existsSync(source)) throw new Error(`${source} is missing; run \`bun run build --target ${target.triple}\` first`);
       copyFileSync(source, join(output, name));
     }
-    console.log(`Collected ${names.join(", ")} in ${output}`);
+    console.log(`Collected ${names.join(", ")} and ${updater.files.join(", ")} in ${output}`);
   } else if (command === "finalize" && rest.length === 2) {
     const names = finalizeRelease(resolve(rest[0]!), resolve(rest[1]!), version, join(root, "LICENSE"));
     console.log(`Release folder ${resolve(rest[1]!)}: ${names.join(", ")}`);

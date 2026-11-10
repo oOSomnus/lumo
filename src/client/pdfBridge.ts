@@ -57,6 +57,13 @@ interface PdfViewerLike {
   scrollMode: number;
   spreadMode: number;
   isInPresentationMode: boolean;
+  getPageView(index: number): unknown;
+  scrollPageIntoView(options: {
+    pageNumber: number;
+    destArray: unknown[];
+    allowNegativeOffset?: boolean;
+    ignoreDestinationZoom?: boolean;
+  }): void;
 }
 
 export interface PdfViewerApplicationLike {
@@ -92,9 +99,18 @@ function annotationStorageHash(storage: AnnotationStorageLike): string {
   return serializable.hash;
 }
 
+/** Where the visible part of a page sits, in PDF user space (the units the outline uses). */
+export interface PdfScrollLocation {
+  pageNumber: number;
+  top: number;
+  left: number;
+}
+
 export interface ViewerEventHandlers {
   onDocumentInit?: () => void;
-  onPageChanging?: (pageNumber: number) => void;
+  onPageChanging?: (pageNumber: number, previous: number | undefined) => void;
+  onViewArea?: (location: PdfScrollLocation) => void;
+  onPageRendered?: (pageNumber: number) => void;
   onDocumentError?: (error: ViewerBridgeError) => void;
   onViewChanging?: (view: ReaderView) => void;
 }
@@ -187,6 +203,23 @@ export class ViewerBridge {
     } finally {
       this.#restoring -= 1;
     }
+  }
+
+  /**
+   * Puts the viewer at a page position in PDF user space, without changing the zoom.
+   * False while that page has no view yet; a later `pagerendered` retries.
+   */
+  restoreScroll(pageNumber: number, position: { left: number; top: number }): boolean {
+    if (!this.#app.pdfDocument) return false;
+    if (!this.#app.pdfViewer.getPageView(pageNumber - 1)) return false;
+    this.#app.pdfViewer.scrollPageIntoView({
+      pageNumber,
+      // XYZ takes five entries: page, destination kind, x, y and zoom; null keeps the zoom.
+      destArray: [null, { name: "XYZ" }, position.left, position.top, null],
+      allowNegativeOffset: true,
+      ignoreDestinationZoom: true,
+    });
+    return true;
   }
 
   async getPage(pageNumber: number): Promise<PDFPageProxy> {
@@ -330,8 +363,42 @@ export class ViewerBridge {
     const bus = this.#app.eventBus;
     const onDocumentInit = (): void => handlers.onDocumentInit?.();
     const onPageChanging = (event: unknown): void => {
-      const pageNumber = (event as { pageNumber?: unknown }).pageNumber;
-      if (typeof pageNumber === "number") handlers.onPageChanging?.(pageNumber);
+      if (!event || typeof event !== "object") return;
+      const pageNumber = "pageNumber" in event ? event.pageNumber : undefined;
+      const previous = "previous" in event ? event.previous : undefined;
+      if (typeof pageNumber === "number") {
+        handlers.onPageChanging?.(
+          pageNumber,
+          typeof previous === "number" ? previous : undefined,
+        );
+      }
+    };
+    const onViewArea = (event: unknown): void => {
+      if (!event || typeof event !== "object" || !("location" in event)) return;
+      const location = event.location;
+      if (!location || typeof location !== "object") return;
+      const pageNumber = "pageNumber" in location ? location.pageNumber : undefined;
+      const top = "top" in location ? location.top : undefined;
+      const left = "left" in location ? location.left : undefined;
+      if (
+        typeof pageNumber !== "number" ||
+        !Number.isInteger(pageNumber) ||
+        pageNumber < 1 ||
+        typeof top !== "number" ||
+        !Number.isFinite(top) ||
+        typeof left !== "number" ||
+        !Number.isFinite(left)
+      ) {
+        return;
+      }
+      handlers.onViewArea?.({ pageNumber, top, left });
+    };
+    const onPageRendered = (event: unknown): void => {
+      if (!event || typeof event !== "object" || !("pageNumber" in event)) return;
+      const pageNumber = event.pageNumber;
+      if (typeof pageNumber === "number" && Number.isInteger(pageNumber)) {
+        handlers.onPageRendered?.(pageNumber);
+      }
     };
     const onDocumentError = (event: unknown): void => {
       const message = (event as { message?: unknown }).message;
@@ -361,6 +428,8 @@ export class ViewerBridge {
 
     bus.on("documentinit", onDocumentInit);
     bus.on("pagechanging", onPageChanging);
+    bus.on("updateviewarea", onViewArea);
+    bus.on("pagerendered", onPageRendered);
     bus.on("documenterror", onDocumentError);
     bus.on("scalechanging", onViewChanging);
     bus.on("rotationchanging", onViewChanging);
@@ -369,6 +438,8 @@ export class ViewerBridge {
     return () => {
       bus.off("documentinit", onDocumentInit);
       bus.off("pagechanging", onPageChanging);
+      bus.off("updateviewarea", onViewArea);
+      bus.off("pagerendered", onPageRendered);
       bus.off("documenterror", onDocumentError);
       bus.off("scalechanging", onViewChanging);
       bus.off("rotationchanging", onViewChanging);

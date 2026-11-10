@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { ownsArrowKeys, pageStep, watchPageKeys, type PageStep } from "./page-keys";
+import {
+  ownsArrowKeys,
+  ownsEnterKeys,
+  readerShortcut,
+  watchReaderKeys,
+  type ReaderShortcut,
+} from "./page-keys";
 
 interface FakeNode {
   localName: string;
@@ -28,30 +34,76 @@ function node(
 }
 
 const owns = (target: FakeNode | null) => ownsArrowKeys(target as unknown as EventTarget | null);
+const ownsEnter = (target: FakeNode | null) =>
+  ownsEnterKeys(target as unknown as EventTarget | null);
 
 const key = (name: string, extra: Partial<KeyboardEvent> = {}) => ({
   key: name,
+  code: name.startsWith("Digit") ? name : "",
   altKey: false,
   ctrlKey: false,
   metaKey: false,
   shiftKey: false,
   isComposing: false,
+  repeat: false,
   ...extra,
 });
 
-describe("pageStep", () => {
-  test("maps the plain arrow keys to a direction", () => {
-    expect(pageStep(key("ArrowRight"))).toBe("next");
-    expect(pageStep(key("ArrowLeft"))).toBe("prev");
+describe("readerShortcut", () => {
+  test("maps the plain arrow keys to a page step", () => {
+    expect(readerShortcut(key("ArrowRight"))).toEqual({ type: "step", direction: "next" });
+    expect(readerShortcut(key("ArrowLeft"))).toEqual({ type: "step", direction: "prev" });
   });
 
-  test("leaves other keys, modified keys and IME composition alone", () => {
-    expect(pageStep(key("ArrowUp"))).toBeNull();
-    expect(pageStep(key("PageDown"))).toBeNull();
-    for (const modifier of ["altKey", "ctrlKey", "metaKey", "shiftKey"] as const) {
-      expect(pageStep(key("ArrowRight", { [modifier]: true }))).toBeNull();
+  test("a plain Enter translates and a repeat or held key does not", () => {
+    expect(readerShortcut(key("Enter"))).toEqual({ type: "translate" });
+    expect(readerShortcut(key("Enter", { repeat: true }))).toBeNull();
+    expect(readerShortcut(key("Enter", { isComposing: true }))).toBeNull();
+    expect(readerShortcut(key("Enter", { ctrlKey: true }))).toBeNull();
+  });
+
+  test("Ctrl and Ctrl+Shift digits choose a layout by key code", () => {
+    for (const preset of [1, 2, 3, 4, 5] as const) {
+      expect(readerShortcut(key(`Digit${preset}`, { ctrlKey: true }))).toEqual({
+        type: "layout",
+        preset,
+      });
+      expect(
+        readerShortcut(key(`Digit${preset}`, { ctrlKey: true, shiftKey: true })),
+      ).toEqual({ type: "layout", preset });
     }
-    expect(pageStep(key("ArrowLeft", { isComposing: true }))).toBeNull();
+    // Shift changes `key` to a symbol but not the physical code.
+    expect(readerShortcut(key("!", { code: "Digit1", ctrlKey: true, shiftKey: true }))).toEqual({
+      type: "layout",
+      preset: 1,
+    });
+    expect(readerShortcut(key("Digit6", { ctrlKey: true }))).toBeNull();
+    expect(readerShortcut(key("Digit1", { ctrlKey: true, altKey: true }))).toBeNull();
+    expect(readerShortcut(key("Digit1", { ctrlKey: true, repeat: true }))).toBeNull();
+  });
+
+  test("F toggles immersive reading without repeating", () => {
+    expect(readerShortcut(key("f"))).toEqual({ type: "toggle-immersive" });
+    expect(readerShortcut(key("F"))).toEqual({ type: "toggle-immersive" });
+    expect(readerShortcut(key("f", { repeat: true }))).toBeNull();
+    expect(readerShortcut(key("f", { ctrlKey: true }))).toBeNull();
+    expect(readerShortcut(key("f", { metaKey: true }))).toBeNull();
+    expect(readerShortcut(key("f", { altKey: true }))).toBeNull();
+    expect(readerShortcut(key("f", { shiftKey: true }))).toBeNull();
+  });
+
+  test("Escape asks to leave immersive reading", () => {
+    expect(readerShortcut(key("Escape"))).toEqual({ type: "exit-immersive" });
+    expect(readerShortcut(key("Escape", { shiftKey: true }))).toBeNull();
+  });
+
+  test("leaves other keys and IME composition alone", () => {
+    expect(readerShortcut(key("ArrowUp"))).toBeNull();
+    expect(readerShortcut(key("PageDown"))).toBeNull();
+    expect(readerShortcut(key("ArrowLeft", { isComposing: true }))).toBeNull();
+    for (const modifier of ["altKey", "ctrlKey", "metaKey", "shiftKey"] as const) {
+      expect(readerShortcut(key("ArrowRight", { [modifier]: true }))).toBeNull();
+    }
   });
 });
 
@@ -94,7 +146,29 @@ describe("ownsArrowKeys", () => {
   });
 });
 
-describe("watchPageKeys", () => {
+describe("ownsEnterKeys", () => {
+  test("controls that act on Enter keep it", () => {
+    expect(ownsEnter(node("button"))).toBe(true);
+    expect(ownsEnter(node("summary"))).toBe(true);
+    expect(ownsEnter(node("a"))).toBe(true);
+    expect(ownsEnter(node("input", { type: "text" }))).toBe(true);
+    expect(ownsEnter(node("input", { type: "checkbox" }))).toBe(true);
+    expect(ownsEnter(node("textarea"))).toBe(true);
+    expect(ownsEnter(node("select"))).toBe(true);
+    expect(ownsEnter(node("div", { editable: true }))).toBe(true);
+    expect(ownsEnter(node("div", { role: "button" }))).toBe(true);
+    expect(ownsEnter(node("span", { parent: node("button") }))).toBe(true);
+  });
+
+  test("the page body and presentational nodes leave Enter to translation", () => {
+    expect(ownsEnter(node("body"))).toBe(false);
+    expect(ownsEnter(node("div"))).toBe(false);
+    expect(ownsEnter(node("pre"))).toBe(false);
+    expect(ownsEnter(null)).toBe(false);
+  });
+});
+
+describe("watchReaderKeys", () => {
   function fakeDocument() {
     const added: Array<{ type: string; listener: (event: KeyboardEvent) => void; capture: unknown }> = [];
     const removed: typeof added = [];
@@ -126,29 +200,29 @@ describe("watchPageKeys", () => {
 
   test("listens in the capture phase and stops listening with the same listener", () => {
     const { doc, added, removed } = fakeDocument();
-    const stop = watchPageKeys(doc, () => true);
+    const stop = watchReaderKeys(doc, () => true);
     expect(added).toHaveLength(1);
     expect(added[0]).toMatchObject({ type: "keydown", capture: true });
     stop();
     expect(removed).toEqual(added);
   });
 
-  test("a taken page turn consumes the key", () => {
+  test("a taken shortcut consumes the key", () => {
     const { doc, added } = fakeDocument();
-    const turns: PageStep[] = [];
-    watchPageKeys(doc, (direction) => {
-      turns.push(direction);
+    const seen: ReaderShortcut[] = [];
+    watchReaderKeys(doc, (shortcut) => {
+      seen.push(shortcut);
       return true;
     });
-    const { event, calls } = press("ArrowRight", node("body"));
+    const { event, calls } = press("Enter", node("body"));
     added[0]!.listener(event);
-    expect(turns).toEqual(["next"]);
+    expect(seen).toEqual([{ type: "translate" }]);
     expect(calls).toEqual({ preventDefault: 1, stopPropagation: 1 });
   });
 
-  test("a refused page turn leaves the key to the page", () => {
+  test("a refused shortcut leaves the key to the page", () => {
     const { doc, added } = fakeDocument();
-    watchPageKeys(doc, () => false);
+    watchReaderKeys(doc, () => false);
     const { event, calls } = press("ArrowLeft", node("body"));
     added[0]!.listener(event);
     expect(calls).toEqual({ preventDefault: 0, stopPropagation: 0 });
@@ -157,12 +231,16 @@ describe("watchPageKeys", () => {
   test("keys that belong to a control, a modifier or someone else never reach the handler", () => {
     const { doc, added } = fakeDocument();
     let handled = 0;
-    watchPageKeys(doc, () => {
+    watchReaderKeys(doc, () => {
       handled += 1;
       return true;
     });
     const listener = added[0]!.listener;
     listener(press("ArrowRight", node("textarea")).event);
+    listener(press("Enter", node("button")).event);
+    listener(press("Enter", node("input", { type: "checkbox" })).event);
+    listener(press("f", node("textarea")).event);
+    listener(press("f", node("button")).event);
     listener(press("ArrowRight", node("body"), { shiftKey: true }).event);
     listener(press("ArrowRight", node("body"), { defaultPrevented: true }).event);
     listener(press("ArrowDown", node("body")).event);

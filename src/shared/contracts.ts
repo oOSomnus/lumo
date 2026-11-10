@@ -353,9 +353,32 @@ const readerViewScaleSchema = z
     return scale >= 0.1 && scale <= 25;
   }, "scaleValue must be a PDF.js zoom preset or a scale between 0.1 and 25");
 
+/** How many recent positions each side keeps for one book; the newest is first. */
+export const READER_SCROLL_MEMORY_LIMIT = 5;
+
+const pdfScrollEntrySchema = z.strictObject({
+  page: pageNumberSchema,
+  left: z.number(),
+  top: z.number(),
+});
+
+const translationScrollEntrySchema = z.strictObject({
+  key: z.string().min(1).max(256),
+  offset: z.number().min(0).max(1),
+});
+
+/** Recent reading positions for one book; a missing field means no position was recorded yet. */
+export const readerScrollMemorySchema = z.strictObject({
+  pdf: z.array(pdfScrollEntrySchema).max(READER_SCROLL_MEMORY_LIMIT),
+  translation: z.array(translationScrollEntrySchema).max(READER_SCROLL_MEMORY_LIMIT),
+});
+
+export type ReaderScrollMemory = z.infer<typeof readerScrollMemorySchema>;
+
 export const pdfReaderViewSchema = z.strictObject({
   format: z.literal("pdf"),
   scaleValue: readerViewScaleSchema,
+  scrollMemory: readerScrollMemorySchema.optional(),
   rotation: z.union([
     z.literal(0),
     z.literal(90),
@@ -383,6 +406,7 @@ export const EPUB_THEMES = ["light", "sepia", "dark"] as const;
 export const epubReaderViewSchema = z.strictObject({
   format: z.literal("epub"),
   cfi: z.string().min(1).max(MAX_EPUB_CFI_CHARS).nullable(),
+  scrollMemory: readerScrollMemorySchema.optional(),
   fontSize: z.number().int().min(EPUB_FONT_SIZE_MIN).max(EPUB_FONT_SIZE_MAX),
   fontFamily: z.enum(EPUB_FONT_FAMILIES),
   lineHeight: z.union([

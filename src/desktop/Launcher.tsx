@@ -44,6 +44,8 @@ function LogList({
 export function Launcher() {
   const [snapshot, setSnapshot] = useState<LauncherSnapshot | null>(null);
   const [confirmingQuit, setConfirmingQuit] = useState(false);
+  const [confirmingUpdate, setConfirmingUpdate] = useState(false);
+  const [dismissedVersion, setDismissedVersion] = useState<string | null>(null);
   const [ipcFailed, setIpcFailed] = useState(false);
 
   const locale = panelLocale(snapshot, navigator.language);
@@ -103,6 +105,32 @@ export function Launcher() {
   const logs = snapshot?.logs ?? [];
   const latest = logs.at(-1);
   const outcome = latest && ACTION_RESULTS.includes(latest.code) ? latest : null;
+  const update = snapshot?.update ?? null;
+  const updateShown =
+    update !== null &&
+    update.version !== null &&
+    update.version !== dismissedVersion &&
+    !["disabled", "idle", "checking", "current"].includes(update.phase);
+  const updateError = update
+    ? update.errorCode === "check_failed"
+      ? t.update.checkFailed
+      : update.errorCode === "download_failed"
+        ? t.update.downloadFailed
+        : update.errorCode === "shutdown_failed"
+          ? t.update.shutdownFailed
+          : update.errorCode === "install_failed"
+            ? t.update.installFailed
+            : null
+    : null;
+  const retryUpdate = (): void => {
+    if (!update) return;
+    if (update.errorCode === "shutdown_failed") setConfirmingUpdate(true);
+    else if (update.errorCode === "download_failed" || update.errorCode === "install_failed") {
+      run(launcher.downloadUpdate);
+    } else {
+      run(launcher.checkUpdates);
+    }
+  };
 
   return (
     <main className="launcher">
@@ -126,6 +154,63 @@ export function Launcher() {
       <p className="sr-only" role="status" aria-atomic="true">
         {outcome && <span key={`${outcome.at}-${logs.length}`}>{t.logs[outcome.code]}</span>}
       </p>
+
+      {updateShown && update && (
+        <section className="launcher-update" aria-labelledby="launcher-update-label" aria-live="polite">
+          <h2 id="launcher-update-label">{t.update.title}</h2>
+          <p>
+            {update.phase === "available" && t.update.available(update.version ?? "")}
+            {update.phase === "downloading" && t.update.downloading}
+            {update.phase === "ready" && t.update.ready}
+            {update.phase === "installing" && t.update.installing}
+            {update.phase === "failed" && updateError}
+          </p>
+          {(update.phase === "available" ||
+            update.phase === "ready" ||
+            update.phase === "failed") && (
+            <div className="launcher-update-actions">
+              {update.phase === "available" && (
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={() =>
+                    run(
+                      update.installMode === "in-app"
+                        ? launcher.downloadUpdate
+                        : launcher.openUpdateDownload,
+                    )
+                  }
+                >
+                  {update.installMode === "in-app"
+                    ? t.update.downloadUpdate
+                    : t.update.downloadInstaller}
+                </button>
+              )}
+              {update.phase === "ready" && (
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={() => setConfirmingUpdate(true)}
+                >
+                  {t.update.installNow}
+                </button>
+              )}
+              {update.phase === "failed" && (
+                <button type="button" className="primary" onClick={retryUpdate}>
+                  {update.errorCode === "check_failed"
+                    ? t.update.retryCheck
+                    : update.errorCode === "shutdown_failed"
+                      ? t.update.retryInstall
+                      : t.update.retryDownload}
+                </button>
+              )}
+              <button type="button" onClick={() => setDismissedVersion(update.version)}>
+                {t.update.later}
+              </button>
+            </div>
+          )}
+        </section>
+      )}
 
       <section aria-labelledby="launcher-address-label">
         <h2 id="launcher-address-label">{t.addressLabel}</h2>
@@ -188,6 +273,30 @@ export function Launcher() {
           <LogList entries={logs} locale={locale} empty={t.noActivity} />
         </div>
       </details>
+
+      <ModalDialog
+        open={confirmingUpdate}
+        onClose={() => setConfirmingUpdate(false)}
+        label={t.update.installTitle}
+      >
+        <h2>{t.update.installTitle}</h2>
+        <p>{t.update.installBody}</p>
+        <div className="dialog-actions">
+          <button type="button" autoFocus onClick={() => setConfirmingUpdate(false)}>
+            {t.update.installBack}
+          </button>
+          <button
+            type="button"
+            className="primary"
+            onClick={() => {
+              setConfirmingUpdate(false);
+              run(launcher.installUpdate);
+            }}
+          >
+            {t.update.installConfirm}
+          </button>
+        </div>
+      </ModalDialog>
 
       <ModalDialog open={confirmingQuit} onClose={() => setConfirmingQuit(false)} label={t.quitTitle}>
         <h2>{t.quitTitle}</h2>

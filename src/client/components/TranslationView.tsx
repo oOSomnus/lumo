@@ -3,7 +3,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import { compileTypst, type TypstAsset } from "../typst";
 import { stripPlaceholderControls } from "../../shared/typst";
-import { watchPageKeys, type PageStep } from "../page-keys";
+import { watchReaderKeys, type ReaderShortcut } from "../page-keys";
 import { TypstSource } from "./TypstSource";
 
 type LoadAssets = (signal: AbortSignal) => Promise<readonly TypstAsset[]>;
@@ -69,8 +69,14 @@ interface TranslationViewProps {
   onEdit?: (typst: string) => void;
   onSave?: () => void;
   onDiscard?: () => void;
-  /** Turns the book page for a plain arrow key pressed inside the preview; true when it did. */
-  onTurnPage?: (direction: PageStep) => boolean;
+  /** Immersive reading shows only the rendered page, hiding the source/editor tools. */
+  immersive?: boolean;
+  /** A reading shortcut pressed inside the preview; true when it did something. */
+  onShortcut?: (shortcut: ReaderShortcut) => boolean;
+  /** The preview or the source body is laid out; reading position may be restored now. */
+  onRendered?: () => void;
+  /** A preview failed while nothing else could show the error; the reader can leave immersive mode. */
+  onPreviewError?: () => void;
 }
 
 type PreviewState =
@@ -93,7 +99,10 @@ export const TranslationView = memo(function TranslationView({
   onEdit,
   onSave,
   onDiscard,
-  onTurnPage,
+  immersive = false,
+  onShortcut,
+  onRendered,
+  onPreviewError,
 }: TranslationViewProps) {
   const { t } = useI18n();
   const [mode, setMode] = useState<"preview" | "source">("preview");
@@ -102,17 +111,25 @@ export const TranslationView = memo(function TranslationView({
   const [preview, setPreview] = useState<PreviewState>({ status: "compiling" });
   const [liveOpen, setLiveOpen] = useState(true);
 
-  // The preview document belongs to the model's output: the page only listens there for arrow keys,
+  // The preview document belongs to the model's output: the page only listens there for reader keys,
   // and stops when the document is replaced or the frame is gone.
-  const turnPageRef = useRef(onTurnPage);
-  turnPageRef.current = onTurnPage;
+  const shortcutRef = useRef(onShortcut);
+  shortcutRef.current = onShortcut;
+  const renderedRef = useRef(onRendered);
+  renderedRef.current = onRendered;
+  const previewErrorRef = useRef(onPreviewError);
+  previewErrorRef.current = onPreviewError;
   const stopKeysRef = useRef<(() => void) | null>(null);
   const attachKeys = useCallback((frame: HTMLIFrameElement): void => {
     stopKeysRef.current?.();
     stopKeysRef.current = null;
     const doc = frame.contentDocument;
     if (!doc) return;
-    stopKeysRef.current = watchPageKeys(doc, (direction) => turnPageRef.current?.(direction) ?? false);
+    stopKeysRef.current = watchReaderKeys(
+      doc,
+      (shortcut) => shortcutRef.current?.(shortcut) ?? false,
+    );
+    renderedRef.current?.();
   }, []);
   const frameRef = useCallback((frame: HTMLIFrameElement | null): void => {
     if (frame) return;
@@ -133,12 +150,18 @@ export const TranslationView = memo(function TranslationView({
     if (!dirty) setEditing(false);
   }, [dirty]);
 
+  const previewSource = editing ? draft : typst;
+  const wantPreview = immersive ? !streaming : mode === "preview" && !editing;
+  const visibleSource = editing ? draft : typst;
+  const showSource =
+    !immersive && (streaming || mode === "source" || preview.status === "failed");
+
   useEffect(() => {
-    if (streaming || editing || mode !== "preview") return;
+    if (streaming || !wantPreview) return;
     const current = previewRef.current;
     if (
       current.status === "ready" &&
-      current.typst === typst &&
+      current.typst === previewSource &&
       current.loadAssets === loadAssets
     ) {
       return;
@@ -147,14 +170,18 @@ export const TranslationView = memo(function TranslationView({
     setPreview({ status: "compiling" });
     loadAssets(controller.signal)
       .then((assets) =>
-        compileTypst(stripPlaceholderControls(typst), assets, controller.signal),
+        compileTypst(
+          stripPlaceholderControls(previewSource),
+          assets,
+          controller.signal,
+        ),
       )
       .then(
         (svg) => {
           if (controller.signal.aborted) return;
           setPreview({
             status: "ready",
-            typst,
+            typst: previewSource,
             loadAssets,
             html: sanitizedDocument(svg),
             aspectRatio: svgAspectRatio(svg),
@@ -169,11 +196,27 @@ export const TranslationView = memo(function TranslationView({
         },
       );
     return () => controller.abort();
-  }, [typst, streaming, editing, mode, loadAssets]);
+  }, [loadAssets, previewSource, streaming, wantPreview]);
 
-  const visibleSource = editing ? draft : typst;
-  const showSource = streaming || mode === "source" || preview.status === "failed";
-  const showPreview = mode === "preview" && !editing;
+  // Immersive mode hides the source on failure, so the reader has to bring its error view back.
+  useEffect(() => {
+    if (immersive && !streaming && preview.status === "failed") {
+      previewErrorRef.current?.();
+    }
+  }, [immersive, preview.status, streaming]);
+
+  // A source body has no iframe load event; one frame lets it lay out before the reader restores a position.
+  useEffect(() => {
+    if (
+      streaming ||
+      (wantPreview && preview.status !== "failed") ||
+      (immersive && preview.status === "failed")
+    ) {
+      return;
+    }
+    const id = requestAnimationFrame(() => renderedRef.current?.());
+    return () => cancelAnimationFrame(id);
+  }, [immersive, preview.status, streaming, wantPreview, visibleSource, mode, editing]);
   const previewHtml = useMemo(
     () => (preview.status === "ready" ? preview.html : ""),
     [preview],
@@ -181,7 +224,7 @@ export const TranslationView = memo(function TranslationView({
 
   return (
     <div className={streaming ? "translation-body streaming" : "translation-body"}>
-      {!streaming && (
+      {!streaming && !immersive && (
         <div className="typst-toolbar">
           <div className="typst-view-toggle" role="group">
             <button
@@ -232,7 +275,7 @@ export const TranslationView = memo(function TranslationView({
         </div>
       )}
 
-      {editing ? (
+      {editing && !immersive ? (
         <textarea
           className="typst-editor"
           aria-label={t.translation.sourceLabel}
@@ -256,7 +299,7 @@ export const TranslationView = memo(function TranslationView({
         <TypstSource source={visibleSource} label={t.translation.sourceLabel} />
       ) : null}
 
-      {!streaming && showPreview && preview.status === "compiling" && (
+      {!streaming && wantPreview && preview.status === "compiling" && (
         <p className="muted">{t.translation.compiling}</p>
       )}
       {!streaming && preview.status === "failed" && (
@@ -265,7 +308,7 @@ export const TranslationView = memo(function TranslationView({
           <pre className="typst-source">{preview.message}</pre>
         </div>
       )}
-      {!streaming && showPreview && preview.status === "ready" && (
+      {!streaming && wantPreview && preview.status === "ready" && (
         <div
           className="typst-preview"
           style={

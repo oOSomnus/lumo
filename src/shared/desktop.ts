@@ -62,6 +62,32 @@ export type LauncherLogCode =
 
 export type LauncherPhase = "starting" | "running" | "stopping" | "failed";
 
+export type LauncherUpdatePhase =
+  | "disabled"
+  | "idle"
+  | "checking"
+  | "current"
+  | "available"
+  | "downloading"
+  | "ready"
+  | "installing"
+  | "failed";
+
+export type LauncherUpdateError =
+  | "check_failed"
+  | "download_failed"
+  | "shutdown_failed"
+  | "install_failed";
+
+export interface LauncherUpdateState {
+  phase: LauncherUpdatePhase;
+  /** The version the feed offered, or the running one while checking/current. */
+  version: string | null;
+  /** In-app installs on Windows, macOS and AppImage; deb/rpm open the release page. */
+  installMode: "in-app" | "download";
+  errorCode: LauncherUpdateError | null;
+}
+
 export interface LauncherLogEntry {
   at: number;
   level: "info" | "warn" | "error";
@@ -79,5 +105,6 @@ export interface LauncherSnapshot {
   uiLocale: UiLocale | null;
   failureCode: LauncherLogCode | null;
   canRetry: boolean;
+  update: LauncherUpdateState;
   logs: LauncherLogEntry[];
 }

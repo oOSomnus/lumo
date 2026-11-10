@@ -54,7 +54,7 @@ function setup() {
     onReady: () => events.push("ready"),
     onRelocated: () => events.push("relocated"),
     onSelection: () => events.push("selection"),
-    onStep: (direction) => events.push(`step:${direction}`),
+    onShortcut: (shortcut) => events.push(`shortcut:${shortcut.type === "step" ? shortcut.direction : shortcut.type}`),
     onFatal: ({ code }) => events.push(`fatal:${code}`),
   });
   const deliver = (message: ViewerMessage, source: unknown = contentWindow): void => {
@@ -113,18 +113,18 @@ describe("EpubBridgeClient requests", () => {
   test("a key press in the book reaches the reader only for the current book once it is ready", () => {
     const { client, events, deliver, openBook } = setup();
     client.open(new ArrayBuffer(8));
-    deliver({ type: "step", generation: 1, direction: "next" });
+    deliver({ type: "shortcut", generation: 1, shortcut: { type: "step", direction: "next" } });
     expect(events).toEqual([]);
 
     deliver({ type: "ready", generation: 1, info });
-    deliver({ type: "step", generation: 1, direction: "next" });
-    deliver({ type: "step", generation: 1, direction: "prev" });
-    deliver({ type: "step", generation: 0, direction: "next" });
-    deliver({ type: "step", generation: 2, direction: "prev" });
-    expect(events).toEqual(["ready", "step:next", "step:prev"]);
+    deliver({ type: "shortcut", generation: 1, shortcut: { type: "step", direction: "next" } });
+    deliver({ type: "shortcut", generation: 1, shortcut: { type: "step", direction: "prev" } });
+    deliver({ type: "shortcut", generation: 0, shortcut: { type: "step", direction: "next" } });
+    deliver({ type: "shortcut", generation: 2, shortcut: { type: "step", direction: "prev" } });
+    expect(events).toEqual(["ready", "shortcut:next", "shortcut:prev"]);
 
     openBook(2);
-    deliver({ type: "step", generation: 1, direction: "prev" });
+    deliver({ type: "shortcut", generation: 1, shortcut: { type: "step", direction: "prev" } });
     expect(events.at(-1)).toBe("ready");
   });
 
@@ -139,7 +139,7 @@ describe("EpubBridgeClient requests", () => {
     const before = events.length;
     deliver({ type: "relocated", generation: 1, relocation: { ...pageAt(1), atStart: true, atEnd: false } });
     deliver({ type: "selection", generation: 1, selection: null });
-    deliver({ type: "step", generation: 1, direction: "next" });
+    deliver({ type: "shortcut", generation: 1, shortcut: { type: "step", direction: "next" } });
     deliver({ type: "ready", generation: 1, info });
     deliver({ type: "failure", generation: 1, id: null, code: "EPUB_OPEN_FAILED", message: "bad zip" });
     deliver({ type: "reply", generation: 1, id: request!.id, result: undefined });

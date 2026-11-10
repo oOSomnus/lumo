@@ -2,7 +2,15 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { signingPlan, signingStatus, windowsSigningCommand, windowsSigningEnvironment } from "./signing";
+import {
+  mergeBuildConfigs,
+  signingPlan,
+  signingStatus,
+  updaterPlan,
+  UPDATER_ENDPOINT,
+  windowsSigningCommand,
+  windowsSigningEnvironment,
+} from "./signing";
 
 const windows = {
   WINDOWS_CERTIFICATE: "base64",
@@ -62,6 +70,46 @@ describe("signingPlan", () => {
     ["notarization without signing", "macos", notarization, /Developer ID/],
   ] as const)("fails instead of downgrading: %s", (_label, platform, env, message) => {
     expect(() => signingPlan(platform, env)).toThrow(message);
+  });
+});
+
+describe("updaterPlan", () => {
+  const key = {
+    LUMO_UPDATER_PUBLIC_KEY: "public-key",
+    TAURI_SIGNING_PRIVATE_KEY: "private-key",
+    TAURI_SIGNING_PRIVATE_KEY_PASSWORD: "password",
+  };
+
+  test("no keys means no updater feed in the build", () => {
+    expect(updaterPlan({})).toBeNull();
+  });
+
+  test("a complete set enables signed updater artifacts and the latest release feed", () => {
+    expect(updaterPlan(key)).toEqual({
+      bundle: { createUpdaterArtifacts: true },
+      plugins: {
+        updater: { pubkey: "public-key", endpoints: [UPDATER_ENDPOINT], requireSignedVersion: true },
+      },
+    });
+  });
+
+  test.each([
+    ["the public key", { TAURI_SIGNING_PRIVATE_KEY: "private-key", TAURI_SIGNING_PRIVATE_KEY_PASSWORD: "password" }, "LUMO_UPDATER_PUBLIC_KEY"],
+    ["the private key", { LUMO_UPDATER_PUBLIC_KEY: "public-key", TAURI_SIGNING_PRIVATE_KEY_PASSWORD: "password" }, "TAURI_SIGNING_PRIVATE_KEY"],
+    ["the key password", { LUMO_UPDATER_PUBLIC_KEY: "public-key", TAURI_SIGNING_PRIVATE_KEY: "private-key" }, "TAURI_SIGNING_PRIVATE_KEY_PASSWORD"],
+  ])("fails without %s instead of shipping an unupdatable release", (_label, env, missing) => {
+    expect(() => updaterPlan(env)).toThrow(`${missing} missing`);
+  });
+
+  test("merges signing and updater sections without dropping either", () => {
+    const merged = mergeBuildConfigs(
+      { bundle: { windows: { digestAlgorithm: "sha256" } } },
+      updaterPlan(key),
+    );
+    expect(merged).toEqual({
+      bundle: { windows: { digestAlgorithm: "sha256" }, createUpdaterArtifacts: true },
+      plugins: { updater: { pubkey: "public-key", endpoints: [UPDATER_ENDPOINT], requireSignedVersion: true } },
+    });
   });
 });
 

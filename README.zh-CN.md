@@ -19,7 +19,7 @@
 | macOS Intel / Apple 芯片 | `lumo-v<版本>-macos-x64.dmg` / `lumo-v<版本>-macos-arm64.dmg` | macOS 13 或更新 |
 | Linux x64 / ARM64 | `lumo-v<版本>-linux-<架构>.deb`、`.rpm` 或 `.AppImage` | 桌面会话、默认网页浏览器和 WebKitGTK 4.1（Ubuntu 22.04、Debian 12 或更新） |
 
-各系统的安装步骤，以及系统提示未签名时的处理：[docs/manual.zh-CN.md#安装](docs/manual.zh-CN.md#安装)。
+各系统的安装步骤，以及系统提示未签名时的处理：[docs/manual.zh-CN.md#安装](docs/manual.zh-CN.md#安装)。Windows、macOS 和 AppImage 版本会在启动时及之后每天检查已签名的发布源；只有点击“下载更新”才开始下载，只有确认“重启并安装”才安装。deb 和 rpm 版本改为打开发布下载页。[docs/manual.zh-CN.md#桌面应用与独立服务](docs/manual.zh-CN.md#桌面应用与独立服务)
 
 ## 从源码运行
 
@@ -50,6 +50,8 @@ bun scripts/smoke-desktop.ts                    # 以桌面窗口的方式运行
 ```
 
 `bun run build --target <triple>` 可构建同一操作系统的另一种架构；`bun run build:server` 只构建 `dist/sidecar/` 中的独立服务。CI 在原生 runner 上构建全部六个目标（Windows、macOS、Linux × x64、ARM64），`v*` 标签会生成 Release 草稿，见 `.github/workflows/`。
+
+带应用内更新的 Release 构建需要在环境中提供 `LUMO_UPDATER_PUBLIC_KEY`、`TAURI_SIGNING_PRIVATE_KEY` 和 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。缺少任意一项构建会失败。私钥和密码是构建机密，不得提交，也不得暴露给启动器窗口。
 
 源码结构与约束见 [AGENTS.md](AGENTS.md)。
 

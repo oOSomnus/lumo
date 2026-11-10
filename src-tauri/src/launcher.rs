@@ -10,6 +10,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use crate::updater::LauncherUpdateState;
+
 pub const LOG_LIMIT: usize = 200;
 pub const STARTUP_TIMEOUT_SECS: u64 = 45;
 pub const SHUTDOWN_TIMEOUT_SECS: u64 = 35;
@@ -181,6 +183,7 @@ pub struct Snapshot {
     pub ui_locale: Option<&'static str>,
     pub failure_code: Option<&'static str>,
     pub can_retry: bool,
+    pub update: LauncherUpdateState,
     pub logs: Vec<LogEntry>,
 }
 
@@ -200,6 +203,17 @@ pub enum Termination {
     Failed,
     /// The process ended because the user asked to quit.
     Quit,
+    /// The server stopped cleanly for an update; the launcher may install it now.
+    UpdateReady,
+    /// The server did not stop cleanly for the update; nothing may be installed.
+    UpdateAborted,
+}
+
+/// Why the launcher is stopping the server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StopPurpose {
+    Quit,
+    Update,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -221,6 +235,9 @@ pub struct State {
     data_directory: Option<String>,
     ui_locale: Option<&'static str>,
     failure_code: Option<&'static str>,
+    update: LauncherUpdateState,
+    stop_purpose: Option<StopPurpose>,
+    stop_confirmed: bool,
     logs: VecDeque<LogEntry>,
 }
 
@@ -236,6 +253,9 @@ impl State {
             data_directory: None,
             ui_locale: None,
             failure_code: None,
+            update: LauncherUpdateState::disabled(),
+            stop_purpose: None,
+            stop_confirmed: false,
             logs: VecDeque::new(),
         }
     }
@@ -250,6 +270,7 @@ impl State {
             ui_locale: self.ui_locale,
             failure_code: self.failure_code,
             can_retry: self.can_retry(),
+            update: self.update.clone(),
             logs: self.logs.iter().cloned().collect(),
         }
     }
@@ -297,6 +318,8 @@ impl State {
         self.link = None;
         self.data_directory = None;
         self.failure_code = None;
+        self.stop_purpose = None;
+        self.stop_confirmed = false;
         self.revision += 1;
         Some(self.generation)
     }
@@ -314,8 +337,14 @@ impl State {
         let parsed = parse_line(line);
         match (self.phase, parsed) {
             (_, Parsed::Ignored) => LineOutcome::Unchanged,
-            // Output after failing or while quitting is not acted on.
+            // Output after failing or while quitting is not acted on; the update path still needs
+            // the server's stopped acknowledgement before it may install.
             (Phase::Failed, _) => LineOutcome::Unchanged,
+            (Phase::Stopping, Parsed::Event(Event::Stopped)) => {
+                self.stop_confirmed = true;
+                self.revision += 1;
+                LineOutcome::Changed
+            }
             (Phase::Stopping, _) => LineOutcome::Unchanged,
             (_, Parsed::Invalid) => self.violation(at),
             (Phase::Starting, Parsed::Access(link)) if self.link.is_none() => {
@@ -351,7 +380,7 @@ impl State {
         LineOutcome::ProtocolViolation
     }
 
-    pub fn on_terminated(&mut self, at: u64, generation: u64) -> Termination {
+    pub fn on_terminated(&mut self, at: u64, generation: u64, success: bool) -> Termination {
         if generation != self.generation || !self.process_alive {
             return Termination::Ignored;
         }
@@ -359,7 +388,21 @@ impl State {
         match self.phase {
             Phase::Stopping => {
                 self.revision += 1;
-                Termination::Quit
+                let purpose = self.stop_purpose.take();
+                if purpose == Some(StopPurpose::Update) {
+                    let confirmed = self.stop_confirmed;
+                    self.stop_confirmed = false;
+                    if success && confirmed {
+                        Termination::UpdateReady
+                    } else {
+                        self.phase = Phase::Failed;
+                        self.link = None;
+                        Termination::UpdateAborted
+                    }
+                } else {
+                    self.stop_confirmed = false;
+                    Termination::Quit
+                }
             }
             Phase::Starting | Phase::Running => {
                 self.fail(at, "server_exited");
@@ -383,12 +426,14 @@ impl State {
         overdue
     }
 
-    pub fn begin_stop(&mut self) -> StopPlan {
+    pub fn begin_stop(&mut self, purpose: StopPurpose) -> StopPlan {
         if self.phase == Phase::Stopping {
             return StopPlan::AlreadyStopping;
         }
         self.phase = Phase::Stopping;
         self.link = None;
+        self.stop_purpose = Some(purpose);
+        self.stop_confirmed = false;
         self.revision += 1;
         if self.process_alive {
             StopPlan::SendShutdown {
@@ -408,6 +453,22 @@ impl State {
             self.push(at, Level::Warn, "shutdown_timeout");
         }
         overdue
+    }
+
+    /// Records the launcher-side update lifecycle shown in the panel.
+    pub fn set_update(&mut self, update: LauncherUpdateState) {
+        self.update = update;
+        self.revision += 1;
+    }
+
+    /// An install could not start or finish: keep the launcher usable for a retry.
+    pub fn update_install_failed(&mut self) {
+        if self.phase == Phase::Stopping {
+            self.phase = Phase::Failed;
+            self.link = None;
+            self.stop_purpose = None;
+            self.revision += 1;
+        }
     }
 
     /// Records a launcher-side action (browser, clipboard) in the activity log.
@@ -578,7 +639,7 @@ mod tests {
         assert!(!state.snapshot().can_retry, "process may still be exiting");
         assert!(state.begin_start().is_none());
 
-        assert_eq!(state.on_terminated(2, generation), Termination::Ignored);
+        assert_eq!(state.on_terminated(2, generation, true), Termination::Ignored);
         assert!(state.snapshot().can_retry);
         let second = state.begin_start().expect("retry after the process ended");
         assert_eq!(second, generation + 1);
@@ -591,12 +652,12 @@ mod tests {
     fn a_retry_ignores_the_old_runs_output_and_exit() {
         let (mut state, old) = started();
         state.on_line(1, old, r#"{"type":"failed","code":"SERVER_LISTEN_FAILED"}"#);
-        state.on_terminated(2, old);
+        state.on_terminated(2, old, true);
         let new = state.begin_start().unwrap();
 
         assert_eq!(state.on_line(3, old, LINK), LineOutcome::Unchanged);
         assert!(state.snapshot().web_ui_url.is_none());
-        assert_eq!(state.on_terminated(4, old), Termination::Ignored);
+        assert_eq!(state.on_terminated(4, old, true), Termination::Ignored);
         assert_eq!(state.phase(), Phase::Starting);
 
         state.on_line(5, new, LINK);
@@ -607,7 +668,7 @@ mod tests {
     #[test]
     fn an_unexpected_exit_fails_the_run_and_withdraws_the_link() {
         let (mut state, generation) = running();
-        assert_eq!(state.on_terminated(9, generation), Termination::Failed);
+        assert_eq!(state.on_terminated(9, generation, true), Termination::Failed);
         let snapshot = state.snapshot();
         assert_eq!(snapshot.phase, Phase::Failed);
         assert_eq!(snapshot.failure_code, Some("server_exited"));
@@ -620,15 +681,15 @@ mod tests {
     fn a_backend_failure_is_not_overwritten_by_the_exit_that_follows() {
         let (mut state, generation) = started();
         state.on_line(1, generation, r#"{"type":"failed","code":"PDFJS_ASSETS_FAILED"}"#);
-        state.on_terminated(2, generation);
+        state.on_terminated(2, generation, true);
         assert_eq!(state.snapshot().failure_code, Some("PDFJS_ASSETS_FAILED"));
     }
 
     #[test]
     fn quitting_waits_for_the_server_and_then_exits() {
         let (mut state, generation) = running();
-        assert_eq!(state.begin_stop(), StopPlan::SendShutdown { generation });
-        assert_eq!(state.begin_stop(), StopPlan::AlreadyStopping);
+        assert_eq!(state.begin_stop(StopPurpose::Quit), StopPlan::SendShutdown { generation });
+        assert_eq!(state.begin_stop(StopPurpose::Quit), StopPlan::AlreadyStopping);
         assert!(state.open_target().is_none(), "no browser link while stopping");
 
         // Late output from the stopping server is not acted on.
@@ -636,17 +697,60 @@ mod tests {
             state.on_line(3, generation, r#"{"type":"log","code":"stopping"}"#),
             LineOutcome::Unchanged
         );
-        assert_eq!(state.on_terminated(4, generation), Termination::Quit);
+        assert_eq!(state.on_terminated(4, generation, true), Termination::Quit);
+    }
+
+    #[test]
+    fn an_update_needs_the_stopped_acknowledgement_and_a_clean_exit() {
+        let (mut state, generation) = running();
+        assert_eq!(
+            state.begin_stop(StopPurpose::Update),
+            StopPlan::SendShutdown { generation }
+        );
+        assert_eq!(
+            state.on_line(3, generation, r#"{"type":"stopped"}"#),
+            LineOutcome::Changed
+        );
+        assert_eq!(
+            state.on_terminated(4, generation, true),
+            Termination::UpdateReady
+        );
+
+        let (mut state, generation) = running();
+        state.begin_stop(StopPurpose::Update);
+        assert_eq!(
+            state.on_terminated(4, generation, true),
+            Termination::UpdateAborted,
+            "a missing stopped line must block the install"
+        );
+        assert_eq!(state.phase(), Phase::Failed);
+        assert!(state.snapshot().can_retry);
+
+        let (mut state, generation) = running();
+        state.begin_stop(StopPurpose::Update);
+        state.on_line(3, generation, r#"{"type":"stopped"}"#);
+        assert_eq!(
+            state.on_terminated(4, generation, false),
+            Termination::UpdateAborted,
+            "a killed or abnormal exit must block the install"
+        );
+    }
+
+    #[test]
+    fn a_quit_still_ends_without_the_stopped_acknowledgement() {
+        let (mut state, generation) = running();
+        state.begin_stop(StopPurpose::Quit);
+        assert_eq!(state.on_terminated(3, generation, false), Termination::Quit);
     }
 
     #[test]
     fn quitting_without_a_server_exits_immediately() {
         let mut state = State::new("9.9.9");
-        assert_eq!(state.begin_stop(), StopPlan::ExitNow);
+        assert_eq!(state.begin_stop(StopPurpose::Quit), StopPlan::ExitNow);
 
         let (mut state, generation) = started();
-        state.on_terminated(1, generation);
-        assert_eq!(state.begin_stop(), StopPlan::ExitNow);
+        state.on_terminated(1, generation, true);
+        assert_eq!(state.begin_stop(StopPurpose::Quit), StopPlan::ExitNow);
     }
 
     #[test]
@@ -660,9 +764,9 @@ mod tests {
         let (mut state, generation) = running();
         assert!(!state.startup_overdue(1, generation), "ready in time");
         assert!(!state.shutdown_overdue(1, generation), "not stopping");
-        state.begin_stop();
+        state.begin_stop(StopPurpose::Quit);
         assert!(state.shutdown_overdue(2, generation));
-        assert_eq!(state.on_terminated(3, generation), Termination::Quit);
+        assert_eq!(state.on_terminated(3, generation, true), Termination::Quit);
         assert!(!state.shutdown_overdue(4, generation), "process already ended");
     }
 
@@ -683,7 +787,7 @@ mod tests {
 
         // The old run's startup watchdog fires, but the process ends on its own before the kill.
         assert!(state.startup_overdue(1, old));
-        assert_eq!(state.on_terminated(2, old), Termination::Ignored);
+        assert_eq!(state.on_terminated(2, old, true), Termination::Ignored);
         drop(take_run(&mut slot, old));
         assert_eq!(released.get(), 1);
 

@@ -199,6 +199,14 @@ test("The five pane layouts show the right panes at the right widths and leave t
   await expect(viewer.locator("html")).toHaveAttribute("data-layout-marker", "kept");
   await expect(editor).toHaveValue("= Page 1 edited");
 
+  // The keyboard presets work from the focused splitter, including the Shift variant.
+  await page.keyboard.press("Control+3");
+  await expectLayout(page, "Equal split", 0.5);
+  await page.keyboard.press("Control+Shift+5");
+  await expectLayout(page, "Right wider", 0.4);
+  await page.keyboard.press("Control+1");
+  await expectLayout(page, "Left only", "left");
+
   // A narrow window has its tabs, not the presets; wide again, the chosen preset is back.
   await layout.getByRole("button", { name: "Left wider", exact: true }).click();
   await page.setViewportSize({ width: 390, height: 844 });
@@ -208,13 +216,63 @@ test("The five pane layouts show the right panes at the right widths and leave t
   await expectLayout(page, "Left wider", 0.6);
   await expect(editor).toHaveValue("= Page 1 edited");
 
-  // The presets stay within reach in the fullscreen workspace.
-  await page.locator(".fullscreen-button").click();
-  await expect.poll(() => page.evaluate(() => document.fullscreenElement?.tagName ?? "")).toBe("MAIN");
-  await expectLayout(page, "Right only", "right");
-  await expectLayout(page, "Equal split", 0.5);
-  await page.evaluate(() => document.exitFullscreen());
   expect(downloads).toHaveLength(loaded);
+});
+
+test("Immersive reading hides the app chrome, keeps the pane layout and leaves by button or Escape", async ({
+  page,
+  lumo,
+}) => {
+  await uploadPdf(lumo.api, "immersive.pdf", 2, "immersive");
+  await openTranslatedPage(page, lumo.url, "immersive.pdf");
+  const layout = page.locator(".layout-switch");
+
+  await layout.getByRole("button", { name: "Left wider", exact: true }).click();
+  await page.locator(".fullscreen-button").click();
+  await expect(page.locator(".workspace")).toHaveClass(/immersive/);
+  await expect(page.locator(".app-bar")).toBeHidden();
+  await expect(page.locator(".immersive-exit")).toBeVisible();
+  // The split has no separator in immersive reading, but both panes keep their share.
+  const immersiveSide = (await page.locator(".side-pane").boundingBox())!;
+  const immersivePdf = (await page.locator(".pdf-pane").boundingBox())!;
+  expect(immersiveSide.width).toBeGreaterThan(200);
+  expect(immersivePdf.width).toBeGreaterThan(200);
+  await expect(page.locator(".side-pane .page-panel")).toBeVisible();
+  await expect(page.locator(".side-pane .page-body")).toBeVisible();
+  // The presets still work from the keyboard while their buttons are hidden.
+  await page.keyboard.press("Control+3");
+  await expect(layout.locator('button[aria-pressed="true"]')).toHaveText("Equal split");
+  const equalSide = (await page.locator(".side-pane").boundingBox())!;
+  const equalPdf = (await page.locator(".pdf-pane").boundingBox())!;
+  expect(Math.abs(equalSide.width - equalPdf.width)).toBeLessThan(5);
+  // The reading commands also reach the page from inside the PDF viewer.
+  const viewer = page.frameLocator("iframe.pdf-frame");
+  await viewer.locator("#viewerContainer").click({ position: { x: 3, y: 3 } });
+  await page.keyboard.press("ArrowRight");
+  await expect(viewer.locator("#pageNumber")).toHaveValue("2");
+  await page.keyboard.press("ArrowLeft");
+  await expect(viewer.locator("#pageNumber")).toHaveValue("1");
+  await page.keyboard.press("Control+Shift+5");
+  await expect(layout.locator('button[aria-pressed="true"]')).toHaveText("Right wider");
+  await page.locator(".immersive-exit").click();
+  await expect(page.locator(".workspace")).not.toHaveClass(/immersive/);
+  await expect(page.locator(".app-bar")).toBeVisible();
+
+  // F enters and leaves immersive reading from the page, and a field keeps the letter.
+  await page.keyboard.press("f");
+  await expect(page.locator(".workspace")).toHaveClass(/immersive/);
+  await page.keyboard.press("f");
+  await expect(page.locator(".workspace")).not.toHaveClass(/immersive/);
+  await page.locator(".page-body").click({ position: { x: 3, y: 3 } });
+  await page.getByRole("combobox", { name: /^Target language/ }).press("f");
+  await expect(page.locator(".workspace")).not.toHaveClass(/immersive/);
+
+  await page.locator(".fullscreen-button").click();
+  await expect(page.locator(".workspace")).toHaveClass(/immersive/);
+  // Let the browser finish the fullscreen transition before the key arrives.
+  await page.waitForTimeout(200);
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".workspace")).not.toHaveClass(/immersive/);
 });
 
 test("A single pane keeps the batch tab it was showing", async ({ page, lumo }) => {

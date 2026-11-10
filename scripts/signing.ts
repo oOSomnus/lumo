@@ -25,6 +25,14 @@ const MACOS_SIGNING = [
   "APPLE_SIGNING_IDENTITY",
 ] as const;
 const MACOS_NOTARIZATION = ["APPLE_API_ISSUER", "APPLE_API_KEY", "APPLE_API_KEY_PATH"] as const;
+const UPDATER = [
+  "LUMO_UPDATER_PUBLIC_KEY",
+  "TAURI_SIGNING_PRIVATE_KEY",
+  "TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
+] as const;
+
+export const UPDATER_ENDPOINT =
+  "https://github.com/oOSomnus/lumo/releases/latest/download/latest.json";
 
 /** All of a group or none of it: half a credential set is a configuration error, not "unsigned". */
 function group(env: Environment, names: readonly string[]): "none" | "all" {
@@ -66,6 +74,38 @@ export function signingPlan(platform: BuildTarget["platform"], env: Environment)
     }
   }
   return plan;
+}
+
+/** The signed updater feed and its public key; all three inputs or none, never a half-configured feed. */
+export function updaterPlan(env: Environment): Record<string, unknown> | null {
+  if (group(env, UPDATER) === "none") return null;
+  return {
+    bundle: { createUpdaterArtifacts: true },
+    plugins: {
+      updater: {
+        pubkey: env.LUMO_UPDATER_PUBLIC_KEY,
+        endpoints: [UPDATER_ENDPOINT],
+        // The manifest is not signed; bind its announced version to the signed package.
+        requireSignedVersion: true,
+      },
+    },
+  };
+}
+
+/** Merges the bundle/plugin sections of per-feature Tauri configs; other keys are replaced. */
+export function mergeBuildConfigs(
+  ...configs: (Record<string, unknown> | null | undefined)[]
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = {};
+  for (const config of configs) {
+    for (const [key, value] of Object.entries(config ?? {})) {
+      merged[key] =
+        key === "bundle" || key === "plugins"
+          ? { ...(merged[key] as object | undefined), ...(value as object) }
+          : value;
+    }
+  }
+  return merged;
 }
 
 /** `command` wrapped so the Windows certificate exists only while it runs (scripts/windows-signing.ps1). */

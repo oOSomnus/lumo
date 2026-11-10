@@ -29,8 +29,8 @@ import type {
   ParentMessage,
   ViewerMessage,
 } from "./epub-protocol";
-import { watchPageKeys } from "./page-keys";
-import type { PageStep } from "./page-keys";
+import { watchReaderKeys } from "./page-keys";
+import type { ReaderShortcut } from "./page-keys";
 import { STYLE_KEY, injectStyle, readingCss } from "./epub-style";
 import { flattenEpubToc } from "./epub-toc";
 
@@ -80,10 +80,10 @@ let styleTurn: Promise<unknown> = Promise.resolve();
 
 const post = (message: ViewerMessage): void => window.parent.postMessage(message, location.origin);
 
-/** A plain arrow key press in the book: the reader page turns the page, so its own rules (pinned ranges, bounds, serialized moves) apply. */
-function forwardKey(session: Session, direction: PageStep): boolean {
+/** A reading shortcut in the book: the reader page acts on it, so its own rules (pinned ranges, bounds, serialized moves) apply. */
+function forwardKey(session: Session, shortcut: ReaderShortcut): boolean {
   if (current !== session || session.closed) return false;
-  post({ type: "step", generation: session.generation, direction });
+  post({ type: "shortcut", generation: session.generation, shortcut });
   return true;
 }
 
@@ -578,7 +578,7 @@ async function open(generation: number, bytes: ArrayBuffer): Promise<void> {
       }
       session.keyStops.set(
         contents.document,
-        watchPageKeys(contents.document, (direction) => forwardKey(session, direction)),
+        watchReaderKeys(contents.document, (shortcut) => forwardKey(session, shortcut)),
       );
     });
     current = session;
@@ -638,4 +638,4 @@ window.addEventListener("message", (event: MessageEvent<ParentMessage | null>) =
 post({ type: "viewer-ready" });
 
 // Focus can also rest on the viewer page itself, outside any section.
-watchPageKeys(document, (direction) => (current ? forwardKey(current, direction) : false));
+watchReaderKeys(document, (shortcut) => (current ? forwardKey(current, shortcut) : false));

@@ -1,16 +1,55 @@
-// Left and right arrow keys turn the page. Plain DOM, no imports: the sandboxed EPUB viewer bundles this file too.
+// Reader keyboard shortcuts. Plain DOM, no imports: the sandboxed EPUB viewer bundles this file too.
 
 export type PageStep = "next" | "prev";
 
-/** The page a plain left or right key press turns to; any modifier or an IME composition leaves the key alone. */
-export function pageStep(
-  event: Pick<KeyboardEvent, "key" | "altKey" | "ctrlKey" | "metaKey" | "shiftKey" | "isComposing">,
-): PageStep | null {
-  if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.isComposing) {
-    return null;
+export type LayoutPreset = 1 | 2 | 3 | 4 | 5;
+
+export type ReaderShortcut =
+  | { type: "step"; direction: PageStep }
+  | { type: "translate" }
+  | { type: "layout"; preset: LayoutPreset }
+  | { type: "toggle-immersive" }
+  | { type: "exit-immersive" };
+
+type ShortcutEvent = Pick<
+  KeyboardEvent,
+  | "key"
+  | "code"
+  | "altKey"
+  | "ctrlKey"
+  | "metaKey"
+  | "shiftKey"
+  | "isComposing"
+  | "repeat"
+>;
+
+/** The reading command a key press asks for; null leaves the key to the page. */
+export function readerShortcut(event: ShortcutEvent): ReaderShortcut | null {
+  if (event.isComposing || event.altKey) return null;
+  const primary = event.ctrlKey || event.metaKey;
+  if (event.key === "Escape" && !primary && !event.shiftKey) {
+    return { type: "exit-immersive" };
   }
-  if (event.key === "ArrowRight") return "next";
-  if (event.key === "ArrowLeft") return "prev";
+  if (
+    event.key.toLowerCase() === "f" &&
+    !primary &&
+    !event.shiftKey &&
+    !event.repeat
+  ) {
+    return { type: "toggle-immersive" };
+  }
+  if (primary) {
+    const digit = /^Digit([1-5])$/.exec(event.code)?.[1];
+    if (!digit || event.repeat) return null;
+    return { type: "layout", preset: Number(digit) as LayoutPreset };
+  }
+  if (event.key === "Enter") {
+    if (event.repeat || event.shiftKey) return null;
+    return { type: "translate" };
+  }
+  if (event.shiftKey) return null;
+  if (event.key === "ArrowRight") return { type: "step", direction: "next" };
+  if (event.key === "ArrowLeft") return { type: "step", direction: "prev" };
   return null;
 }
 
@@ -45,6 +84,30 @@ const PLAIN_INPUTS: Record<string, true> = {
   hidden: true,
 };
 
+// Roles that already turn Enter into their own action.
+const ENTER_ROLES: Record<string, true> = {
+  ...ARROW_ROLES,
+  button: true,
+  checkbox: true,
+  link: true,
+  menuitem: true,
+  menuitemcheckbox: true,
+  menuitemradio: true,
+  option: true,
+  radio: true,
+  switch: true,
+  tab: true,
+};
+
+const ENTER_ELEMENTS: Record<string, true> = {
+  a: true,
+  button: true,
+  input: true,
+  select: true,
+  summary: true,
+  textarea: true,
+};
+
 interface NodeLike {
   localName?: string;
   type?: string;
@@ -73,20 +136,38 @@ export function ownsArrowKeys(target: EventTarget | null): boolean {
   return false;
 }
 
+/** True when the focused control turns Enter into its own action instead of translating the page. */
+export function ownsEnterKeys(target: EventTarget | null): boolean {
+  for (
+    let node = target as NodeLike | null;
+    node && typeof node.getAttribute === "function";
+    node = node.parentElement ?? null
+  ) {
+    if (node.isContentEditable) return true;
+    if (node.localName && ENTER_ELEMENTS[node.localName] === true) return true;
+    const roles = node.getAttribute("role")?.split(/\s+/);
+    if (roles?.some((role) => ENTER_ROLES[role] === true)) return true;
+  }
+  return false;
+}
+
 /**
- * Listens in the capture phase of `doc` for a plain left or right key press that no control needs.
- * `handle` returns true when it took the page turn; the key is then consumed, so nothing later
+ * Listens in the capture phase of `doc` for a reader shortcut that no control needs.
+ * `handle` returns true when it took the shortcut; the key is then consumed, so nothing later
  * in the page (the PDF viewer's own key handler, scrolling) acts on it a second time.
  */
-export function watchPageKeys(
+export function watchReaderKeys(
   doc: Document,
-  handle: (direction: PageStep, event: KeyboardEvent) => boolean,
+  handle: (shortcut: ReaderShortcut, event: KeyboardEvent) => boolean,
 ): () => void {
   const onKeyDown = (event: KeyboardEvent): void => {
     if (event.defaultPrevented) return;
-    const direction = pageStep(event);
-    if (!direction || ownsArrowKeys(event.target)) return;
-    if (!handle(direction, event)) return;
+    const shortcut = readerShortcut(event);
+    if (!shortcut) return;
+    if (shortcut.type === "step" && ownsArrowKeys(event.target)) return;
+    if (shortcut.type === "translate" && ownsEnterKeys(event.target)) return;
+    if (shortcut.type === "toggle-immersive" && ownsEnterKeys(event.target)) return;
+    if (!handle(shortcut, event)) return;
     event.preventDefault();
     event.stopPropagation();
   };

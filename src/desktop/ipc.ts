@@ -26,6 +26,10 @@ export const launcher = {
   copy: () => invoke<void>("copy_webui_url"),
   retry: () => invoke<void>("retry_start"),
   quit: () => invoke<void>("confirm_exit"),
+  checkUpdates: () => invoke<void>("check_updates"),
+  downloadUpdate: () => invoke<void>("download_update"),
+  installUpdate: () => invoke<void>("install_update"),
+  openUpdateDownload: () => invoke<void>("open_update_download"),
   onState: (handler: (snapshot: LauncherSnapshot) => void): Promise<UnlistenFn> =>
     listen<LauncherSnapshot>("launcher-state", (event) => handler(event.payload)),
   onQuitRequested: (handler: () => void): Promise<UnlistenFn> =>

@@ -992,15 +992,20 @@ test("Typst repair goes on round after round until the page compiles, and every 
   expect(saves).toEqual([source(3)]);
   expect(await (await lumo.api.get(path)).json()).toMatchObject({ typst: source(3) });
 
-  await expect(panel.locator("details")).toHaveCount(3);
-  await expect(panel.locator("details").nth(1).locator(".typst-repair-after")).toHaveText(paragraphs[1][1]);
+  // Repair history is hidden in the default page view; Page details opens it.
+  await page.getByRole("button", { name: "Page details", exact: true }).click();
+  const savedPanel = page
+    .getByRole("dialog", { name: "Page details" })
+    .locator(".typst-repair");
+  await expect(savedPanel.locator("details")).toHaveCount(3);
+  await expect(savedPanel.locator("details").nth(1).locator(".typst-repair-after")).toHaveText(paragraphs[1][1]);
   // Once the page is saved every round is folded; opening one shows its coloured before/after lines.
-  await panel.locator("details").nth(1).locator("summary").click();
+  await savedPanel.locator("details").nth(1).locator("summary").click();
   await expect(
-    panel.locator("details").nth(1).locator(".typst-repair-after span[style*='color']").first(),
+    savedPanel.locator("details").nth(1).locator(".typst-repair-after span[style*='color']").first(),
   ).toBeVisible();
-  await expect(panel.locator("details").nth(1).locator("pre").last()).toContainText("line 3, column 4");
-  await expect(panel.locator(".typst-repair-outcome")).toHaveText("Saved");
+  await expect(savedPanel.locator("details").nth(1).locator("pre").last()).toContainText("line 3, column 4");
+  await expect(savedPanel.locator(".typst-repair-outcome")).toHaveText("Saved");
   // The request for round 3 also carried what round 2 had changed.
   expect(requests[3]!.repair?.diagnostics).toContain(paragraphs[1][1]);
 });
@@ -1038,7 +1043,10 @@ test("Typst repair keeps the details of the latest five rounds and says how many
 
   expect(requests).toHaveLength(9);
   expect(saves).toEqual([fixed]);
-  const panel = page.locator(".typst-repair");
+  await page.getByRole("button", { name: "Page details", exact: true }).click();
+  const panel = page
+    .getByRole("dialog", { name: "Page details" })
+    .locator(".typst-repair");
   await expect(panel.locator(".typst-repair-summary")).toContainText("Round 8");
   await expect(panel.locator("details")).toHaveCount(5);
   await expect(panel.locator("details summary").first()).toContainText("Round 4");

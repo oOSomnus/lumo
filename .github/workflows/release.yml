@@ -73,7 +73,7 @@ jobs:
           pattern: release-*
           path: release-input
 
-      - name: Assemble the ten installers, notices and checksums
+      - name: Assemble installers, signed update packages, notices and checksums
         run: bun scripts/release.ts finalize release-input release-final
 
       - name: Write the release notes
@@ -90,6 +90,8 @@ jobs:
             echo "| Linux x64, ARM64 | lumo-${TAG}-linux-<arch>.deb, .rpm, .AppImage | A desktop session, a default browser and WebKitGTK 4.1 (Ubuntu 22.04 or Debian 12 or newer) |"
             echo
             echo "Install, first launch, uninstall and the SmartScreen / Gatekeeper prompts are described in the README. Your library and credentials live in the data directory and are kept when you uninstall or upgrade."
+            echo
+            echo "Windows, macOS and AppImage builds check this release's signed \`latest.json\` feed for updates. You can still download and verify the installers above; deb and rpm builds open this page from their update area."
             echo
             echo "## Signing status of this release"
             echo
