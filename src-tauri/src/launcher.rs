@@ -10,8 +10,6 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::updater::LauncherUpdateState;
-
 pub const LOG_LIMIT: usize = 200;
 pub const STARTUP_TIMEOUT_SECS: u64 = 45;
 pub const SHUTDOWN_TIMEOUT_SECS: u64 = 35;
@@ -52,6 +50,48 @@ pub enum Level {
     Info,
     Warn,
     Error,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdatePhase {
+    Disabled,
+    #[default]
+    Idle,
+    Checking,
+    Current,
+    Available,
+    Downloading,
+    Ready,
+    Installing,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InstallMode {
+    #[default]
+    InApp,
+    Download,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateError {
+    CheckFailed,
+    DownloadFailed,
+    ShutdownFailed,
+    InstallFailed,
+}
+
+/// The panel's update contract; it never contains a plugin object or downloaded bytes.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LauncherUpdateState {
+    pub phase: UpdatePhase,
+    pub version: Option<String>,
+    pub install_mode: InstallMode,
+    pub error_code: Option<UpdateError>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -225,6 +265,77 @@ pub enum StopPlan {
     SendShutdown { generation: u64 },
 }
 
+/// What the adapter does with the checked update after a check completes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckResourcePlan {
+    KeepAvailable,
+    ClearAvailable,
+    StoreAvailable,
+}
+
+/// What the adapter does with the verified bytes after a download completes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DownloadResourcePlan {
+    KeepAvailable,
+    StorePending,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum UpdateStatus {
+    Disabled,
+    Idle,
+    Checking,
+    Current,
+    Available(String),
+    Downloading(String),
+    Ready(String),
+    Installing(Option<String>),
+    Failed {
+        version: Option<String>,
+        error: UpdateError,
+    },
+}
+
+struct UpdateLifecycle {
+    enabled: bool,
+    mode: InstallMode,
+    checking: bool,
+    downloading: bool,
+    installing: bool,
+    status: UpdateStatus,
+}
+
+impl UpdateLifecycle {
+    fn snapshot(&self, version: &'static str) -> LauncherUpdateState {
+        let current = || Some(version.to_owned());
+        let (phase, reported, error_code) = match &self.status {
+            UpdateStatus::Disabled => (UpdatePhase::Disabled, None, None),
+            UpdateStatus::Idle => (UpdatePhase::Idle, current(), None),
+            UpdateStatus::Checking => (UpdatePhase::Checking, current(), None),
+            UpdateStatus::Current => (UpdatePhase::Current, current(), None),
+            UpdateStatus::Available(offered) => {
+                (UpdatePhase::Available, Some(offered.clone()), None)
+            }
+            UpdateStatus::Downloading(offered) => {
+                (UpdatePhase::Downloading, Some(offered.clone()), None)
+            }
+            UpdateStatus::Ready(offered) => (UpdatePhase::Ready, Some(offered.clone()), None),
+            UpdateStatus::Installing(installing) => {
+                (UpdatePhase::Installing, installing.clone(), None)
+            }
+            UpdateStatus::Failed { version, error } => {
+                (UpdatePhase::Failed, version.clone(), Some(*error))
+            }
+        };
+        LauncherUpdateState {
+            phase,
+            version: reported,
+            install_mode: self.mode,
+            error_code,
+        }
+    }
+}
+
 pub struct State {
     version: &'static str,
     revision: u64,
@@ -235,14 +346,15 @@ pub struct State {
     data_directory: Option<String>,
     ui_locale: Option<&'static str>,
     failure_code: Option<&'static str>,
-    update: LauncherUpdateState,
+    update: UpdateLifecycle,
+    exit_allowed: bool,
     stop_purpose: Option<StopPurpose>,
     stop_confirmed: bool,
     logs: VecDeque<LogEntry>,
 }
 
 impl State {
-    pub fn new(version: &'static str) -> Self {
+    pub fn new(version: &'static str, enabled: bool, mode: InstallMode) -> Self {
         Self {
             version,
             revision: 0,
@@ -253,11 +365,23 @@ impl State {
             data_directory: None,
             ui_locale: None,
             failure_code: None,
-            update: LauncherUpdateState::disabled(),
+            update: UpdateLifecycle {
+                enabled,
+                mode,
+                checking: false,
+                downloading: false,
+                installing: false,
+                status: UpdateStatus::Disabled,
+            },
+            exit_allowed: false,
             stop_purpose: None,
             stop_confirmed: false,
             logs: VecDeque::new(),
         }
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -270,7 +394,7 @@ impl State {
             ui_locale: self.ui_locale,
             failure_code: self.failure_code,
             can_retry: self.can_retry(),
-            update: self.update.clone(),
+            update: self.update.snapshot(self.version),
             logs: self.logs.iter().cloned().collect(),
         }
     }
@@ -455,10 +579,174 @@ impl State {
         overdue
     }
 
-    /// Records the launcher-side update lifecycle shown in the panel.
-    pub fn set_update(&mut self, update: LauncherUpdateState) {
-        self.update = update;
+    /// Puts the panel at its starting point. True when the adapter should run the update loop.
+    pub fn initialize_updates(&mut self) -> bool {
+        let enabled = self.update.enabled;
+        self.update.status = if enabled {
+            UpdateStatus::Idle
+        } else {
+            UpdateStatus::Disabled
+        };
         self.revision += 1;
+        enabled
+    }
+
+    pub fn begin_update_check(&mut self, has_pending: bool) -> bool {
+        let update = &mut self.update;
+        if !update.enabled
+            || update.checking
+            || update.downloading
+            || update.installing
+            || has_pending
+        {
+            return false;
+        }
+        update.checking = true;
+        update.status = UpdateStatus::Checking;
+        self.revision += 1;
+        true
+    }
+
+    pub fn finish_update_check(
+        &mut self,
+        result: Result<Option<String>, ()>,
+    ) -> CheckResourcePlan {
+        self.update.checking = false;
+        if self.phase == Phase::Stopping {
+            return CheckResourcePlan::ClearAvailable;
+        }
+        // A download or install admitted during the check owns the newer panel state.
+        if !matches!(self.update.status, UpdateStatus::Checking) {
+            return CheckResourcePlan::KeepAvailable;
+        }
+        match result {
+            Ok(Some(version)) => {
+                self.update.status = UpdateStatus::Available(version);
+                self.revision += 1;
+                CheckResourcePlan::StoreAvailable
+            }
+            Ok(None) => {
+                self.update.status = UpdateStatus::Current;
+                self.revision += 1;
+                CheckResourcePlan::ClearAvailable
+            }
+            Err(()) => {
+                self.update.status = UpdateStatus::Failed {
+                    version: Some(self.version.to_owned()),
+                    error: UpdateError::CheckFailed,
+                };
+                self.revision += 1;
+                CheckResourcePlan::KeepAvailable
+            }
+        }
+    }
+
+    /// A download may start while a check is still running; only an active download or install blocks it.
+    pub fn begin_update_download(
+        &mut self,
+        available_version: Option<&str>,
+        has_pending: bool,
+    ) -> bool {
+        let update = &mut self.update;
+        if !update.enabled || update.downloading || update.installing || has_pending {
+            return false;
+        }
+        let Some(version) = available_version else {
+            return false;
+        };
+        update.downloading = true;
+        update.status = UpdateStatus::Downloading(version.to_owned());
+        self.revision += 1;
+        true
+    }
+
+    pub fn finish_update_download(
+        &mut self,
+        version: String,
+        succeeded: bool,
+    ) -> DownloadResourcePlan {
+        self.update.downloading = false;
+        if self.phase == Phase::Stopping {
+            return DownloadResourcePlan::KeepAvailable;
+        }
+        if succeeded {
+            self.update.status = UpdateStatus::Ready(version);
+            self.revision += 1;
+            DownloadResourcePlan::StorePending
+        } else {
+            self.update.status = UpdateStatus::Failed {
+                version: Some(version),
+                error: UpdateError::DownloadFailed,
+            };
+            self.revision += 1;
+            DownloadResourcePlan::KeepAvailable
+        }
+    }
+
+    /// The early install check, before acquiring the update resources.
+    pub fn can_install_update(&self) -> bool {
+        self.update.enabled
+            && self.update.mode == InstallMode::InApp
+            && self.phase != Phase::Stopping
+    }
+
+    pub fn begin_update_install(&mut self, pending_version: Option<&str>) -> bool {
+        let update = &mut self.update;
+        if update.installing {
+            return false;
+        }
+        let Some(version) = pending_version else {
+            return false;
+        };
+        update.installing = true;
+        update.status = UpdateStatus::Installing(Some(version.to_owned()));
+        self.revision += 1;
+        true
+    }
+
+    pub fn show_update_installing(&mut self, version: Option<String>) {
+        self.update.status = UpdateStatus::Installing(version);
+        self.revision += 1;
+    }
+
+    /// The installer refused: its bytes are consumed, so a retry downloads again.
+    pub fn finish_update_install(&mut self, version: Option<String>) {
+        self.update.installing = false;
+        self.update.status = UpdateStatus::Failed {
+            version,
+            error: UpdateError::InstallFailed,
+        };
+        self.revision += 1;
+    }
+
+    /// The sidecar did not stop cleanly; the verified bytes stay for another attempt.
+    pub fn update_shutdown_failed(&mut self, version: Option<String>) {
+        self.update.installing = false;
+        self.update.status = UpdateStatus::Failed {
+            version,
+            error: UpdateError::ShutdownFailed,
+        };
+        self.revision += 1;
+    }
+
+    pub fn set_exit_allowed(&mut self, allowed: bool) {
+        self.exit_allowed = allowed;
+    }
+
+    pub fn can_exit(&self) -> bool {
+        self.exit_allowed
+    }
+
+    /// The release page to open, preferring what was already downloaded.
+    pub fn update_download_version<'a>(
+        &self,
+        pending: Option<&'a str>,
+        available: Option<&'a str>,
+    ) -> Option<&'a str> {
+        if self.update.mode != InstallMode::Download {
+            return None;
+        }
+        pending.or(available)
     }
 
     /// An install could not start or finish: keep the launcher usable for a retry.
@@ -496,7 +784,7 @@ mod tests {
     const READY: &str = r#"{"type":"ready","dataDirectory":"/data/lumo","uiLocale":"zh-CN"}"#;
 
     fn started() -> (State, u64) {
-        let mut state = State::new("9.9.9");
+        let mut state = State::new("9.9.9", false, InstallMode::Download);
         let generation = state.begin_start().expect("first start is allowed");
         (state, generation)
     }
@@ -745,7 +1033,7 @@ mod tests {
 
     #[test]
     fn quitting_without_a_server_exits_immediately() {
-        let mut state = State::new("9.9.9");
+        let mut state = State::new("9.9.9", false, InstallMode::Download);
         assert_eq!(state.begin_stop(StopPurpose::Quit), StopPlan::ExitNow);
 
         let (mut state, generation) = started();
@@ -810,7 +1098,7 @@ mod tests {
 
     #[test]
     fn spawn_failure_is_reported_and_can_be_retried() {
-        let mut state = State::new("9.9.9");
+        let mut state = State::new("9.9.9", false, InstallMode::Download);
         state.begin_start().unwrap();
         state.spawn_failed(1, "sidecar_missing");
         let snapshot = state.snapshot();
@@ -841,6 +1129,357 @@ mod tests {
             assert!(now > seen, "{line}");
             seen = now;
         }
+    }
+
+    fn enabled_state(mode: InstallMode) -> State {
+        let mut state = State::new("9.9.9", true, mode);
+        assert!(state.initialize_updates());
+        state
+    }
+
+    /// The adapter's install admission order: early eligibility, then resource admission.
+    fn admit_install(state: &mut State, pending: Option<&str>) -> bool {
+        state.can_install_update() && state.begin_update_install(pending)
+    }
+
+    fn running_with_updates(mode: InstallMode) -> (State, u64) {
+        let mut state = enabled_state(mode);
+        let generation = state.begin_start().expect("first start is allowed");
+        assert_eq!(state.on_line(1, generation, LINK), LineOutcome::Changed);
+        assert_eq!(state.on_line(2, generation, READY), LineOutcome::Changed);
+        (state, generation)
+    }
+
+    #[test]
+    fn disabled_updates_never_admit_work() {
+        let mut state = State::new("9.9.9", false, InstallMode::InApp);
+        assert!(!state.initialize_updates());
+        let snapshot = state.snapshot().update;
+        assert_eq!(snapshot.phase, UpdatePhase::Disabled);
+        assert!(snapshot.version.is_none());
+        assert_eq!(snapshot.install_mode, InstallMode::InApp);
+
+        assert!(!state.begin_update_check(false));
+        assert!(!state.begin_update_download(Some("2.0.0"), false));
+        assert!(!admit_install(&mut state, Some("2.0.0")));
+        assert_eq!(state.snapshot().update.phase, UpdatePhase::Disabled);
+    }
+
+    #[test]
+    fn enabled_updates_start_idle_with_the_running_version() {
+        let state = enabled_state(InstallMode::Download);
+        let snapshot = state.snapshot().update;
+        assert_eq!(snapshot.phase, UpdatePhase::Idle);
+        assert_eq!(snapshot.version.as_deref(), Some("9.9.9"));
+        assert_eq!(snapshot.install_mode, InstallMode::Download);
+    }
+
+    #[test]
+    fn a_check_offers_an_update_and_a_failed_check_keeps_the_offer() {
+        let mut state = enabled_state(InstallMode::InApp);
+        assert!(state.begin_update_check(false));
+        assert_eq!(state.snapshot().update.phase, UpdatePhase::Checking);
+
+        assert_eq!(
+            state.finish_update_check(Ok(Some("2.0.0".into()))),
+            CheckResourcePlan::StoreAvailable
+        );
+        let snapshot = state.snapshot().update;
+        assert_eq!(snapshot.phase, UpdatePhase::Available);
+        assert_eq!(snapshot.version.as_deref(), Some("2.0.0"));
+
+        assert!(
+            state.begin_update_check(false),
+            "an offered update does not block another check"
+        );
+        assert_eq!(
+            state.finish_update_check(Err(())),
+            CheckResourcePlan::KeepAvailable
+        );
+        let snapshot = state.snapshot().update;
+        assert_eq!(snapshot.phase, UpdatePhase::Failed);
+        assert_eq!(snapshot.version.as_deref(), Some("9.9.9"));
+        assert_eq!(snapshot.error_code, Some(UpdateError::CheckFailed));
+
+        assert!(state.begin_update_check(false));
+        assert_eq!(state.finish_update_check(Ok(None)), CheckResourcePlan::ClearAvailable);
+        let snapshot = state.snapshot().update;
+        assert_eq!(snapshot.phase, UpdatePhase::Current);
+        assert_eq!(snapshot.version.as_deref(), Some("9.9.9"));
+        assert!(snapshot.error_code.is_none());
+    }
+
+    #[test]
+    fn a_check_that_finishes_while_stopping_changes_nothing() {
+        let (mut state, generation) = running_with_updates(InstallMode::InApp);
+        assert!(state.begin_update_check(false));
+        state.begin_stop(StopPurpose::Quit);
+        let revision = state.snapshot().revision;
+        assert_eq!(
+            state.finish_update_check(Ok(Some("2.0.0".into()))),
+            CheckResourcePlan::ClearAvailable
+        );
+        assert_eq!(state.snapshot().revision, revision);
+        assert!(state.begin_update_check(false), "checking was released");
+        assert_eq!(state.snapshot().update.phase, UpdatePhase::Checking);
+        assert_eq!(state.on_terminated(3, generation, true), Termination::Quit);
+    }
+
+    #[test]
+    fn a_download_may_start_during_a_check_and_pending_blocks_a_second() {
+        for result in [Ok(Some("3.0.0".into())), Ok(None), Err(())] {
+            let mut state = enabled_state(InstallMode::InApp);
+            assert!(state.begin_update_check(false));
+            assert!(state.begin_update_download(Some("2.0.0"), false));
+            assert_eq!(state.snapshot().update.phase, UpdatePhase::Downloading);
+            assert_eq!(
+                state.finish_update_download("2.0.0".into(), true),
+                DownloadResourcePlan::StorePending
+            );
+            let snapshot = state.snapshot().update;
+            assert_eq!(snapshot.phase, UpdatePhase::Ready);
+            assert_eq!(snapshot.version.as_deref(), Some("2.0.0"));
+
+            assert!(!state.begin_update_check(true));
+            assert!(!state.begin_update_download(Some("2.0.0"), true));
+            assert!(!state.begin_update_install(None));
+
+            // The check completes after the download: the newer download owns the panel state.
+            assert_eq!(
+                state.finish_update_check(result),
+                CheckResourcePlan::KeepAvailable
+            );
+            let snapshot = state.snapshot().update;
+            assert_eq!(snapshot.phase, UpdatePhase::Ready);
+            assert_eq!(snapshot.version.as_deref(), Some("2.0.0"));
+            assert!(snapshot.error_code.is_none());
+            assert!(admit_install(&mut state, Some("2.0.0")));
+        }
+    }
+
+    #[test]
+    fn late_checks_preserve_newer_download_and_install_state() {
+        for result in [Ok(Some("3.0.0".into())), Ok(None), Err(())] {
+            let mut downloading = enabled_state(InstallMode::InApp);
+            assert!(downloading.begin_update_check(false));
+            assert!(downloading.begin_update_download(Some("2.0.0"), false));
+            let before = downloading.snapshot();
+            assert_eq!(
+                downloading.finish_update_check(result.clone()),
+                CheckResourcePlan::KeepAvailable
+            );
+            let after = downloading.snapshot();
+            assert_eq!(after.update.phase, before.update.phase);
+            assert_eq!(after.update.version, before.update.version);
+            assert_eq!(after.update.error_code, before.update.error_code);
+            assert_eq!(after.revision, before.revision);
+            assert_eq!(
+                downloading.finish_update_download("2.0.0".into(), true),
+                DownloadResourcePlan::StorePending
+            );
+            let snapshot = downloading.snapshot().update;
+            assert_eq!(snapshot.phase, UpdatePhase::Ready);
+            assert_eq!(snapshot.version.as_deref(), Some("2.0.0"));
+
+            let mut failed = enabled_state(InstallMode::InApp);
+            assert!(failed.begin_update_check(false));
+            assert!(failed.begin_update_download(Some("2.0.0"), false));
+            assert_eq!(
+                failed.finish_update_download("2.0.0".into(), false),
+                DownloadResourcePlan::KeepAvailable
+            );
+            let before = failed.snapshot();
+            assert_eq!(
+                failed.finish_update_check(result.clone()),
+                CheckResourcePlan::KeepAvailable
+            );
+            let after = failed.snapshot();
+            assert_eq!(after.update.phase, before.update.phase);
+            assert_eq!(after.update.version, before.update.version);
+            assert_eq!(after.update.error_code, before.update.error_code);
+            assert_eq!(after.revision, before.revision);
+            assert!(failed.begin_update_check(false), "the check gate was released");
+
+            let mut installing = enabled_state(InstallMode::InApp);
+            assert!(installing.begin_update_check(false));
+            assert!(installing.begin_update_download(Some("2.0.0"), false));
+            assert_eq!(
+                installing.finish_update_download("2.0.0".into(), true),
+                DownloadResourcePlan::StorePending
+            );
+            assert!(installing.begin_update_install(Some("2.0.0")));
+            let before = installing.snapshot();
+            assert_eq!(
+                installing.finish_update_check(result),
+                CheckResourcePlan::KeepAvailable
+            );
+            let after = installing.snapshot();
+            assert_eq!(after.update.phase, before.update.phase);
+            assert_eq!(after.update.version, before.update.version);
+            assert_eq!(after.update.error_code, before.update.error_code);
+            assert_eq!(after.revision, before.revision);
+            assert!(!installing.begin_update_install(Some("2.0.0")));
+        }
+    }
+
+    #[test]
+    fn a_failed_or_stopped_download_keeps_the_offered_update() {
+        let mut state = enabled_state(InstallMode::InApp);
+        assert!(state.begin_update_download(Some("2.0.0"), false));
+        assert_eq!(
+            state.finish_update_download("2.0.0".into(), false),
+            DownloadResourcePlan::KeepAvailable
+        );
+        let snapshot = state.snapshot().update;
+        assert_eq!(snapshot.phase, UpdatePhase::Failed);
+        assert_eq!(snapshot.error_code, Some(UpdateError::DownloadFailed));
+        assert_eq!(snapshot.version.as_deref(), Some("2.0.0"));
+
+        let mut state = enabled_state(InstallMode::InApp);
+        assert!(!state.begin_update_download(None, false));
+        assert!(state.begin_update_download(Some("2.0.0"), false));
+        let revision = state.snapshot().revision;
+        state.begin_stop(StopPurpose::Quit);
+        assert_eq!(
+            state.finish_update_download("2.0.0".into(), true),
+            DownloadResourcePlan::KeepAvailable
+        );
+        let snapshot = state.snapshot().update;
+        assert_eq!(snapshot.phase, UpdatePhase::Downloading);
+        assert_eq!(state.snapshot().revision, revision + 1);
+    }
+
+    #[test]
+    fn install_admission_publishes_before_the_update_stop() {
+        let (mut state, generation) = running_with_updates(InstallMode::InApp);
+        assert!(state.can_install_update());
+        assert!(!state.begin_update_install(None));
+
+        assert!(state.begin_update_install(Some("2.0.0")));
+        let snapshot = state.snapshot().update;
+        assert_eq!(snapshot.phase, UpdatePhase::Installing);
+        assert_eq!(snapshot.version.as_deref(), Some("2.0.0"));
+        assert!(!state.begin_update_install(Some("2.0.0")));
+
+        assert_eq!(
+            state.begin_stop(StopPurpose::Update),
+            StopPlan::SendShutdown { generation }
+        );
+        state.on_line(3, generation, r#"{"type":"stopped"}"#);
+        assert_eq!(state.on_terminated(4, generation, true), Termination::UpdateReady);
+    }
+
+    #[test]
+    fn only_an_in_app_build_may_install_and_not_while_stopping() {
+        let mut download = enabled_state(InstallMode::Download);
+        assert!(!admit_install(&mut download, Some("2.0.0")));
+
+        let (mut state, _) = running_with_updates(InstallMode::InApp);
+        state.begin_stop(StopPurpose::Quit);
+        assert!(!admit_install(&mut state, Some("2.0.0")));
+    }
+
+    #[test]
+    fn an_install_admitted_during_a_quit_keeps_the_existing_interleaving() {
+        let (mut state, _) = running_with_updates(InstallMode::InApp);
+        assert!(state.can_install_update());
+        state.begin_stop(StopPurpose::Quit);
+        // The early check already passed; admission does not recheck the phase.
+        assert!(state.begin_update_install(Some("2.0.0")));
+        assert_eq!(state.snapshot().update.phase, UpdatePhase::Installing);
+        assert_eq!(
+            state.begin_stop(StopPurpose::Update),
+            StopPlan::AlreadyStopping
+        );
+    }
+
+    #[test]
+    fn the_first_stop_purpose_wins_between_quit_and_install() {
+        let (mut state, _) = running_with_updates(InstallMode::InApp);
+        state.begin_stop(StopPurpose::Quit);
+        assert_eq!(
+            state.begin_stop(StopPurpose::Update),
+            StopPlan::AlreadyStopping
+        );
+
+        let (mut state, generation) = running_with_updates(InstallMode::InApp);
+        state.begin_stop(StopPurpose::Update);
+        assert_eq!(
+            state.begin_stop(StopPurpose::Quit),
+            StopPlan::AlreadyStopping
+        );
+        state.on_line(3, generation, r#"{"type":"stopped"}"#);
+        assert_eq!(state.on_terminated(4, generation, true), Termination::UpdateReady);
+    }
+
+    #[test]
+    fn install_and_shutdown_failures_publish_distinct_errors() {
+        let mut state = enabled_state(InstallMode::InApp);
+        assert!(state.begin_update_install(Some("2.0.0")));
+        state.show_update_installing(Some("2.0.0".into()));
+        state.finish_update_install(Some("2.0.0".into()));
+        let snapshot = state.snapshot().update;
+        assert_eq!(snapshot.phase, UpdatePhase::Failed);
+        assert_eq!(snapshot.error_code, Some(UpdateError::InstallFailed));
+        assert_eq!(snapshot.version.as_deref(), Some("2.0.0"));
+
+        assert!(state.begin_update_install(Some("2.0.0")));
+        state.update_shutdown_failed(Some("2.0.0".into()));
+        let snapshot = state.snapshot().update;
+        assert_eq!(snapshot.phase, UpdatePhase::Failed);
+        assert_eq!(snapshot.error_code, Some(UpdateError::ShutdownFailed));
+        assert_eq!(snapshot.version.as_deref(), Some("2.0.0"));
+    }
+
+    #[test]
+    fn an_install_failure_restores_a_stopping_launcher_to_a_retryable_failure() {
+        let (mut state, generation) = running_with_updates(InstallMode::InApp);
+        assert!(state.begin_update_install(Some("2.0.0")));
+        state.begin_stop(StopPurpose::Update);
+        state.on_line(3, generation, r#"{"type":"stopped"}"#);
+        assert_eq!(state.on_terminated(4, generation, true), Termination::UpdateReady);
+
+        state.set_exit_allowed(true);
+        assert!(state.can_exit());
+        state.set_exit_allowed(false);
+        state.finish_update_install(Some("2.0.0".into()));
+        state.update_install_failed();
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.phase, Phase::Failed);
+        assert!(snapshot.can_retry, "the sidecar has already exited");
+        assert!(!state.can_exit());
+        assert_eq!(snapshot.update.error_code, Some(UpdateError::InstallFailed));
+    }
+
+    #[test]
+    fn exit_is_permitted_only_when_the_lifecycle_says_so() {
+        let mut state = enabled_state(InstallMode::InApp);
+        assert!(!state.can_exit());
+        state.set_exit_allowed(true);
+        assert!(state.can_exit());
+        state.set_exit_allowed(false);
+        assert!(!state.can_exit());
+
+        let wire = serde_json::to_string(&state.snapshot()).unwrap();
+        assert!(!wire.contains("exitAllowed"));
+        assert!(!wire.contains("canExit"));
+    }
+
+    #[test]
+    fn download_mode_opens_the_pending_release_before_the_offered_one() {
+        let state = enabled_state(InstallMode::Download);
+        assert_eq!(
+            state.update_download_version(Some("1.9.0"), Some("2.0.0")),
+            Some("1.9.0")
+        );
+        assert_eq!(
+            state.update_download_version(None, Some("2.0.0")),
+            Some("2.0.0")
+        );
+        assert_eq!(state.update_download_version(None, None), None);
+
+        let in_app = enabled_state(InstallMode::InApp);
+        assert_eq!(in_app.update_download_version(Some("1.9.0"), None), None);
     }
 
     #[test]

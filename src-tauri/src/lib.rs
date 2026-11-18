@@ -4,7 +4,6 @@
 mod launcher;
 mod updater;
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -18,7 +17,6 @@ use launcher::{
     take_run, Level, LineOutcome, Phase, Snapshot, State, StopPlan, StopPurpose, Termination,
     SHUTDOWN_COMMAND, SHUTDOWN_TIMEOUT_SECS, STARTUP_TIMEOUT_SECS,
 };
-use updater::LauncherUpdateState;
 
 const STATE_EVENT: &str = "launcher-state";
 const QUIT_EVENT: &str = "quit-requested";
@@ -27,7 +25,6 @@ struct Shared {
     state: Mutex<State>,
     /// The running server with the generation that spawned it; see [`take_run`].
     child: Mutex<Option<(u64, CommandChild)>>,
-    quitting: AtomicBool,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -52,20 +49,23 @@ fn update<T>(app: &AppHandle, change: impl FnOnce(&mut State) -> T) -> T {
     result
 }
 
-pub(crate) fn set_update_state(app: &AppHandle, next: LauncherUpdateState) {
-    update(app, |state| state.set_update(next));
-}
-
-pub(crate) fn launcher_phase(app: &AppHandle) -> Phase {
-    lock(&app.state::<Shared>().state).phase()
-}
-
-pub(crate) fn set_quitting(app: &AppHandle, value: bool) {
-    app.state::<Shared>().quitting.store(value, Ordering::SeqCst);
-}
-
-pub(crate) fn update_install_failed(app: &AppHandle) {
-    update(app, |state| state.update_install_failed());
+/// Applies an update lifecycle transition and publishes only when it changed the snapshot.
+pub(crate) fn update_updater<T>(
+    app: &AppHandle,
+    change: impl FnOnce(&mut State) -> T,
+) -> T {
+    let shared = app.state::<Shared>();
+    let (result, snapshot) = {
+        let mut state = lock(&shared.state);
+        let before = state.revision();
+        let result = change(&mut state);
+        let snapshot = (state.revision() != before).then(|| state.snapshot());
+        (result, snapshot)
+    };
+    if let Some(snapshot) = snapshot {
+        let _ = app.emit(STATE_EVENT, snapshot);
+    }
+    result
 }
 
 fn kill_child(app: &AppHandle, generation: u64) {
@@ -79,7 +79,7 @@ fn kill_child(app: &AppHandle, generation: u64) {
 }
 
 fn finish_exit(app: &AppHandle) {
-    app.state::<Shared>().quitting.store(true, Ordering::SeqCst);
+    lock(&app.state::<Shared>().state).set_exit_allowed(true);
     app.exit(0);
 }
 
@@ -265,9 +265,12 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Shared {
-            state: Mutex::new(State::new(env!("CARGO_PKG_VERSION"))),
+            state: Mutex::new(State::new(
+                env!("CARGO_PKG_VERSION"),
+                updater::enabled(),
+                updater::install_mode(),
+            )),
             child: Mutex::new(None),
-            quitting: AtomicBool::new(false),
         })
         .manage(updater::UpdateShared::default())
         .invoke_handler(tauri::generate_handler![
@@ -298,7 +301,7 @@ pub fn run() {
 
     app.run(|app, event| {
         if let RunEvent::ExitRequested { api, .. } = event {
-            if !app.state::<Shared>().quitting.load(Ordering::SeqCst) {
+            if !lock(&app.state::<Shared>().state).can_exit() {
                 api.prevent_exit();
                 handle_quit_request(app);
             }
