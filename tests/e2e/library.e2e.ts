@@ -58,6 +58,58 @@ test("the shelf is the default screen and restores page and view", async ({
   await expect(reloaded.locator("#scaleSelect")).toHaveValue("1.5");
 });
 
+test("a failed reading-view save keeps the newest zoom and retries it", async ({
+  page,
+  lumo,
+}) => {
+  const record = await uploadPdf(lumo.api, "zoom.pdf", 2, "zoom");
+  await openApp(page, lumo.url);
+  await openFromLibrary(page, "zoom.pdf");
+  const viewer = page.frameLocator("iframe.pdf-frame");
+  await expect(viewer.locator("#scaleSelect")).toHaveValue("page-fit");
+
+  let refuse = true;
+  const aborted: string[] = [];
+  await page.route(`**/api/documents/${record.id}/view`, async (route) => {
+    if (route.request().method() === "PUT" && refuse) {
+      aborted.push(route.request().url());
+      await route.abort();
+      return;
+    }
+    await route.continue();
+  });
+
+  const banner = page
+    .locator(".app-banner.warning")
+    .filter({ hasText: "Reading view was not saved." });
+  await viewer.locator("#scaleSelect").selectOption("1.5");
+  await expect(banner).toBeVisible();
+  await expect.poll(() => aborted.length).toBeGreaterThan(0);
+  const attempts = aborted.length;
+
+  // The newer zoom is queued while the first write is still failing.
+  await viewer.locator("#scaleSelect").selectOption("2");
+  await expect.poll(() => aborted.length).toBeGreaterThan(attempts);
+
+  refuse = false;
+  // A retry may land while the failing write is still settling; repeat until it takes.
+  await expect(async () => {
+    if (await banner.isVisible()) {
+      await banner.getByRole("button", { name: "Retry" }).click();
+    }
+    const response = await lumo.api.get(`/api/documents/${record.id}/view`);
+    expect(response.ok()).toBe(true);
+    const body = (await response.json()) as {
+      view: { scaleValue?: string } | null;
+    };
+    expect(body.view?.scaleValue).toBe("2");
+  }).toPass({ timeout: 20_000 });
+
+  await openApp(page, lumo.url);
+  await openFromLibrary(page, "zoom.pdf");
+  await expect(viewer.locator("#scaleSelect")).toHaveValue("2");
+});
+
 for (const resumeVia of ["return-button", "same-book"] as const) {
   test(`late PDF page changes survive ${resumeVia}`, async ({ page, lumo }) => {
     const record = await uploadPdf(lumo.api, "late-page.pdf", 2, "late-page");

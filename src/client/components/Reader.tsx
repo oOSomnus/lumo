@@ -12,7 +12,6 @@ import {
   MAX_OUTLINE_ENTRIES,
   outlineEntriesSchema,
   outlinePageResultSchema,
-  readerViewSchema,
   TARGET_LANGUAGE_LABELS,
   type AiSettingsSnapshot,
   type DocumentRecord,
@@ -70,11 +69,11 @@ import { ViewerBridgeError, type PdfScrollLocation, type ViewerBridge } from "..
 import {
   rememberPdfScroll,
   rememberTranslationScroll,
-  sameScrollMemory,
   scrollMemoryOf,
   touchPdfScroll,
   touchTranslationScroll,
 } from "../scroll-memory";
+import { ReaderViewStore, sameReaderView } from "../reader-view";
 import { compileTypst, type TypstAsset } from "../typst";
 import { stripPlaceholderControls } from "../../shared/typst";
 import {
@@ -141,29 +140,6 @@ interface AskOptions {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
-}
-
-function sameReaderView(a: ReaderView, b: ReaderView): boolean {
-  if (a.format !== b.format) return false;
-  if (!sameScrollMemory(a.scrollMemory, b.scrollMemory)) return false;
-  if (a.format === "epub" && b.format === "epub") {
-    return (
-      a.cfi === b.cfi &&
-      a.fontSize === b.fontSize &&
-      a.fontFamily === b.fontFamily &&
-      a.lineHeight === b.lineHeight &&
-      a.theme === b.theme
-    );
-  }
-  if (a.format === "pdf" && b.format === "pdf") {
-    return (
-      a.scaleValue === b.scaleValue &&
-      a.rotation === b.rotation &&
-      a.scrollMode === b.scrollMode &&
-      a.spreadMode === b.spreadMode
-    );
-  }
-  return false;
 }
 
 function fileFormat(file: File): "pdf" | "epub" | null {
@@ -493,10 +469,33 @@ export function Reader() {
   const pendingProgressRef = useRef<Map<string | null, ReaderUpdate>>(new Map());
   const progressDrainRef = useRef<Promise<void> | null>(null);
   const initialViewRef = useRef<ReaderView>(DEFAULT_PDF_READER_VIEW);
-  const pendingViewsRef = useRef<Map<string, ReaderView>>(new Map());
-  const failedViewsRef = useRef<Map<string, ReaderView>>(new Map());
-  const savedViewsRef = useRef<Map<string, ReaderView>>(new Map());
-  const deletedViewsRef = useRef<Set<string>>(new Set());
+  const viewStoreRef = useRef<ReaderViewStore | null>(null);
+  if (viewStoreRef.current === null) {
+    viewStoreRef.current = new ReaderViewStore(
+      {
+        load: async (documentId) =>
+          (
+            await apiJson<{ view: ReaderView | null }>(
+              `/api/documents/${documentId}/view`,
+            )
+          ).view,
+        save: async (documentId, view) =>
+          (
+            await apiJson<{ view: ReaderView }>(
+              `/api/documents/${documentId}/view`,
+              jsonInit("PUT", view),
+            )
+          ).view,
+        keepalive: (documentId, view) =>
+          apiFetch(`/api/documents/${documentId}/view`, {
+            ...jsonInit("PUT", view),
+            keepalive: true,
+          }),
+      },
+      setViewSaveFailed,
+    );
+  }
+  const viewStore = viewStoreRef.current;
   const viewTouchedRef = useRef(false);
   const lastViewRef = useRef<ReaderView | null>(null);
   const runEpubCommand = useCallback(
@@ -703,8 +702,6 @@ export function Reader() {
     [changeEpubStyle],
   );
 
-  const viewTimerRef = useRef<number | null>(null);
-  const viewDrainRef = useRef<Promise<void> | null>(null);
   const workspaceRef = useRef<HTMLElement | null>(null);
   const pageBodyRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -927,86 +924,9 @@ export function Reader() {
       outlineLoadedSessionRef.current = -1;
     }
     currentDocumentRef.current = document;
-    if (document) deletedViewsRef.current.delete(document.id);
+    if (document) viewStore.selected(document.id);
     setCurrentDocument(document);
-  }, []);
-
-  const putReaderView = useCallback(
-    async (documentId: string, view: ReaderView): Promise<boolean> => {
-      try {
-        const result = await apiJson<{ view: ReaderView }>(
-          `/api/documents/${documentId}/view`,
-          jsonInit("PUT", view),
-        );
-        if (deletedViewsRef.current.has(documentId)) return true;
-        savedViewsRef.current.set(documentId, result.view);
-        failedViewsRef.current.delete(documentId);
-        if (pendingViewsRef.current.get(documentId) === view) {
-          pendingViewsRef.current.delete(documentId);
-        }
-        return true;
-      } catch {
-        if (!deletedViewsRef.current.has(documentId)) {
-          failedViewsRef.current.set(documentId, view);
-          setViewSaveFailed(true);
-        }
-        return false;
-      }
-    },
-    [],
-  );
-
-  const drainViewSaves = useCallback((): Promise<void> => {
-    if (viewDrainRef.current) return viewDrainRef.current;
-    const run = (async () => {
-      for (;;) {
-        const entry = pendingViewsRef.current.entries().next().value;
-        if (!entry) break;
-        const [documentId, view] = entry;
-        const saved = await putReaderView(documentId, view);
-        if (!saved && pendingViewsRef.current.get(documentId) === view) {
-          pendingViewsRef.current.delete(documentId);
-        }
-      }
-      setViewSaveFailed(
-        pendingViewsRef.current.size > 0 || failedViewsRef.current.size > 0,
-      );
-    })().finally(() => {
-      viewDrainRef.current = null;
-    });
-    viewDrainRef.current = run;
-    return run;
-  }, [putReaderView]);
-
-  const scheduleViewSave = useCallback(() => {
-    if (viewTimerRef.current !== null) window.clearTimeout(viewTimerRef.current);
-    viewTimerRef.current = window.setTimeout(() => {
-      viewTimerRef.current = null;
-      void drainViewSaves();
-    }, 250);
-  }, [drainViewSaves]);
-
-  const flushViewSaves = useCallback(async (): Promise<boolean> => {
-    if (viewTimerRef.current !== null) {
-      window.clearTimeout(viewTimerRef.current);
-      viewTimerRef.current = null;
-    }
-    await drainViewSaves();
-    return (
-      pendingViewsRef.current.size === 0 && failedViewsRef.current.size === 0
-    );
-  }, [drainViewSaves]);
-
-  const retryViewSaves = useCallback(() => {
-    for (const [documentId, view] of failedViewsRef.current) {
-      if (!pendingViewsRef.current.has(documentId)) {
-        pendingViewsRef.current.set(documentId, view);
-      }
-    }
-    failedViewsRef.current.clear();
-    setViewSaveFailed(false);
-    void drainViewSaves();
-  }, [drainViewSaves]);
+  }, [viewStore]);
 
   const currentViewSnapshot = useCallback((): ReaderView | null => {
     if (!viewerReadyRef.current) return null;
@@ -1035,12 +955,8 @@ export function Reader() {
     const document = currentDocumentRef.current;
     const view = currentViewSnapshot();
     if (!document || !view || previewOnlyRef.current) return;
-    const saved = savedViewsRef.current.get(document.id);
-    if (saved && sameReaderView(saved, view)) return;
-    pendingViewsRef.current.set(document.id, view);
-    failedViewsRef.current.delete(document.id);
-    scheduleViewSave();
-  }, [currentViewSnapshot, scheduleViewSave]);
+    viewStore.scrolled(document.id, view);
+  }, [currentViewSnapshot, viewStore]);
 
   const attemptPdfRestore = useCallback((): void => {
     const token = pdfRestoreRef.current;
@@ -1108,14 +1024,10 @@ export function Reader() {
   const commitCurrentView = useCallback(async (): Promise<boolean> => {
     const document = currentDocumentRef.current;
     const view = currentViewSnapshot();
-    if (document && view) {
-      const saved = savedViewsRef.current.get(document.id);
-      if (!saved || !sameReaderView(saved, view)) {
-        pendingViewsRef.current.set(document.id, view);
-      }
-    }
-    return flushViewSaves();
-  }, [currentViewSnapshot, flushViewSaves]);
+    return viewStore.flush(
+      document && view ? { documentId: document.id, view } : undefined,
+    );
+  }, [currentViewSnapshot, viewStore]);
 
   const resolveInitialView = useCallback(
     async (
@@ -1123,36 +1035,24 @@ export function Reader() {
       sessionAtStart: number,
       fallback: ReaderView = DEFAULT_PDF_READER_VIEW,
     ): Promise<ReaderView> => {
-      const cached =
-        pendingViewsRef.current.get(documentId) ??
-        savedViewsRef.current.get(documentId);
-      if (cached) {
-        if (cached.scrollMemory) {
-          scrollMemoryRef.current.set(documentId, cached.scrollMemory);
-        }
-        return cached;
-      }
       try {
-        const result = await apiJson<{ view: ReaderView | null }>(
-          `/api/documents/${documentId}/view`,
+        const read = await viewStore.load(
+          documentId,
+          () => sessionAtStart === sessionRef.current,
         );
-        if (sessionAtStart !== sessionRef.current) return fallback;
-        const stored = result.view
-          ? readerViewSchema.safeParse(result.view)
-          : null;
-        setViewRestoreFailed(false);
-        if (!stored?.success) return fallback;
-        savedViewsRef.current.set(documentId, stored.data);
-        if (stored.data.scrollMemory) {
-          scrollMemoryRef.current.set(documentId, stored.data.scrollMemory);
+        if (read.fetched && sessionAtStart === sessionRef.current) {
+          setViewRestoreFailed(false);
         }
-        return stored.data;
+        if (read.view?.scrollMemory) {
+          scrollMemoryRef.current.set(documentId, read.view.scrollMemory);
+        }
+        return read.view ?? fallback;
       } catch {
         if (sessionAtStart === sessionRef.current) setViewRestoreFailed(true);
         return fallback;
       }
     },
-    [],
+    [viewStore],
   );
 
   const handleViewChange = useCallback(
@@ -1170,16 +1070,9 @@ export function Reader() {
       viewTouchedRef.current = true;
       setViewRestoreFailed(false);
       if (!document || previewOnlyRef.current) return;
-      const saved = savedViewsRef.current.get(document.id);
-      if (saved && sameReaderView(saved, next)) {
-        pendingViewsRef.current.delete(document.id);
-        return;
-      }
-      pendingViewsRef.current.set(document.id, next);
-      failedViewsRef.current.delete(document.id);
-      scheduleViewSave();
+      viewStore.changed(document.id, next);
     },
-    [scheduleViewSave],
+    [viewStore],
   );
 
   const retryViewRestore = useCallback(async () => {
@@ -1187,49 +1080,50 @@ export function Reader() {
     if (!document || !viewerReadyRef.current) return;
     const sessionAtStart = sessionRef.current;
     try {
-      const result = await apiJson<{ view: ReaderView | null }>(
-        `/api/documents/${document.id}/view`,
+      const read = await viewStore.load(
+        document.id,
+        () => sessionAtStart === sessionRef.current,
+        true,
       );
       if (sessionAtStart !== sessionRef.current) return;
-      setViewRestoreFailed(false);
-      const stored = result.view
-        ? readerViewSchema.safeParse(result.view)
-        : null;
-      if (!stored?.success) return;
-      savedViewsRef.current.set(document.id, stored.data);
-      if (stored.data.scrollMemory) {
-        scrollMemoryRef.current.set(document.id, stored.data.scrollMemory);
+      if (read.fetched) setViewRestoreFailed(false);
+      const stored = read.view;
+      if (!stored) return;
+      if (stored.scrollMemory) {
+        scrollMemoryRef.current.set(document.id, stored.scrollMemory);
       }
       if (viewTouchedRef.current) {
         const view = currentViewSnapshot();
         if (view) {
-          pendingViewsRef.current.set(document.id, view);
-          void drainViewSaves();
+          viewStore.capture(document.id, view);
+          void viewStore.flush();
         }
         return;
       }
-      initialViewRef.current = stored.data;
-      lastViewRef.current = stored.data;
-      if (stored.data.format === "epub") {
+      initialViewRef.current = stored;
+      lastViewRef.current = stored;
+      if (stored.format === "epub") {
         const bridge = epubBridgeRef.current;
         if (!bridge) return;
-        await restoreEpubView(bridge, stored.data, sessionAtStart);
+        await restoreEpubView(bridge, stored, sessionAtStart);
       } else {
-        bridgeRef.current?.restoreView(stored.data);
+        bridgeRef.current?.restoreView(stored);
         requestPdfRestore(document.id, pageRef.current);
       }
     } catch {
       if (sessionAtStart === sessionRef.current) setViewRestoreFailed(true);
     }
-  }, [currentViewSnapshot, drainViewSaves, requestPdfRestore, restoreEpubView]);
+  }, [currentViewSnapshot, requestPdfRestore, restoreEpubView, viewStore]);
 
-  const captureCurrentView = useCallback((documentId: string): boolean => {
-    const view = currentViewSnapshot();
-    if (!view) return false;
-    pendingViewsRef.current.set(documentId, view);
-    failedViewsRef.current.delete(documentId);
-    return true;
-  }, [currentViewSnapshot]);
+  const captureCurrentView = useCallback(
+    (documentId: string, schedule = false): boolean => {
+      const view = currentViewSnapshot();
+      if (!view) return false;
+      viewStore.capture(documentId, view, schedule);
+      return true;
+    },
+    [currentViewSnapshot, viewStore],
+  );
 
   const showReader = useCallback(() => {
     libraryRefreshRef.current?.abort();
@@ -1264,7 +1158,7 @@ export function Reader() {
     void (async () => {
       try {
         await saveChainRef.current;
-        await flushViewSaves();
+        await viewStore.flush();
       } catch {
         // Progress and view failures already surface through their banners.
       }
@@ -1293,7 +1187,7 @@ export function Reader() {
         setLibraryActionError(toUiError(error));
       }
     })();
-  }, [captureCurrentView, exitImmersive, flushViewSaves]);
+  }, [captureCurrentView, exitImmersive, viewStore]);
 
   const drainProgress = useCallback((): Promise<void> => {
     if (progressDrainRef.current) return progressDrainRef.current;
@@ -2140,8 +2034,7 @@ export function Reader() {
         setPageValue(clamp(pageRef.current, 1, record.pageCount));
         saveProgress(record.id, pageRef.current, languageRef.current);
         void loadOutline(bridge, record.id, sessionAtStart);
-        if (viewTouchedRef.current && captureCurrentView(record.id)) {
-          scheduleViewSave();
+        if (viewTouchedRef.current && captureCurrentView(record.id, true)) {
           return;
         }
         const stored = await resolveInitialView(
@@ -2151,7 +2044,7 @@ export function Reader() {
         );
         if (sessionAtStart !== sessionRef.current) return;
         if (viewTouchedRef.current) {
-          if (captureCurrentView(record.id)) scheduleViewSave();
+          captureCurrentView(record.id, true);
           return;
         }
         initialViewRef.current = stored;
@@ -2171,7 +2064,6 @@ export function Reader() {
       loadOutline,
       resolveInitialView,
       saveProgress,
-      scheduleViewSave,
       selectDocument,
       setPageCount,
       setPageValue,
@@ -3059,7 +2951,7 @@ export function Reader() {
         setSavingCopy(false);
         return;
       }
-      if (captureCurrentView(record.id)) scheduleViewSave();
+      captureCurrentView(record.id, true);
       lastViewRef.current = null;
       viewTouchedRef.current = false;
       setViewRestoreFailed(false);
@@ -3085,7 +2977,7 @@ export function Reader() {
         setSaveCopyError(toUiError(error));
       }
     }
-  }, [captureCurrentView, saveProgress, scheduleViewSave, selectDocument, t, uploadPdf]);
+  }, [captureCurrentView, saveProgress, selectDocument, t, uploadPdf]);
 
   const discardModifications = useCallback(async () => {
     const document = currentDocumentRef.current;
@@ -3167,14 +3059,8 @@ export function Reader() {
       if (!confirmed) return;
       try {
         await apiFetch(`/api/documents/${document.id}`, { method: "DELETE" });
-        deletedViewsRef.current.add(document.id);
-        pendingViewsRef.current.delete(document.id);
-        failedViewsRef.current.delete(document.id);
-        savedViewsRef.current.delete(document.id);
+        viewStore.deleted(document.id);
         scrollMemoryRef.current.delete(document.id);
-        setViewSaveFailed(
-          pendingViewsRef.current.size > 0 || failedViewsRef.current.size > 0,
-        );
         setLibrary((previous) => {
           if (!previous) return previous;
           return {
@@ -3225,6 +3111,7 @@ export function Reader() {
       setPageCount,
       setPageValue,
       t,
+      viewStore,
     ],
   );
 
@@ -3248,40 +3135,29 @@ export function Reader() {
 
   useEffect(() => {
     const handler = (): void => {
-      if (viewTimerRef.current !== null) {
-        window.clearTimeout(viewTimerRef.current);
-        viewTimerRef.current = null;
-      }
       const document = currentDocumentRef.current;
       const view = currentViewSnapshot();
-      if (document && view && !previewOnlyRef.current) {
-        pendingViewsRef.current.set(document.id, view);
-      }
-      for (const [documentId, pending] of pendingViewsRef.current) {
-        void apiFetch(`/api/documents/${documentId}/view`, {
-          ...jsonInit("PUT", pending),
-          keepalive: true,
-        }).catch(() => {});
-      }
+      viewStore.pagehide(
+        document && view && !previewOnlyRef.current
+          ? { documentId: document.id, view }
+          : undefined,
+      );
     };
     window.addEventListener("pagehide", handler);
     return () => window.removeEventListener("pagehide", handler);
-  }, [currentViewSnapshot]);
+  }, [currentViewSnapshot, viewStore]);
 
   useEffect(() => {
     return () => {
       const pending = pendingRef.current;
       if (pending?.kind === "preview") URL.revokeObjectURL(pending.blobUrl);
-      if (viewTimerRef.current !== null) {
-        window.clearTimeout(viewTimerRef.current);
-        viewTimerRef.current = null;
-      }
+      viewStore.dispose();
       watchCleanupRef.current?.();
       outlineAttemptRef.current += 1;
       outlineControllerRef.current?.abort();
       outlineControllerRef.current = null;
     };
-  }, []);
+  }, [viewStore]);
 
   const beginResize = (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -3882,7 +3758,7 @@ export function Reader() {
       {viewSaveFailed && (
         <div className="app-banner warning" role="status">
           {t.banners.viewNotSaved}
-          <button type="button" onClick={retryViewSaves}>
+          <button type="button" onClick={() => viewStore.retry()}>
             {t.common.retry}
           </button>
         </div>
