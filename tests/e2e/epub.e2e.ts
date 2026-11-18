@@ -509,6 +509,75 @@ test("EPUB batch still translates every screen page while a narrow screen hides 
   expect(await readPosition(page)).toEqual(before);
 });
 
+test("EPUB batch pages keep the layout frozen when the foreground text size changes", async ({
+  page,
+  lumo,
+}) => {
+  test.setTimeout(90_000);
+  const document = await uploadEpub(lumo.api, "long.epub", { long: true });
+  const seeded = await lumo.api.put(`/api/documents/${document.id}/view`, {
+    data: {
+      format: "epub",
+      cfi: null,
+      fontSize: 18,
+      fontFamily: "serif",
+      lineHeight: 1.6,
+      theme: "light",
+    },
+  });
+  expect(seeded.ok()).toBe(true);
+  const requests = await fakeModel(page, document.id);
+  const pages = await holdFirstRequest(page, "pages");
+  const acks = await holdFirstAck(page);
+  await openBook(page, lumo.url, "long.epub");
+  const before = await readPosition(page);
+  expect(before.pages).toBeGreaterThan(1);
+
+  await page.getByRole("tab", { name: "Batch translation" }).click();
+  await page.getByRole("radio", { name: "By section number" }).check();
+  await page.getByRole("button", { name: "Current section", exact: true }).click();
+  await page.getByRole("button", { name: /^Start translation/ }).click();
+  await expect.poll(pages.held).toBe(1);
+
+  const viewer = page.frameLocator("iframe.epub-frame");
+  const book = viewer.frameLocator("iframe").first();
+  await openSettings(page);
+  await page.getByRole("button", { name: "Larger text" }).click();
+  await page.getByRole("button", { name: "Larger text" }).click();
+  await expect(page.locator(".epub-settings output")).toHaveText("22 px");
+  await expect(book.locator("body")).toHaveCSS("font-size", "22px");
+  const foreground = await readPosition(page);
+
+  // The batch request already carries the 18 px layout; release it against the 22 px foreground.
+  await acks.arm();
+  const held = await page
+    .frames()
+    .find((frame) => frame.url().endsWith("/typst/epub-viewer.html"))!
+    .evaluate(() => (window as unknown as { held: unknown[] }).held[0]);
+  await postToViewer(page, held);
+  await expect.poll(acks.held).toBe(true);
+
+  const hidden = viewer.frameLocator('div[style*="-100000px"] iframe').first();
+  await expect(hidden.locator("body")).toHaveCSS("font-size", "18px");
+  await expect(book.locator("body")).toHaveCSS("font-size", "22px");
+  const host = await viewer
+    .locator('div[style*="-100000px"]')
+    .first()
+    .elementHandle();
+  expect(host).not.toBeNull();
+
+  await acks.release();
+  await expect.poll(() => requests.length, { timeout: 90_000 }).toBe(before.pages);
+  await expect
+    .poll(async () => (await savedLocations(lumo.api, document.id)).length, {
+      timeout: 90_000,
+    })
+    .toBe(before.pages);
+  expect(new Set(requests.map((request) => request.unit)).size).toBe(before.pages);
+  expect(await readPosition(page)).toEqual(foreground);
+  await expect.poll(() => host!.evaluate((element) => element.isConnected)).toBe(false);
+});
+
 /**
  * Keeps the first matching request from reaching the viewer, like a layout that never finishes.
  * `fontSize` narrows `setView` to a settings change (the view restored on open has another size).
@@ -550,6 +619,55 @@ async function holdFirstRequest(
         .find((frame) => frame.url().endsWith("/typst/epub-viewer.html"))!
         .evaluate(() => (window as unknown as { held: unknown[] }).held.length),
   };
+}
+
+/**
+ * Stops the first acknowledgement posted to the viewer once armed, so the frozen page
+ * layout can be inspected while the batch waits for its next page.
+ */
+async function holdFirstAck(page: Page) {
+  await page.addInitScript(() => {
+    if (!location.pathname.endsWith("/epub-viewer.html")) return;
+    const control: { armed: boolean; held: unknown } = {
+      armed: false,
+      held: null,
+    };
+    Object.assign(window, { ackHold: control });
+    window.addEventListener(
+      "message",
+      (event: MessageEvent) => {
+        if (control.armed && control.held === null && event.data?.type === "ack") {
+          control.held = event.data;
+          event.stopImmediatePropagation();
+        }
+      },
+      true,
+    );
+  });
+  const viewer = () =>
+    page.frames().find((frame) => frame.url().endsWith("/typst/epub-viewer.html"))!;
+  const held = (): Promise<unknown> =>
+    viewer().evaluate(
+      () => (window as unknown as { ackHold: { held: unknown } }).ackHold.held,
+    );
+  return {
+    arm: async () => {
+      await viewer().evaluate(() => {
+        (window as unknown as { ackHold: { armed: boolean } }).ackHold.armed = true;
+      });
+    },
+    held: async () => (await held()) !== null,
+    release: async () => {
+      await postToViewer(page, await held());
+    },
+  };
+}
+
+/** Posts a viewer protocol message from the app page, as the bridge itself would. */
+async function postToViewer(page: Page, message: unknown): Promise<void> {
+  await page.locator("iframe.epub-frame").evaluate((element, data) => {
+    (element as HTMLIFrameElement).contentWindow?.postMessage(data, location.origin);
+  }, message);
 }
 
 /** Opens the reading settings unless they already are. */

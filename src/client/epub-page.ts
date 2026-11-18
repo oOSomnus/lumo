@@ -236,7 +236,9 @@ function visibleRange(
  * What a rendition shows right now, read synchronously from the live layout.
  * Null while nothing is displayed; epub.js has no layout to read before that.
  */
-export function readPage(rendition: RenditionLike): PageRead | null {
+export function readPage(
+  rendition: Pick<RenditionLike, "getContents" | "currentLocation">,
+): PageRead | null {
   if (rendition.getContents().length === 0) return null;
   const located = rendition.currentLocation();
   const start = located?.start;

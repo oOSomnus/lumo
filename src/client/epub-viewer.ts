@@ -1,5 +1,5 @@
-import type { EpubReaderView, TranslationContext, TranslationReference } from "../shared/contracts";
-import { epubStyleOf, epubTranslationUnit } from "../shared/epub";
+import type { TranslationContext, TranslationReference } from "../shared/contracts";
+import { epubTranslationUnit } from "../shared/epub";
 import type { EpubLayoutSnapshot } from "../shared/epub";
 import { MAX_TRANSLATION_CONTEXT_CHARS } from "../shared/limits";
 import { EpubBridgeError } from "./epub-bridge";
@@ -12,6 +12,7 @@ import type {
 import { createEpubContent } from "./epub-content";
 import type { EpubContent } from "./epub-content";
 import type { BookLike, ContentsLike, EpubGlobal, RenditionLike } from "./epub-js";
+import { EpubRenditions, EpubStyleTurn } from "./epub-rendition";
 import {
   collapseSpace,
   edgeText,
@@ -31,27 +32,18 @@ import type {
 } from "./epub-protocol";
 import { watchReaderKeys } from "./page-keys";
 import type { ReaderShortcut } from "./page-keys";
-import { STYLE_KEY, injectStyle, readingCss } from "./epub-style";
 import { flattenEpubToc } from "./epub-toc";
 
 // The sandboxed half of the EPUB reader. It owns the book, the foreground
 // rendition the user reads in, and the hidden renditions that lay a section out
 // at some other size (page enumeration, neighbouring pages). Protocol: epub-protocol.ts.
 
-interface Hidden {
-  host: HTMLElement;
-  rendition: RenditionLike;
-  css: string;
-}
-
 interface Session {
   generation: number;
-  book: BookLike;
-  rendition: RenditionLike;
+  /** Navigates and destroys every rendition; the viewer only reads events and contents from `rendition`. */
+  renditions: EpubRenditions;
+  rendition: Pick<RenditionLike, "on" | "hooks" | "getContents" | "currentLocation">;
   content: EpubContent;
-  fixedLayout: boolean;
-  /** What every section is written with; empty until the reader sends its view. */
-  css: string;
   closed: boolean;
   requests: Map<number, AbortController>;
   acks: Map<number, () => void>;
@@ -63,9 +55,6 @@ interface Session {
   lastPosted: string;
   /** Counts the moments a selection still being measured stops being the current one; only the latest, unmoved selection may be posted. */
   selectionSeq: number;
-  /** The hidden rendition the neighbouring pages are read from, laid out as `key` says. */
-  reference: { key: string; hidden: Hidden } | null;
-  referenceTurn: Promise<unknown>;
   /** Stops the arrow-key listener of every section document the foreground rendition showed. */
   keyStops: Map<Document, () => void>;
 }
@@ -73,10 +62,9 @@ interface Session {
 let current: Session | null = null;
 let openToken = 0;
 
-// The serialize hook writes this stylesheet into every section a rendition loads.
-// epub.js gives the hook no rendition, so `styled` sets it for one navigation at a time.
-let ambientCss = "";
-let styleTurn: Promise<unknown> = Promise.resolve();
+// One turn per iframe, shared by every session: epub.js serializes sections on
+// its own schedule, so a second queue would race the first one's stylesheet.
+const styles = new EpubStyleTurn(() => current?.renditions.css ?? "");
 
 const post = (message: ViewerMessage): void => window.parent.postMessage(message, location.origin);
 
@@ -92,44 +80,6 @@ const unavailable = (message: string): EpubBridgeError =>
 
 const isAbort = (error: unknown): boolean =>
   error instanceof DOMException && error.name === "AbortError";
-
-/** Two frames: epub.js reports a location one frame after a display and fails if the rendition is gone by then. */
-const frames = (): Promise<void> =>
-  new Promise((resolve) => {
-    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
-    // A hidden tab never paints.
-    setTimeout(resolve, 100);
-  });
-
-function styled<T>(session: Session, css: string, run: () => Promise<T>): Promise<T> {
-  const turn = styleTurn.then(async () => {
-    ambientCss = css;
-    try {
-      return await run();
-    } finally {
-      ambientCss = current?.css ?? "";
-    }
-  });
-  styleTurn = turn.catch(() => undefined);
-  return turn;
-}
-
-/** `display`, but a section epub.js cannot load rejects instead of leaving the call and its queue pending forever. */
-async function show(rendition: RenditionLike, target: string | number): Promise<void> {
-  let refuse: ((error: unknown) => void) | undefined;
-  const refused = new Promise<never>((_, reject) => {
-    refuse = (error) => reject(error instanceof Error ? error : new Error(String(error)));
-    rendition.once("displayerror", refuse);
-  });
-  try {
-    await Promise.race([rendition.display(target), refused]);
-  } catch (error) {
-    rendition.displaying?.resolve();
-    throw error;
-  } finally {
-    if (refuse) rendition.off("displayerror", refuse);
-  }
-}
 
 async function describePage(
   content: EpubContent,
@@ -189,26 +139,6 @@ function move(session: Session, step: () => Promise<unknown>): Promise<void> {
   return turn;
 }
 
-/** A range CFI means its first position; anything else (a spine index, an href) goes to epub.js as it is. */
-const startOf = (target: string | number): string | number =>
-  typeof target === "string" ? (rangeBoundaryCfis(target)?.start ?? target) : target;
-
-async function applyView(session: Session, view: EpubReaderView): Promise<void> {
-  const css = readingCss(epubStyleOf(view), session.fixedLayout);
-  if (css === session.css) return;
-  session.css = css;
-  // Read before the new sheet changes the layout; with nothing shown yet, the next section is written with it.
-  const anchor = readPage(session.rendition)?.startCfi;
-  if (!anchor) return;
-  await styled(session, css, async () => {
-    for (const contents of session.rendition.getContents()) {
-      contents.addStylesheetCss(css, STYLE_KEY);
-      contents.expand();
-    }
-    await show(session.rendition, anchor);
-  });
-}
-
 async function handleSelection(session: Session, contents: ContentsLike): Promise<void> {
   const seq = ++session.selectionSeq;
   const selection = contents.window.getSelection();
@@ -231,30 +161,6 @@ async function handleSelection(session: Session, contents: ContentsLike): Promis
   if (!session.closed && seq === session.selectionSeq) {
     post({ type: "selection", generation: session.generation, selection: value });
   }
-}
-
-function openHidden(session: Session, layout: EpubLayoutSnapshot): Hidden {
-  const host = document.createElement("div");
-  host.style.cssText = `position:absolute;left:-100000px;top:0;width:${layout.width}px;height:${layout.height}px;overflow:hidden`;
-  document.body.append(host);
-  const rendition = session.book.renderTo(host, {
-    width: layout.width,
-    height: layout.height,
-    flow: "paginated",
-    spread: "none",
-    allowScriptedContent: false,
-  });
-  return { host, rendition, css: readingCss(layout.style, session.fixedLayout) };
-}
-
-function destroyHidden(hidden: Hidden): void {
-  hidden.rendition.destroy();
-  hidden.host.remove();
-}
-
-async function closeHidden(hidden: Hidden): Promise<void> {
-  await frames();
-  destroyHidden(hidden);
 }
 
 function waitAck(session: Session, id: number, signal: AbortSignal): Promise<void> {
@@ -281,12 +187,11 @@ async function pages(
   layout: EpubLayoutSnapshot,
   signal: AbortSignal,
 ): Promise<void> {
-  const hidden = openHidden(session, layout);
-  try {
+  await session.renditions.withPages(layout, async (page) => {
     for (const sectionIndex of sectionIndexes) {
       signal.throwIfAborted();
-      await styled(session, hidden.css, () => show(hidden.rendition, sectionIndex));
-      let read = readPage(hidden.rendition);
+      await page.display(sectionIndex);
+      let read = page.read();
       for (;;) {
         signal.throwIfAborted();
         if (!read || read.sectionIndex !== sectionIndex) throw unavailable("the section could not be paged");
@@ -308,8 +213,8 @@ async function pages(
           await waitAck(session, id, signal);
         }
         if (read.page >= read.total) break;
-        await styled(session, hidden.css, () => hidden.rendition.next());
-        const next = readPage(hidden.rendition);
+        await page.next();
+        const next = page.read();
         if (!next || next.sectionIndex !== sectionIndex || next.page <= read.page) {
           throw unavailable(`the section stopped paging at page ${read.page} of ${read.total}`);
         }
@@ -317,41 +222,7 @@ async function pages(
       }
       session.content.release(sectionIndex);
     }
-  } finally {
-    await closeHidden(hidden);
-  }
-}
-
-/** Runs `use` on the reference rendition laid out as `layout`, one caller at a time; a failed one is rebuilt for the next. */
-function withReference<T>(
-  session: Session,
-  layout: EpubLayoutSnapshot,
-  signal: AbortSignal,
-  use: (hidden: Hidden) => Promise<T>,
-): Promise<T> {
-  const turn = session.referenceTurn.then(async () => {
-    signal.throwIfAborted();
-    if (session.closed) throw new DOMException("closed", "AbortError");
-    const key = JSON.stringify(layout);
-    if (session.reference?.key !== key) {
-      const old = session.reference;
-      session.reference = null;
-      if (old) await closeHidden(old.hidden);
-      session.reference = { key, hidden: openHidden(session, layout) };
-    }
-    const { hidden } = session.reference;
-    try {
-      return await use(hidden);
-    } catch (error) {
-      if (!isAbort(error)) {
-        session.reference = null;
-        await closeHidden(hidden);
-      }
-      throw error;
-    }
   });
-  session.referenceTurn = turn.catch(() => undefined);
-  return turn;
 }
 
 /** The reference of the screen page next to the range on `side`: its nearest text, else its nearest image; null when there is none. */
@@ -367,14 +238,16 @@ async function neighbour(
   const previous = side === "previous";
   const anchor = previous ? bounds.start : insideEndCfi(bounds.end);
   const edge = previous ? "end" : "start";
-  const found = await withReference(session, layout, signal, (hidden) =>
-    styled(session, hidden.css, async () => {
-      await show(hidden.rendition, anchor);
-      const here = readPage(hidden.rendition);
+  const found = await session.renditions.withReference(
+    layout,
+    signal,
+    async (page) => {
+      await page.display(anchor);
+      const here = page.read();
       if (!here) throw unavailable("the page could not be located");
       if (previous ? here.atStart : here.atEnd) return null;
-      await (previous ? hidden.rendition.prev() : hidden.rendition.next());
-      const there = readPage(hidden.rendition);
+      await (previous ? page.prev() : page.next());
+      const there = page.read();
       if (!there) throw unavailable("the neighbouring page could not be located");
       if (there.sectionIndex === here.sectionIndex && there.page === here.page) return null;
       const visible = there.visible;
@@ -385,7 +258,7 @@ async function neighbour(
         text: edgeText(visible.range, edge, MAX_TRANSLATION_CONTEXT_CHARS),
         cfi: visible.cfi,
       };
-    }),
+    },
   );
   if (!found) return null;
   if (found.text) return { text: found.text };
@@ -457,18 +330,16 @@ function serve(session: Session, id: number, request: EpubRequest): void {
         if (!signal.aborted && !session.closed) post({ type: "done", generation: session.generation, id });
         return;
       case "display":
-        await move(session, () =>
-          styled(session, session.css, () => show(session.rendition, startOf(request.target))),
-        );
+        await move(session, () => session.renditions.display(request.target));
         break;
       case "next":
-        await move(session, () => styled(session, session.css, () => session.rendition.next()));
+        await move(session, () => session.renditions.next());
         break;
       case "prev":
-        await move(session, () => styled(session, session.css, () => session.rendition.prev()));
+        await move(session, () => session.renditions.prev());
         break;
       case "setView":
-        await move(session, () => applyView(session, request.view));
+        await move(session, () => session.renditions.setView(request.view));
         break;
     }
     reply(session, id, signal, undefined);
@@ -498,10 +369,7 @@ async function closeSession(session: Session): Promise<void> {
   session.keyStops.clear();
   for (const controller of [...session.requests.values()]) controller.abort();
   session.content.dispose();
-  await frames();
-  if (session.reference) destroyHidden(session.reference.hidden);
-  session.rendition.destroy();
-  session.book.destroy();
+  await session.renditions.close();
 }
 
 async function open(generation: number, bytes: ArrayBuffer): Promise<void> {
@@ -529,11 +397,7 @@ async function open(generation: number, bytes: ArrayBuffer): Promise<void> {
       return;
     }
     // After the book's own substitution hook, which registered while it unpacked.
-    opened.spine.hooks.serialize.register((_output, section) => {
-      if (ambientCss && section.output !== undefined) {
-        section.output = injectStyle(section.output, ambientCss);
-      }
-    });
+    opened.spine.hooks.serialize.register((_output, section) => styles.serialize(section));
     const rendition = opened.renderTo("viewer", {
       width: "100%",
       height: "100%",
@@ -541,13 +405,12 @@ async function open(generation: number, bytes: ArrayBuffer): Promise<void> {
       spread: "none",
       allowScriptedContent: false,
     });
+    const renditions = new EpubRenditions(opened, rendition, fixedLayout, styles);
     const session: Session = {
       generation,
-      book: opened,
+      renditions,
       rendition,
       content: createEpubContent(opened, epub.CFI),
-      fixedLayout,
-      css: "",
       closed: false,
       requests: new Map(),
       acks: new Map(),
@@ -556,8 +419,6 @@ async function open(generation: number, bytes: ArrayBuffer): Promise<void> {
       queued: null,
       lastPosted: "",
       selectionSeq: 0,
-      reference: null,
-      referenceTurn: Promise.resolve(),
       keyStops: new Map(),
     };
     // epub.js relayouts on its own when the window resizes.
