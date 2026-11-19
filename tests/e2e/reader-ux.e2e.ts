@@ -291,6 +291,104 @@ test("A single pane keeps the batch tab it was showing", async ({ page, lumo }) 
   await expect(panel).toBeVisible();
 });
 
+test("Right only zooms the translation like the PDF viewer and remembers the zoom per book", async ({
+  page,
+  lumo,
+}) => {
+  const zoomed = await uploadPdf(lumo.api, "zoom.pdf", 2, "zoom");
+  const other = await uploadPdf(lumo.api, "zoom-other.pdf", 2, "zoom-other");
+  for (const id of [zoomed.id, other.id]) {
+    const response = await lumo.api.put(translationPath(id, 1, "en"), {
+      data: {
+        // 510pt wide: 680 CSS px at actual size.
+        typst: "#set page(width: 510pt, height: 300pt, margin: 10pt)\nZoom",
+        provider: "custom",
+        model: "smoke",
+      },
+    });
+    expect(response.ok()).toBe(true);
+  }
+
+  await page.setViewportSize({ width: 2400, height: 1100 });
+  await openTranslatedPage(page, lumo.url, "zoom.pdf");
+  const zoom = page.getByRole("combobox", { name: "Zoom" });
+  const preview = page.locator(".typst-preview");
+  await expect(preview).toBeVisible();
+  // A split pane has no zoom menu.
+  await expect(zoom).toHaveCount(0);
+
+  const layout = page.getByRole("group", { name: "Pane layout" });
+  await layout.getByRole("button", { name: "Right only", exact: true }).click();
+  await expect(zoom).toHaveValue("auto");
+  const pane = () =>
+    page.locator(".page-body").evaluate((body) => {
+      const style = getComputedStyle(body);
+      const box = body.getBoundingClientRect();
+      return {
+        width: body.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
+        left: box.left + parseFloat(style.paddingLeft),
+        overflow: body.scrollWidth - body.clientWidth,
+      };
+    });
+  const expectPreview = async (width: number, centred: boolean) => {
+    await expect(async () => {
+      const box = (await preview.boundingBox())!;
+      const body = await pane();
+      near(box.width, width, 1, "preview width");
+      if (centred) {
+        near(box.x - body.left, (body.width - width) / 2, 1, "centred preview");
+        expect(body.overflow).toBeLessThanOrEqual(1);
+      } else {
+        expect(body.overflow).toBeGreaterThan(0);
+      }
+    }).toPass({ timeout: 5_000 });
+  };
+
+  // Automatic zoom stops at 125% on a wide pane; actual size is 96/72 px per point.
+  expect((await pane()).width).toBeGreaterThan(1400);
+  await expectPreview(850, true);
+  await zoom.selectOption({ label: "Actual size" });
+  await expectPreview(680, true);
+  await zoom.selectOption({ label: "Page width" });
+  await expectPreview(Math.floor((await pane()).width), true);
+  await zoom.selectOption({ label: "400%" });
+  await expectPreview(2720, false);
+  await zoom.selectOption({ label: "200%" });
+  await expectPreview(1360, true);
+
+  // Immersive reading keeps the zoom but offers no menu.
+  await page.locator(".fullscreen-button").click();
+  await expect(page.locator(".workspace")).toHaveClass(/immersive/);
+  await expect(zoom).toHaveCount(0);
+  await expect(async () => near((await preview.boundingBox())!.width, 1360, 1, "immersive preview")).toPass();
+  await page.locator(".immersive-exit").click();
+  await expect(zoom).toHaveValue("2");
+
+  // Other layouts fit the pane again.
+  await layout.getByRole("button", { name: "Equal split", exact: true }).click();
+  await expect(zoom).toHaveCount(0);
+  await expect(async () => near((await preview.boundingBox())!.width, (await pane()).width, 1, "split preview")).toPass();
+
+  // The zoom is the book's own: another book starts automatic, and a reload brings each back.
+  await expect
+    .poll(async () => (await (await lumo.api.get(`/api/documents/${zoomed.id}/view`)).json()).view?.translationZoom)
+    .toBe(2);
+  await openFromLibrary(page, "zoom-other.pdf");
+  await layout.getByRole("button", { name: "Right only", exact: true }).click();
+  await expect(zoom).toHaveValue("auto");
+  await zoom.selectOption({ label: "Actual size" });
+  await expect
+    .poll(async () => (await (await lumo.api.get(`/api/documents/${other.id}/view`)).json()).view?.translationZoom)
+    .toBe("page-actual");
+
+  await openTranslatedPage(page, lumo.url, "zoom.pdf");
+  await layout.getByRole("button", { name: "Right only", exact: true }).click();
+  await expect(zoom).toHaveValue("2");
+  await expectPreview(1360, true);
+  await openFromLibrary(page, "zoom-other.pdf");
+  await expect(zoom).toHaveValue("page-actual");
+});
+
 // ── Arrow keys ────────────────────────────────────────────────────────────────────────────────
 
 test("ArrowLeft and ArrowRight turn the page from the original, the translation, the source, the preview and the batch panel", async ({

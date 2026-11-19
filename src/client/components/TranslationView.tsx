@@ -4,6 +4,8 @@ import { useI18n } from "../i18n";
 import { compileTypst, type TypstAsset } from "../typst";
 import { stripPlaceholderControls } from "../../shared/typst";
 import { watchReaderKeys, type ReaderShortcut } from "../page-keys";
+import { translationPreviewWidth, type Size } from "../translation-zoom";
+import type { TranslationZoom } from "../../shared/contracts";
 import { TypstSource } from "./TypstSource";
 
 type LoadAssets = (signal: AbortSignal) => Promise<readonly TypstAsset[]>;
@@ -47,7 +49,8 @@ function sanitizedDocument(svg: string): string {
   return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>html,body{margin:0;padding:0;background:transparent}svg{max-width:100%;height:auto;display:block}body>svg{width:100%}</style></head><body>${sanitized}</body></html>`;
 }
 
-function svgAspectRatio(svg: string): string | null {
+/** The rendered page's size in Typst points, from the SVG's viewBox. */
+function svgPageSize(svg: string): Size | null {
   const viewBox = /viewBox="([^"]+)"/.exec(svg)?.[1]?.trim().split(/\s+/);
   if (!viewBox || viewBox.length !== 4) return null;
   const width = Number(viewBox[2]);
@@ -55,7 +58,13 @@ function svgAspectRatio(svg: string): string | null {
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
     return null;
   }
-  return `${width} / ${height}`;
+  return { width, height };
+}
+
+export interface TranslationZoomFrame {
+  value: TranslationZoom;
+  /** The scrolling pane's content box in CSS pixels. */
+  viewport: Size;
 }
 
 interface TranslationViewProps {
@@ -77,6 +86,8 @@ interface TranslationViewProps {
   onRendered?: () => void;
   /** A preview failed while nothing else could show the error; the reader can leave immersive mode. */
   onPreviewError?: () => void;
+  /** Sizes the preview page by a zoom; without one the page fills the pane's width. */
+  zoom?: TranslationZoomFrame;
 }
 
 type PreviewState =
@@ -86,7 +97,7 @@ type PreviewState =
       typst: string;
       loadAssets: LoadAssets;
       html: string;
-      aspectRatio: string | null;
+      pageSize: Size | null;
     }
   | { status: "failed"; message: string };
 
@@ -103,6 +114,7 @@ export const TranslationView = memo(function TranslationView({
   onShortcut,
   onRendered,
   onPreviewError,
+  zoom,
 }: TranslationViewProps) {
   const { t } = useI18n();
   const [mode, setMode] = useState<"preview" | "source">("preview");
@@ -184,7 +196,7 @@ export const TranslationView = memo(function TranslationView({
             typst: previewSource,
             loadAssets,
             html: sanitizedDocument(svg),
-            aspectRatio: svgAspectRatio(svg),
+            pageSize: svgPageSize(svg),
           });
         },
         (error: unknown) => {
@@ -221,6 +233,10 @@ export const TranslationView = memo(function TranslationView({
     () => (preview.status === "ready" ? preview.html : ""),
     [preview],
   );
+  const zoomedWidth =
+    zoom && preview.status === "ready" && preview.pageSize
+      ? translationPreviewWidth(zoom.value, preview.pageSize, zoom.viewport)
+      : null;
 
   return (
     <div className={streaming ? "translation-body streaming" : "translation-body"}>
@@ -310,10 +326,13 @@ export const TranslationView = memo(function TranslationView({
       )}
       {!streaming && wantPreview && preview.status === "ready" && (
         <div
-          className="typst-preview"
+          className={zoomedWidth === null ? "typst-preview" : "typst-preview zoomed"}
           style={
-            preview.aspectRatio
-              ? { aspectRatio: preview.aspectRatio }
+            preview.pageSize
+              ? {
+                  aspectRatio: `${preview.pageSize.width} / ${preview.pageSize.height}`,
+                  ...(zoomedWidth === null ? {} : { width: `${zoomedWidth}px` }),
+                }
               : undefined
           }
         >

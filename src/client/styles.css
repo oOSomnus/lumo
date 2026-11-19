@@ -738,6 +738,12 @@ input:not([type]) {
   background: #fff;
 }
 
+/* A zoomed page keeps its own width: centred when narrower than the pane, scrolled sideways when wider. */
+.typst-preview.zoomed {
+  max-width: none;
+  margin-inline: auto;
+}
+
 .typst-preview iframe {
   display: block;
   width: 100%;

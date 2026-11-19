@@ -82,6 +82,14 @@ export const en = {
     leftWide: "Left wider",
     rightWide: "Right wider",
   },
+  translationZoom: {
+    label: "Zoom",
+    auto: "Automatic zoom",
+    actual: "Actual size",
+    pageFit: "Page fit",
+    pageWidth: "Page width",
+    percent: (percent: number) => `${percent}%`,
+  },
   ai: {
     checking: "Reading the AI settings…",
     checkFailed: (detail: string) => `Could not read the AI settings: ${detail}`,

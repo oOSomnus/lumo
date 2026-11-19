@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useReducer,
   useRef,
@@ -9,6 +10,7 @@ import {
 import {
   DEFAULT_EPUB_READER_VIEW,
   DEFAULT_PDF_READER_VIEW,
+  DEFAULT_TRANSLATION_ZOOM,
   MAX_OUTLINE_ENTRIES,
   outlineEntriesSchema,
   outlinePageResultSchema,
@@ -25,6 +27,7 @@ import {
   type TargetLanguage,
   type TranslationContent,
   type TranslationRecord,
+  type TranslationZoom,
   type UiLocale,
 } from "../../shared/contracts";
 import {
@@ -45,6 +48,7 @@ import {
   setUiLocale,
   toUiError,
   useI18n,
+  type Messages,
   type UiError,
 } from "../i18n";
 import { PagePreparationError, preparePageForTranslation, preparePdfTranslationPage, validatePdfCopy } from "../pdf";
@@ -74,6 +78,11 @@ import {
   touchTranslationScroll,
 } from "../scroll-memory";
 import { ReaderViewStore, sameReaderView } from "../reader-view";
+import {
+  TRANSLATION_ZOOMS,
+  translationZoomFromValue,
+  type Size,
+} from "../translation-zoom";
 import { compileTypst, type TypstAsset } from "../typst";
 import { stripPlaceholderControls } from "../../shared/typst";
 import {
@@ -107,7 +116,7 @@ import { EpubToolbar } from "./EpubToolbar";
 import { EpubViewerFrame } from "./EpubViewerFrame";
 import { PdfViewerFrame } from "./PdfViewerFrame";
 import { SettingsDialog } from "./SettingsDialog";
-import { TranslationView } from "./TranslationView";
+import { TranslationView, type TranslationZoomFrame } from "./TranslationView";
 
 type PendingLoad =
   | { kind: "library"; document: DocumentRecord; page: number }
@@ -129,6 +138,13 @@ type AiState =
 const MIN_SPLIT = 0.2;
 const MAX_SPLIT = 0.8;
 const SPLITTER_WIDTH = 6;
+
+const ZOOM_PRESET_LABELS = {
+  auto: "auto",
+  "page-actual": "actual",
+  "page-fit": "pageFit",
+  "page-width": "pageWidth",
+} as const satisfies Record<Exclude<TranslationZoom, number>, keyof Messages["translationZoom"]>;
 
 interface AskOptions {
   title: string;
@@ -358,6 +374,11 @@ export function Reader() {
   const fullscreenPendingRef = useRef(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const scrollMemoryRef = useRef<Map<string, ReaderScrollMemory>>(new Map());
+  // Each book's translation zoom for the Right-only layout; the state is the current book's.
+  const translationZoomRef = useRef<Map<string, TranslationZoom>>(new Map());
+  const [translationZoom, setTranslationZoom] = useState<TranslationZoom>(
+    DEFAULT_TRANSLATION_ZOOM,
+  );
   const lastPdfLocationRef = useRef<PdfScrollLocation | null>(null);
   const pdfRestoreRef = useRef<{
     session: number;
@@ -704,6 +725,58 @@ export function Reader() {
 
   const workspaceRef = useRef<HTMLElement | null>(null);
   const pageBodyRef = useRef<HTMLDivElement | null>(null);
+  const [pageBody, setPageBody] = useState<HTMLDivElement | null>(null);
+  const attachPageBody = useCallback((node: HTMLDivElement | null) => {
+    pageBodyRef.current = node;
+    setPageBody(node);
+  }, []);
+
+  // The translation zoom applies in the Right-only layout only; elsewhere the page fills its pane.
+  const zoomActive = !narrow && paneMode === "right";
+  const [zoomViewport, setZoomViewport] = useState<Size | null>(null);
+  useEffect(() => {
+    if (!zoomActive || !pageBody) {
+      setZoomViewport(null);
+      return;
+    }
+    const measure = (): void => {
+      const style = getComputedStyle(pageBody);
+      const width = Math.max(
+        0,
+        pageBody.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
+      );
+      const height = Math.max(
+        0,
+        pageBody.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom),
+      );
+      setZoomViewport((previous) =>
+        previous && previous.width === width && previous.height === height
+          ? previous
+          : { width, height },
+      );
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(pageBody);
+    return () => observer.disconnect();
+  }, [pageBody, zoomActive]);
+  const translationZoomFrame = useMemo<TranslationZoomFrame | undefined>(
+    () =>
+      zoomActive && zoomViewport
+        ? { value: translationZoom, viewport: zoomViewport }
+        : undefined,
+    [translationZoom, zoomActive, zoomViewport],
+  );
+
+  // A zoom change keeps the reader at the same share of the translation.
+  const zoomScrollRef = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const fraction = zoomScrollRef.current;
+    zoomScrollRef.current = null;
+    const body = pageBodyRef.current;
+    if (fraction === null || !body) return;
+    body.scrollTop = fraction * Math.max(0, body.scrollHeight - body.clientHeight);
+  }, [translationZoom]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [queueVersion, bumpQueue] = useReducer((value: number) => value + 1, 0);
@@ -926,29 +999,53 @@ export function Reader() {
     currentDocumentRef.current = document;
     if (document) viewStore.selected(document.id);
     setCurrentDocument(document);
+    setTranslationZoom(
+      (document && translationZoomRef.current.get(document.id)) ?? DEFAULT_TRANSLATION_ZOOM,
+    );
   }, [viewStore]);
+
+  const rememberTranslationZoom = useCallback(
+    (documentId: string, zoom: TranslationZoom) => {
+      translationZoomRef.current.set(documentId, zoom);
+      if (currentDocumentRef.current?.id === documentId) setTranslationZoom(zoom);
+    },
+    [],
+  );
+
+  // A book's own state that rides along with every view saved for it.
+  const withBookState = useCallback((documentId: string, view: ReaderView): ReaderView => {
+    const memory = scrollMemoryRef.current.get(documentId);
+    const zoom = translationZoomRef.current.get(documentId);
+    return {
+      ...view,
+      ...(memory ? { scrollMemory: memory } : {}),
+      ...(zoom === undefined ? {} : { translationZoom: zoom }),
+    };
+  }, []);
 
   const currentViewSnapshot = useCallback((): ReaderView | null => {
     if (!viewerReadyRef.current) return null;
     const document = currentDocumentRef.current;
     if (!document) return null;
-    const memory = scrollMemoryRef.current.get(document.id);
-    const withMemory = memory ? { scrollMemory: memory } : {};
     if (document.format === "epub") {
       // Until a page is located there is no position to store; never overwrite one with none.
       const location = epubLocationRef.current;
       return location
-        ? { format: "epub", cfi: location.startCfi, ...epubStyleRef.current, ...withMemory }
+        ? withBookState(document.id, {
+            format: "epub",
+            cfi: location.startCfi,
+            ...epubStyleRef.current,
+          })
         : null;
     }
     const bridge = bridgeRef.current;
     if (!bridge) return null;
     try {
-      return { ...bridge.getView(), ...withMemory };
+      return withBookState(document.id, bridge.getView());
     } catch {
       return null;
     }
-  }, []);
+  }, [withBookState]);
 
   // Queues the current view after a scroll; visual settings make the same round trip through handleViewChange.
   const queueCurrentView = useCallback(() => {
@@ -1046,13 +1143,19 @@ export function Reader() {
         if (read.view?.scrollMemory) {
           scrollMemoryRef.current.set(documentId, read.view.scrollMemory);
         }
+        if (read.view) {
+          rememberTranslationZoom(
+            documentId,
+            read.view.translationZoom ?? DEFAULT_TRANSLATION_ZOOM,
+          );
+        }
         return read.view ?? fallback;
       } catch {
         if (sessionAtStart === sessionRef.current) setViewRestoreFailed(true);
         return fallback;
       }
     },
-    [viewStore],
+    [rememberTranslationZoom, viewStore],
   );
 
   const handleViewChange = useCallback(
@@ -1062,8 +1165,7 @@ export function Reader() {
       // restored synchronously at documentinit, so ignore events until then.
       if (!viewerReadyRef.current) return;
       const document = currentDocumentRef.current;
-      const memory = document && scrollMemoryRef.current.get(document.id);
-      const next = memory ? { ...view, scrollMemory: memory } : view;
+      const next = document ? withBookState(document.id, view) : view;
       const previous = lastViewRef.current;
       if (previous && sameReaderView(previous, next)) return;
       lastViewRef.current = next;
@@ -1072,7 +1174,24 @@ export function Reader() {
       if (!document || previewOnlyRef.current) return;
       viewStore.changed(document.id, next);
     },
-    [viewStore],
+    [viewStore, withBookState],
+  );
+
+  const changeTranslationZoom = useCallback(
+    (zoom: TranslationZoom) => {
+      const body = pageBodyRef.current;
+      if (body) {
+        const max = body.scrollHeight - body.clientHeight;
+        zoomScrollRef.current = max > 0 ? clamp(body.scrollTop / max, 0, 1) : 0;
+      }
+      setTranslationZoom(zoom);
+      const document = currentDocumentRef.current;
+      if (!document) return;
+      translationZoomRef.current.set(document.id, zoom);
+      const view = currentViewSnapshot();
+      if (view) handleViewChange(view);
+    },
+    [currentViewSnapshot, handleViewChange],
   );
 
   const retryViewRestore = useCallback(async () => {
@@ -1102,6 +1221,7 @@ export function Reader() {
       }
       initialViewRef.current = stored;
       lastViewRef.current = stored;
+      rememberTranslationZoom(document.id, stored.translationZoom ?? DEFAULT_TRANSLATION_ZOOM);
       if (stored.format === "epub") {
         const bridge = epubBridgeRef.current;
         if (!bridge) return;
@@ -1113,7 +1233,7 @@ export function Reader() {
     } catch {
       if (sessionAtStart === sessionRef.current) setViewRestoreFailed(true);
     }
-  }, [currentViewSnapshot, requestPdfRestore, restoreEpubView, viewStore]);
+  }, [currentViewSnapshot, rememberTranslationZoom, requestPdfRestore, restoreEpubView, viewStore]);
 
   const captureCurrentView = useCallback(
     (documentId: string, schedule = false): boolean => {
@@ -3061,6 +3181,7 @@ export function Reader() {
         await apiFetch(`/api/documents/${document.id}`, { method: "DELETE" });
         viewStore.deleted(document.id);
         scrollMemoryRef.current.delete(document.id);
+        translationZoomRef.current.delete(document.id);
         setLibrary((previous) => {
           if (!previous) return previous;
           return {
@@ -4092,6 +4213,26 @@ export function Reader() {
                     ))}
                   </select>
                 </label>
+                {zoomActive && !immersive && (
+                  <label className="language-field">
+                    {t.translationZoom.label}
+                    <select
+                      value={String(translationZoom)}
+                      onChange={(event) => {
+                        const zoom = translationZoomFromValue(event.target.value);
+                        if (zoom !== null) changeTranslationZoom(zoom);
+                      }}
+                    >
+                      {TRANSLATION_ZOOMS.map((zoom) => (
+                        <option key={String(zoom)} value={String(zoom)}>
+                          {typeof zoom === "number"
+                            ? t.translationZoom.percent(Math.round(zoom * 100))
+                            : t.translationZoom[ZOOM_PRESET_LABELS[zoom]]}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
                 <div className="page-actions">
                   <button
                     type="button"
@@ -4189,7 +4330,7 @@ export function Reader() {
 
               <div
                 className="page-body"
-                ref={pageBodyRef}
+                ref={attachPageBody}
                 onScroll={handleBodyScroll}
                 onWheel={handleBodyUserIntent}
                 onTouchStart={handleBodyUserIntent}
@@ -4369,6 +4510,7 @@ export function Reader() {
                             onShortcut={handleReaderShortcut}
                             onRendered={handleTranslationRendered}
                             onPreviewError={() => void exitImmersive()}
+                            zoom={translationZoomFrame}
                           />
                         </div>
                       )}
