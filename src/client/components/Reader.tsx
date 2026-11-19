@@ -768,14 +768,15 @@ export function Reader() {
     [translationZoom, zoomActive, zoomViewport],
   );
 
-  // A zoom change keeps the reader at the same share of the translation.
-  const zoomScrollRef = useRef<number | null>(null);
+  // A zoom change keeps the reader at the same share of the translation, down and across.
+  const zoomScrollRef = useRef<{ left: number; top: number } | null>(null);
   useLayoutEffect(() => {
     const fraction = zoomScrollRef.current;
     zoomScrollRef.current = null;
     const body = pageBodyRef.current;
     if (fraction === null || !body) return;
-    body.scrollTop = fraction * Math.max(0, body.scrollHeight - body.clientHeight);
+    body.scrollLeft = fraction.left * Math.max(0, body.scrollWidth - body.clientWidth);
+    body.scrollTop = fraction.top * Math.max(0, body.scrollHeight - body.clientHeight);
   }, [translationZoom]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -1181,8 +1182,12 @@ export function Reader() {
     (zoom: TranslationZoom) => {
       const body = pageBodyRef.current;
       if (body) {
-        const max = body.scrollHeight - body.clientHeight;
-        zoomScrollRef.current = max > 0 ? clamp(body.scrollTop / max, 0, 1) : 0;
+        const share = (offset: number, range: number): number =>
+          range > 0 ? clamp(offset / range, 0, 1) : 0;
+        zoomScrollRef.current = {
+          left: share(body.scrollLeft, body.scrollWidth - body.clientWidth),
+          top: share(body.scrollTop, body.scrollHeight - body.clientHeight),
+        };
       }
       setTranslationZoom(zoom);
       const document = currentDocumentRef.current;
@@ -4216,7 +4221,9 @@ export function Reader() {
                 {zoomActive && !immersive && (
                   <label className="language-field">
                     {t.translationZoom.label}
+                    {/* Until the book's stored view is restored, a choice would be overwritten by it. */}
                     <select
+                      disabled={!viewerReady}
                       value={String(translationZoom)}
                       onChange={(event) => {
                         const zoom = translationZoomFromValue(event.target.value);

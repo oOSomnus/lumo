@@ -353,6 +353,19 @@ test("Right only zooms the translation like the PDF viewer and remembers the zoo
   await expectPreview(Math.floor((await pane()).width), true);
   await zoom.selectOption({ label: "400%" });
   await expectPreview(2720, false);
+  // Zooming keeps the same share of the page in view, across as well as down. In a narrower
+  // window 300% overflows too, so both zooms scroll sideways.
+  await page.setViewportSize({ width: 1800, height: 1100 });
+  await expectPreview(2720, false);
+  const across = () =>
+    page.locator(".page-body").evaluate((body) => body.scrollLeft / (body.scrollWidth - body.clientWidth));
+  await page.locator(".page-body").evaluate((body) => {
+    body.scrollLeft = (body.scrollWidth - body.clientWidth) / 2;
+  });
+  await zoom.selectOption({ label: "300%" });
+  await expectPreview(2040, false);
+  near(await across(), 0.5, 0.02, "horizontal share after zooming");
+  await page.setViewportSize({ width: 2400, height: 1100 });
   await zoom.selectOption({ label: "200%" });
   await expectPreview(1360, true);
 
