@@ -64,7 +64,9 @@ async function main(): Promise<void> {
   await buildPanel();
 
   const statusFile = join(root, "dist", "signing-status.txt");
+  const updaterFile = join(root, "dist", "updater-status.txt");
   rmSync(statusFile, { force: true });
+  rmSync(updaterFile, { force: true });
   const tauri = [bun, "run", "tauri", mode, "--target", target.triple];
   if (mode === "build" && signing) {
     tauri.push("--bundles", BUNDLES[target.platform]);
@@ -89,6 +91,8 @@ async function main(): Promise<void> {
     // Written only after Tauri succeeded: a failed signing step never leaves a "signed" claim behind.
     const status = signingStatus(target.platform, signing);
     writeFileSync(statusFile, `${status}\n`);
+    // Whether Tauri made signed update packages; scripts/release.ts collects them only then.
+    writeFileSync(updaterFile, `${updater ? "signed" : "none"}\n`);
     console.log(`Signing: ${status}`);
   }
 }

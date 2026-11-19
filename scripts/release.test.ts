@@ -3,7 +3,15 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { allInstallerNames, assertTagMatches, collectInstallers, collectUpdaterArtifact, finalizeRelease, installerNames } from "./release";
+import {
+  allInstallerNames,
+  assertTagMatches,
+  collectInstallers,
+  collectRelease,
+  collectUpdaterArtifact,
+  finalizeRelease,
+  installerNames,
+} from "./release";
 import { BUILD_TARGETS, getBuildTarget } from "./targets";
 
 let work: string;
@@ -127,6 +135,63 @@ describe("collectUpdaterArtifact", () => {
     );
     expect(readFileSync(join(work, "out", "lumo-v1.2.3-linux-x64.AppImage.sig"), "utf8")).toBe(
       "signature\n",
+    );
+  });
+});
+
+describe("collectRelease", () => {
+  const linux = getBuildTarget("x86_64-unknown-linux-gnu");
+
+  /** A Linux build's bundles and dist/, signed for the updater or not. */
+  function build(updater: "signed" | "none" | null): { bundleRoot: string; distDir: string } {
+    const bundleRoot = join(work, "bundle");
+    const distDir = join(work, "dist");
+    write(join(bundleRoot, "deb", "Lumo_1.2.3_amd64.deb"), "deb");
+    write(join(bundleRoot, "rpm", "Lumo-1.2.3-1.x86_64.rpm"), "rpm");
+    write(join(bundleRoot, "appimage", "Lumo_1.2.3_amd64.AppImage"), "appimage");
+    if (updater === "signed") write(join(bundleRoot, "appimage", "Lumo_1.2.3_amd64.AppImage.sig"), "signature");
+    write(join(distDir, "notices", "THIRD_PARTY_NOTICES.txt"), "notices");
+    write(join(distDir, "signing-status.txt"), "unsigned\n");
+    if (updater) write(join(distDir, "updater-status.txt"), `${updater}\n`);
+    return { bundleRoot, distDir };
+  }
+
+  test("a build without the updater key gives installers but no update package or manifest", () => {
+    const { bundleRoot, distDir } = build("none");
+    const out = join(work, "out");
+    const names = collectRelease(bundleRoot, distDir, linux, "1.2.3", out);
+    expect(names.sort()).toEqual(
+      [...installerNames(linux, "1.2.3"), "THIRD_PARTY_NOTICES.txt", `signing-${linux.triple}.txt`].sort(),
+    );
+    expect(readdirSync(out).sort()).toEqual(names);
+  });
+
+  test("a signed build adds the update package, its signature and the manifest entry", () => {
+    const { bundleRoot, distDir } = build("signed");
+    const out = join(work, "out");
+    const names = collectRelease(bundleRoot, distDir, linux, "1.2.3", out);
+    expect(names).toContain("lumo-v1.2.3-linux-x64.AppImage.sig");
+    expect(names).toContain(`update-${linux.triple}.json`);
+    const fragment = JSON.parse(readFileSync(join(out, `update-${linux.triple}.json`), "utf8"));
+    expect(fragment.signature).toBe("signature");
+  });
+
+  test("a build that claims signed update packages must have them", () => {
+    const { bundleRoot, distDir } = build("signed");
+    rmSync(join(bundleRoot, "appimage", "Lumo_1.2.3_amd64.AppImage.sig"));
+    expect(() => collectRelease(bundleRoot, distDir, linux, "1.2.3", join(work, "out"))).toThrow(
+      /no updater signature/,
+    );
+  });
+
+  test("a missing or unknown updater status fails instead of guessing", () => {
+    const { bundleRoot, distDir } = build(null);
+    expect(() => collectRelease(bundleRoot, distDir, linux, "1.2.3", join(work, "out"))).toThrow(
+      /updater-status\.txt is missing/,
+    );
+    write(join(distDir, "updater-status.txt"), "maybe\n");
+    expect(() => collectRelease(bundleRoot, distDir, linux, "1.2.3", join(work, "out"))).toThrow(
+      /must say "signed" or "none"/,
     );
   });
 });
