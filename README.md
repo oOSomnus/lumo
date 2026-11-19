@@ -49,7 +49,7 @@ cargo test --locked --manifest-path src-tauri/Cargo.toml   # after a build
 bun scripts/smoke-desktop.ts                    # runs the built server the way the window does
 ```
 
-`bun run build --target <triple>` builds another architecture of the same OS; `bun run build:server` builds only the standalone server in `dist/sidecar/`. CI builds all six targets (Windows, macOS, Linux × x64, ARM64) on native runners, and a `v*` tag drafts a release; see `.github/workflows/`.
+`bun run build --target <triple>` builds another architecture of the same OS; `bun run build:server` builds only the standalone server in `dist/sidecar/`. Pull requests and pushes to `main` run the typecheck, unit tests and the standalone server's smoke and end-to-end tests on Linux. A `v*` tag builds all six targets (Windows, macOS, Linux × x64, ARM64) on native runners and drafts a release; the Desktop builds workflow can also be run by hand for an unsigned build of all six. See `.github/workflows/`.
 
 A release build with in-app updates needs `LUMO_UPDATER_PUBLIC_KEY`, `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` in its environment. A partial set fails the build. The private key and password are build secrets; never commit them or expose them to the launcher panel.
 

@@ -49,7 +49,7 @@ cargo test --locked --manifest-path src-tauri/Cargo.toml   # 构建之后运行
 bun scripts/smoke-desktop.ts                    # 以桌面窗口的方式运行已构建的服务
 ```
 
-`bun run build --target <triple>` 可构建同一操作系统的另一种架构；`bun run build:server` 只构建 `dist/sidecar/` 中的独立服务。CI 在原生 runner 上构建全部六个目标（Windows、macOS、Linux × x64、ARM64），`v*` 标签会生成 Release 草稿，见 `.github/workflows/`。
+`bun run build --target <triple>` 可构建同一操作系统的另一种架构；`bun run build:server` 只构建 `dist/sidecar/` 中的独立服务。Pull request 和推送到 `main` 时，CI 在 Linux 上运行类型检查、单元测试，以及独立服务的冒烟测试和端到端测试。`v*` 标签会在原生 runner 上构建全部六个目标（Windows、macOS、Linux × x64、ARM64）并生成 Release 草稿；也可以手动运行 Desktop builds 工作流，得到六个目标的未签名构建。见 `.github/workflows/`。
 
 带应用内更新的 Release 构建需要在环境中提供 `LUMO_UPDATER_PUBLIC_KEY`、`TAURI_SIGNING_PRIVATE_KEY` 和 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。缺少任意一项构建会失败。私钥和密码是构建机密，不得提交，也不得暴露给启动器窗口。
 

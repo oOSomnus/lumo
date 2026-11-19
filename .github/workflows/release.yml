@@ -1,7 +1,7 @@
 name: Release
 
-# Builds all six targets through ci.yml, then drafts a GitHub Release. It never pushes a tag
-# and never publishes: a person reviews the draft and publishes it.
+# Runs the checks in ci.yml and the signed six-target build in desktop.yml, then drafts a GitHub
+# Release. It never pushes a tag and never publishes: a person reviews the draft and publishes it.
 on:
   push:
     tags: ["v*"]
@@ -50,10 +50,17 @@ jobs:
     uses: ./.github/workflows/ci.yml
     with:
       ref: ${{ needs.verify-tag.outputs.tag }}
+
+  desktop:
+    needs: verify-tag
+    uses: ./.github/workflows/desktop.yml
+    with:
+      ref: ${{ needs.verify-tag.outputs.tag }}
+      sign: true
     secrets: inherit
 
   publish:
-    needs: [verify-tag, checks]
+    needs: [verify-tag, checks, desktop]
     runs-on: ubuntu-22.04
     permissions:
       contents: write

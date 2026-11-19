@@ -234,8 +234,9 @@ export function finalizeRelease(inputDir: string, outputDir: string, version: st
 /**
  * Gathers one target's build into `outputDir`: installers, notices and signing status, plus the
  * signed update package when the build made one. `dist/updater-status.txt` (from scripts/desktop.ts)
- * says whether it did: pull-request builds get no updater key, so they have no update package and
- * no `update-<triple>.json`, and `finalizeRelease` refuses to turn them into a release.
+ * says whether it did: unsigned builds (manual desktop.yml runs, local builds) get no updater key, so
+ * they have no update package and no `update-<triple>.json`, and `finalizeRelease` refuses to turn
+ * them into a release.
  */
 export function collectRelease(
   bundleRoot: string,
