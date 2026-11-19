@@ -339,4 +339,39 @@ describe("sameReaderView", () => {
       sameReaderView(DEFAULT_PDF_READER_VIEW, DEFAULT_EPUB_READER_VIEW),
     ).toBe(false);
   });
+
+  test("compares the translation zoom, with a missing one meaning automatic", () => {
+    expect(
+      sameReaderView(DEFAULT_PDF_READER_VIEW, {
+        ...DEFAULT_PDF_READER_VIEW,
+        translationZoom: "auto",
+      }),
+    ).toBe(true);
+    expect(
+      sameReaderView(DEFAULT_EPUB_READER_VIEW, {
+        ...DEFAULT_EPUB_READER_VIEW,
+        translationZoom: 1.5,
+      }),
+    ).toBe(false);
+    expect(
+      sameReaderView(
+        { ...DEFAULT_PDF_READER_VIEW, translationZoom: "page-width" },
+        { ...DEFAULT_PDF_READER_VIEW, translationZoom: "page-fit" },
+      ),
+    ).toBe(false);
+  });
+
+  test("queues a change that differs only in the translation zoom", async () => {
+    const { transport, store } = setup();
+    transport.loadResult = async () => DEFAULT_PDF_READER_VIEW;
+    await store.load("doc", () => true);
+    store.changed("doc", { ...DEFAULT_PDF_READER_VIEW, translationZoom: "auto" });
+    await store.flush();
+    expect(transport.saves).toEqual([]);
+    store.changed("doc", { ...DEFAULT_PDF_READER_VIEW, translationZoom: 0.75 });
+    await store.flush();
+    expect(transport.saves).toEqual([
+      { id: "doc", view: { ...DEFAULT_PDF_READER_VIEW, translationZoom: 0.75 } },
+    ]);
+  });
 });

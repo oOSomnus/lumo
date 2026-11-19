@@ -375,10 +375,35 @@ export const readerScrollMemorySchema = z.strictObject({
 
 export type ReaderScrollMemory = z.infer<typeof readerScrollMemorySchema>;
 
+/** The translation pane's zoom in the Right-only layout: a PDF.js-like preset or a scale of the Typst page's actual size. */
+export const TRANSLATION_ZOOM_PRESETS = [
+  "auto",
+  "page-actual",
+  "page-fit",
+  "page-width",
+] as const;
+export const TRANSLATION_ZOOM_SCALES = [0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4] as const;
+
+export const translationZoomSchema = z.union([
+  z.enum(TRANSLATION_ZOOM_PRESETS),
+  z
+    .number()
+    .refine(
+      (value) => (TRANSLATION_ZOOM_SCALES as readonly number[]).includes(value),
+      "translationZoom must be a preset or one of the listed scales",
+    ),
+]);
+
+export type TranslationZoom = z.infer<typeof translationZoomSchema>;
+
+/** A book without a stored translation zoom uses this one. */
+export const DEFAULT_TRANSLATION_ZOOM: TranslationZoom = "auto";
+
 export const pdfReaderViewSchema = z.strictObject({
   format: z.literal("pdf"),
   scaleValue: readerViewScaleSchema,
   scrollMemory: readerScrollMemorySchema.optional(),
+  translationZoom: translationZoomSchema.optional(),
   rotation: z.union([
     z.literal(0),
     z.literal(90),
@@ -407,6 +432,7 @@ export const epubReaderViewSchema = z.strictObject({
   format: z.literal("epub"),
   cfi: z.string().min(1).max(MAX_EPUB_CFI_CHARS).nullable(),
   scrollMemory: readerScrollMemorySchema.optional(),
+  translationZoom: translationZoomSchema.optional(),
   fontSize: z.number().int().min(EPUB_FONT_SIZE_MIN).max(EPUB_FONT_SIZE_MAX),
   fontFamily: z.enum(EPUB_FONT_FAMILIES),
   lineHeight: z.union([

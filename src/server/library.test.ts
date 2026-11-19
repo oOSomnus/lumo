@@ -465,6 +465,7 @@ describe("handleLibrary", () => {
       rotation: 0,
       scrollMode: 3,
       spreadMode: 0,
+      translationZoom: "page-actual",
     };
     const putView = (documentId: string, body: string) =>
       call(ctx, `/api/documents/${documentId}/view`, {
@@ -487,6 +488,9 @@ describe("handleLibrary", () => {
 
     await expect(
       putView(first.id, JSON.stringify({ ...firstView, scaleValue: "125" })),
+    ).rejects.toMatchObject({ status: 400, code: "INVALID_REQUEST" });
+    await expect(
+      putView(first.id, JSON.stringify({ ...firstView, translationZoom: 0.33 })),
     ).rejects.toMatchObject({ status: 400, code: "INVALID_REQUEST" });
     expect(
       await (await call(ctx, `/api/documents/${first.id}/view`)).json(),

@@ -1,4 +1,8 @@
-import { readerViewSchema, type ReaderView } from "../shared/contracts";
+import {
+  DEFAULT_TRANSLATION_ZOOM,
+  readerViewSchema,
+  type ReaderView,
+} from "../shared/contracts";
 import { sameScrollMemory } from "./scroll-memory";
 
 // The outbox for a book's reading view: what was changed, what is being
@@ -24,6 +28,12 @@ export interface ReaderViewRead {
 export function sameReaderView(a: ReaderView, b: ReaderView): boolean {
   if (a.format !== b.format) return false;
   if (!sameScrollMemory(a.scrollMemory, b.scrollMemory)) return false;
+  if (
+    (a.translationZoom ?? DEFAULT_TRANSLATION_ZOOM) !==
+    (b.translationZoom ?? DEFAULT_TRANSLATION_ZOOM)
+  ) {
+    return false;
+  }
   if (a.format === "epub" && b.format === "epub") {
     return (
       a.cfi === b.cfi &&

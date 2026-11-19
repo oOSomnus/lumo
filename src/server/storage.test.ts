@@ -429,6 +429,11 @@ describe("storage", () => {
     };
     expect(saveReaderView(db, document.id, view)).toEqual(view);
 
+    const zoomed: ReaderView = { ...view, translationZoom: 1.25 };
+    expect(saveReaderView(db, document.id, zoomed)).toEqual(zoomed);
+    expect(getReaderView(db, document.id)).toEqual(zoomed);
+    expect(saveReaderView(db, document.id, view)).toEqual(view);
+
     db.close();
     databases.splice(databases.indexOf(db), 1);
     const reopened = openReaderDb(directory);
@@ -454,6 +459,12 @@ describe("storage", () => {
 
     expect(() =>
       saveReaderView(db, document.id, { ...view, scaleValue: "125" }),
+    ).toThrow();
+    expect(() =>
+      saveReaderView(db, document.id, { ...view, translationZoom: 0.33 } as unknown as ReaderView),
+    ).toThrow();
+    expect(() =>
+      saveReaderView(db, document.id, { ...view, translationZoom: "huge" } as unknown as ReaderView),
     ).toThrow();
     expect(() =>
       saveReaderView(db, document.id, {

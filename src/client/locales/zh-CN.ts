@@ -79,6 +79,14 @@ export const zhCN: Messages = {
     leftWide: "左侧优先",
     rightWide: "右侧优先",
   },
+  translationZoom: {
+    label: "缩放",
+    auto: "自动缩放",
+    actual: "实际大小",
+    pageFit: "适合页面",
+    pageWidth: "适合页宽",
+    percent: (percent: number) => `${percent}%`,
+  },
   ai: {
     checking: "正在读取 AI 配置…",
     checkFailed: (detail) => `无法读取 AI 配置：${detail}`,

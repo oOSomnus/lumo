@@ -231,6 +231,46 @@ export function finalizeRelease(inputDir: string, outputDir: string, version: st
   return [...listed, "SHA256SUMS"];
 }
 
+/**
+ * Gathers one target's build into `outputDir`: installers, notices and signing status, plus the
+ * signed update package when the build made one. `dist/updater-status.txt` (from scripts/desktop.ts)
+ * says whether it did: pull-request builds get no updater key, so they have no update package and
+ * no `update-<triple>.json`, and `finalizeRelease` refuses to turn them into a release.
+ */
+export function collectRelease(
+  bundleRoot: string,
+  distDir: string,
+  target: BuildTarget,
+  version: string,
+  outputDir: string,
+): string[] {
+  const missing = (file: string): Error =>
+    new Error(`${file} is missing; run \`bun run build --target ${target.triple}\` first`);
+  const updaterStatus = join(distDir, "updater-status.txt");
+  if (!existsSync(updaterStatus)) throw missing(updaterStatus);
+  const updater = readFileSync(updaterStatus, "utf8").trim();
+  if (updater !== "signed" && updater !== "none") {
+    throw new Error(`${updaterStatus} must say "signed" or "none", not "${updater}"`);
+  }
+
+  const names = collectInstallers(bundleRoot, target, version, outputDir);
+  if (updater === "signed") {
+    const fragment = collectUpdaterArtifact(bundleRoot, target, version, outputDir);
+    const manifest = `update-${target.triple}.json`;
+    writeFileSync(join(outputDir, manifest), `${JSON.stringify(fragment)}\n`);
+    names.push(...fragment.files, manifest);
+  }
+  for (const [source, name] of [
+    [join(distDir, "notices", "THIRD_PARTY_NOTICES.txt"), "THIRD_PARTY_NOTICES.txt"],
+    [join(distDir, "signing-status.txt"), `signing-${target.triple}.txt`],
+  ] as const) {
+    if (!existsSync(source)) throw missing(source);
+    copyFileSync(source, join(outputDir, name));
+    names.push(name);
+  }
+  return names;
+}
+
 function main(): void {
   const [command, ...rest] = process.argv.slice(2);
   const version = packageJson.version;
@@ -240,17 +280,11 @@ function main(): void {
     const target = getBuildTarget(rest[1]);
     const output = join(root, "dist", "release", target.triple);
     const bundles = join(root, "src-tauri", "target", target.triple, "release", "bundle");
-    const names = collectInstallers(bundles, target, version, output);
-    const updater = collectUpdaterArtifact(bundles, target, version, output);
-    writeFileSync(join(output, `update-${target.triple}.json`), `${JSON.stringify(updater)}\n`);
-    for (const [source, name] of [
-      [join(root, "dist", "notices", "THIRD_PARTY_NOTICES.txt"), "THIRD_PARTY_NOTICES.txt"],
-      [join(root, "dist", "signing-status.txt"), `signing-${target.triple}.txt`],
-    ] as const) {
-      if (!existsSync(source)) throw new Error(`${source} is missing; run \`bun run build --target ${target.triple}\` first`);
-      copyFileSync(source, join(output, name));
+    const names = collectRelease(bundles, join(root, "dist"), target, version, output);
+    console.log(`Collected ${names.join(", ")} in ${output}`);
+    if (!names.includes(`update-${target.triple}.json`)) {
+      console.log("No update package: the build had no updater signing key, so this target cannot be released.");
     }
-    console.log(`Collected ${names.join(", ")} and ${updater.files.join(", ")} in ${output}`);
   } else if (command === "finalize" && rest.length === 2) {
     const names = finalizeRelease(resolve(rest[0]!), resolve(rest[1]!), version, join(root, "LICENSE"));
     console.log(`Release folder ${resolve(rest[1]!)}: ${names.join(", ")}`);
