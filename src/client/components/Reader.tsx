@@ -1433,6 +1433,9 @@ export function Reader() {
     const document = currentDocumentRef.current;
     if (document && screenRef.current === "reader") captureCurrentView(document.id);
     settingsReturnRef.current = screenRef.current;
+    // Like the Library, Settings stops a book still being opened from pulling the user away: an
+    // import still joins the list, and reader work and a login carry on.
+    openAttemptRef.current += 1;
     screenRef.current = "settings";
     setScreen("settings");
   }, [captureCurrentView, exitImmersive]);
@@ -4653,7 +4656,11 @@ export function Reader() {
           onOpenOutlinePage={openOutlinePage}
           aiStatus={ai.state === "ready" ? ai.snapshot.status : null}
           aiStatusError={ai.state === "error" ? ai.error : null}
-          onConfigureAi={openSettings}
+          onConfigureAi={() => {
+            // The modal would leave Settings inert behind it.
+            setPdfExportOpen(false);
+            openSettings();
+          }}
           onRetryAiStatus={() => void refreshAiStatus(true)}
         />
       )}

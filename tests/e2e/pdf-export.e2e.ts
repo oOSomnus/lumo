@@ -188,3 +188,26 @@ test("PDF export builds the PDF by itself once the pages it queued are saved", a
   expect(exported.texts[0]).toContain("Kept");
   expect(exported.texts[1]).toContain("Fresh 2");
 });
+
+test.describe("without an AI setup", () => {
+  test.use({ aiConfigured: false });
+
+  test("Configure AI in the PDF export closes the dialog and leaves Settings usable", async ({ page, lumo }) => {
+    await uploadPdf(lumo.api, "pdf-setup.pdf", 2, "setup");
+    await openTranslatedPage(page, lumo.url, "pdf-setup.pdf");
+    await page.getByRole("button", { name: "Export", exact: true }).click();
+    await page.getByRole("button", { name: "PDF: choose pages, layout and width…" }).click();
+    const dialog = page.getByRole("dialog", { name: "Export translation as PDF" });
+    await dialog.getByRole("button", { name: "All pages", exact: true }).click();
+    await dialog.getByRole("button", { name: "Export PDF", exact: true }).click();
+    await dialog.getByRole("button", { name: "Configure AI to translate" }).click();
+
+    await expect(dialog).toBeHidden();
+    const settings = page.getByRole("main", { name: "Settings" });
+    await expect(settings).toBeVisible();
+    // A click lands only when no modal leaves Settings inert.
+    await settings.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(settings).toBeHidden();
+    await expect(page.locator(".reader-header")).toBeVisible();
+  });
+});
