@@ -18,7 +18,8 @@ import {
   getAppSettings,
   getDocument,
   getDocumentFile,
-  getGeneratedOutline,
+  clearImportedOutline,
+  getImportedOutline,
   getReaderView,
   getSettings,
   getTranslation,
@@ -27,14 +28,16 @@ import {
   listTranslationLocations,
   listTranslations,
   openReaderDb,
+  ReaderUpgradeRequiredError,
   removeDocument,
   resolveDataDirectory,
   saveAiConfig,
-  saveGeneratedOutline,
+  saveImportedOutline,
   saveReaderView,
   saveTranslation,
   saveUiLocale,
   SCHEMA_VERSION,
+  UPGRADABLE_SCHEMA_VERSION,
   storeDocument,
   StoredAiConfigError,
   updateReaderSettings,
@@ -85,6 +88,38 @@ function liveWalCopy(version: number): string {
   }
   expect(readdirSync(copy)).toContain(`${DB_FILENAME}-wal`);
   return copy;
+}
+
+const previousOutline: OutlineEntry[] = [
+  { title: "Kept", level: 1, pageNumber: 1 },
+];
+
+/** A data directory holding a database of the previous schema, with a document, translation and outline. */
+function previousSchemaDirectory(): string {
+  const directory = mkdtempSync(join(tmpdir(), "lumo-storage-"));
+  directories.push(directory);
+  const db = openReaderDb(directory);
+  const document = storeDocument(
+    db,
+    { name: "kept.pdf", pageCount: 1, format: "pdf" },
+    new TextEncoder().encode("%PDF-1.7 kept for the upgrade"),
+  );
+  saveTranslation(db, { documentId: document.id, pageNumber: 1, targetLanguage: "en" }, content("= Kept"));
+  saveImportedOutline(db, document.id, previousOutline);
+  db.close();
+  // The previous schema differs from the current one only in this column's name.
+  const raw = new Database(join(directory, DB_FILENAME));
+  raw.exec("ALTER TABLE documents RENAME COLUMN importedOutline TO generatedOutline");
+  raw.exec(`PRAGMA user_version = ${UPGRADABLE_SCHEMA_VERSION}`);
+  raw.exec("PRAGMA journal_mode = DELETE");
+  raw.close();
+  return directory;
+}
+
+function schemaOf(db: Database): unknown[] {
+  return db
+    .query("SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name")
+    .all();
 }
 
 afterEach(() => {
@@ -294,11 +329,13 @@ describe("storage", () => {
   });
 
   test("refuses an older database byte for byte untouched when its newest pages are still in the WAL", () => {
-    const copy = liveWalCopy(SCHEMA_VERSION - 1);
-    const before = snapshot(copy);
+    for (const version of [UPGRADABLE_SCHEMA_VERSION - 1, UPGRADABLE_SCHEMA_VERSION]) {
+      const copy = liveWalCopy(version);
+      const before = snapshot(copy);
 
-    expect(() => openReaderDb(copy)).toThrow();
-    expect(snapshot(copy)).toEqual(before);
+      expect(() => openReaderDb(copy)).toThrow();
+      expect(snapshot(copy)).toEqual(before);
+    }
   });
 
   test("recovers the pages a current database still has in its WAL", () => {
@@ -306,6 +343,143 @@ describe("storage", () => {
     databases.push(db);
 
     expect(listDocuments(db).map((document) => document.name)).toEqual(["kept.pdf"]);
+  });
+
+  test("asks before upgrading the previous schema and leaves it untouched until then", () => {
+    const directory = previousSchemaDirectory();
+    const before = snapshot(directory);
+
+    expect(() => openReaderDb(directory)).toThrow(ReaderUpgradeRequiredError);
+    expect(() => openReaderDb(directory, { upgrade: false })).toThrow(ReaderUpgradeRequiredError);
+    expect(snapshot(directory)).toEqual(before);
+  });
+
+  test("upgrades the previous schema after a backup, keeping every row", () => {
+    const directory = previousSchemaDirectory();
+    const backups: string[] = [];
+    const db = openReaderDb(directory, {
+      upgrade: true,
+      onUpgraded: (path) => backups.push(path),
+    });
+    databases.push(db);
+
+    expect(db.query("PRAGMA user_version").get()).toEqual({ user_version: SCHEMA_VERSION });
+    const [document] = listDocuments(db);
+    expect(document?.name).toBe("kept.pdf");
+    expect(getImportedOutline(db, document!.id)).toEqual(previousOutline);
+    expect(getTranslation(db, { documentId: document!.id, pageNumber: 1, targetLanguage: "en" })?.typst).toBe("= Kept");
+    expect(schemaOf(db)).toEqual(schemaOf(tempDb()));
+
+    expect(backups).toHaveLength(1);
+    expect(backups[0]!.startsWith(join(directory, `${DB_FILENAME}.v${UPGRADABLE_SCHEMA_VERSION}-`))).toBe(true);
+    const backup = new Database(backups[0]!, { readonly: true });
+    try {
+      expect(backup.query("PRAGMA user_version").get()).toEqual({
+        user_version: UPGRADABLE_SCHEMA_VERSION,
+      });
+      expect(
+        JSON.parse(
+          (backup.query("SELECT generatedOutline FROM documents").get() as { generatedOutline: string })
+            .generatedOutline,
+        ),
+      ).toEqual(previousOutline);
+    } finally {
+      backup.close();
+    }
+
+    db.close();
+    databases.splice(databases.indexOf(db), 1);
+    const reopened = openReaderDb(directory);
+    databases.push(reopened);
+    expect(listDocuments(reopened)).toHaveLength(1);
+  });
+
+  test("rolls a failed upgrade back to the previous schema", () => {
+    const directory = mkdtempSync(join(tmpdir(), "lumo-storage-"));
+    directories.push(directory);
+    openReaderDb(directory).close();
+    // Claims the previous version but lacks its column, so the upgrade step fails.
+    const raw = new Database(join(directory, DB_FILENAME));
+    raw.exec(`PRAGMA user_version = ${UPGRADABLE_SCHEMA_VERSION}`);
+    raw.close();
+
+    expect(() => openReaderDb(directory, { upgrade: true })).toThrow();
+    const check = new Database(join(directory, DB_FILENAME), { readonly: true });
+    try {
+      expect(check.query("PRAGMA user_version").get()).toEqual({
+        user_version: UPGRADABLE_SCHEMA_VERSION,
+      });
+      expect(
+        (check.query("PRAGMA table_info(documents)").all() as { name: string }[]).map(
+          (column) => column.name,
+        ),
+      ).toContain("importedOutline");
+    } finally {
+      check.close();
+    }
+  });
+
+  test("rolls back an upgrade that fails after renaming the column, keeping the backup", () => {
+    const directory = previousSchemaDirectory();
+    // An extra column survives the rename, so the table does not match this build's and the check after it fails.
+    const raw = new Database(join(directory, DB_FILENAME));
+    raw.exec("ALTER TABLE documents ADD COLUMN unexpected TEXT");
+    raw.close();
+    const backups: string[] = [];
+
+    expect(() =>
+      openReaderDb(directory, { upgrade: true, onUpgraded: (path) => backups.push(path) }),
+    ).toThrow("unexpected documents columns");
+    expect(backups).toEqual([]);
+
+    const check = new Database(join(directory, DB_FILENAME), { readonly: true });
+    try {
+      expect(check.query("PRAGMA user_version").get()).toEqual({
+        user_version: UPGRADABLE_SCHEMA_VERSION,
+      });
+      const columns = (check.query("PRAGMA table_info(documents)").all() as { name: string }[]).map(
+        (column) => column.name,
+      );
+      expect(columns).toContain("generatedOutline");
+      expect(columns).not.toContain("importedOutline");
+      expect(
+        JSON.parse(
+          (check.query("SELECT generatedOutline FROM documents").get() as { generatedOutline: string })
+            .generatedOutline,
+        ),
+      ).toEqual(previousOutline);
+    } finally {
+      check.close();
+    }
+    const kept = readdirSync(directory).filter(
+      (name) => name.startsWith(`${DB_FILENAME}.v${UPGRADABLE_SCHEMA_VERSION}-`) && name.endsWith(".bak"),
+    );
+    expect(kept).toHaveLength(1);
+    const backup = new Database(join(directory, kept[0]!), { readonly: true });
+    try {
+      expect(backup.query("PRAGMA user_version").get()).toEqual({
+        user_version: UPGRADABLE_SCHEMA_VERSION,
+      });
+    } finally {
+      backup.close();
+    }
+  });
+
+  test("never upgrades any other schema version", () => {
+    for (const version of [3, 6, SCHEMA_VERSION + 1]) {
+      const directory = mkdtempSync(join(tmpdir(), "lumo-storage-"));
+      directories.push(directory);
+      openReaderDb(directory).close();
+      const raw = new Database(join(directory, DB_FILENAME));
+      raw.exec(`PRAGMA user_version = ${version}`);
+      raw.close();
+      const before = snapshot(directory);
+
+      expect(() => openReaderDb(directory, { upgrade: true })).toThrow(
+        `uses schema version ${version}`,
+      );
+      expect(snapshot(directory)).toEqual(before);
+    }
   });
 
   test("starts a fresh database when a stale WAL is all that is left of a deleted one", () => {
@@ -534,14 +708,14 @@ describe("storage", () => {
   });
 });
 
-describe("generated outline storage", () => {
+describe("imported outline storage", () => {
   const outline: OutlineEntry[] = [
     { title: "A", level: 1, pageNumber: 2 },
     { title: "A.1", level: 2, pageNumber: 2 },
     { title: "B", level: 1, pageNumber: 4 },
   ];
 
-  test("stores a generated outline across reopen and removes it with the document", () => {
+  test("stores an imported outline across reopen and removes it with the document", () => {
     const directory = mkdtempSync(join(tmpdir(), "lumo-storage-"));
     directories.push(directory);
     const db = openReaderDb(directory);
@@ -549,18 +723,24 @@ describe("generated outline storage", () => {
     const document = storeDocument(
       db,
       { name: "outline.pdf", pageCount: 5, format: "pdf" },
-      new TextEncoder().encode("%PDF-1.7 generated outline"),
+      new TextEncoder().encode("%PDF-1.7 imported outline"),
     );
-    expect(getGeneratedOutline(db, document.id)).toBeNull();
-    expect(saveGeneratedOutline(db, document.id, outline)).toEqual(outline);
+    expect(getImportedOutline(db, document.id)).toBeNull();
+    expect(saveImportedOutline(db, document.id, outline)).toEqual(outline);
 
     db.close();
     databases.splice(databases.indexOf(db), 1);
     const reopened = openReaderDb(directory);
     databases.push(reopened);
-    expect(getGeneratedOutline(reopened, document.id)).toEqual(outline);
+    expect(getImportedOutline(reopened, document.id)).toEqual(outline);
+    clearImportedOutline(reopened, document.id);
+    expect(getImportedOutline(reopened, document.id)).toBeNull();
+    saveImportedOutline(reopened, document.id, outline);
     expect(removeDocument(reopened, document.id)).toBe(true);
-    expect(() => getGeneratedOutline(reopened, document.id)).toThrow(
+    expect(() => getImportedOutline(reopened, document.id)).toThrow(
+      DocumentNotFoundError,
+    );
+    expect(() => clearImportedOutline(reopened, document.id)).toThrow(
       DocumentNotFoundError,
     );
   });
@@ -572,34 +752,34 @@ describe("generated outline storage", () => {
       { name: "outline.pdf", pageCount: 5, format: "pdf" },
       new TextEncoder().encode("%PDF-1.7 outline failures"),
     );
-    saveGeneratedOutline(db, document.id, outline);
+    saveImportedOutline(db, document.id, outline);
 
-    expect(() => saveGeneratedOutline(db, document.id, [])).toThrow();
+    expect(() => saveImportedOutline(db, document.id, [])).toThrow();
     expect(() =>
-      saveGeneratedOutline(db, document.id, [
+      saveImportedOutline(db, document.id, [
         { title: "Outside", level: 1, pageNumber: 6 },
       ]),
     ).toThrow();
     expect(() =>
-      saveGeneratedOutline(db, document.id, [
+      saveImportedOutline(db, document.id, [
         { title: "Skip", level: 2, pageNumber: 1 },
       ]),
     ).toThrow();
     expect(() =>
-      saveGeneratedOutline(db, "b".repeat(64), outline),
+      saveImportedOutline(db, "b".repeat(64), outline),
     ).toThrow(DocumentNotFoundError);
 
     db.exec("PRAGMA query_only = ON");
     try {
       expect(() =>
-        saveGeneratedOutline(db, document.id, [
+        saveImportedOutline(db, document.id, [
           { title: "Changed", level: 1, pageNumber: 1 },
         ]),
       ).toThrow();
     } finally {
       db.exec("PRAGMA query_only = OFF");
     }
-    expect(getGeneratedOutline(db, document.id)).toEqual(outline);
+    expect(getImportedOutline(db, document.id)).toEqual(outline);
   });
 
   test("rejects a corrupted stored outline without rewriting it", () => {
@@ -619,18 +799,18 @@ describe("generated outline storage", () => {
       ]),
     ];
     for (const value of stored) {
-      db.query("UPDATE documents SET generatedOutline = ? WHERE id = ?").run(
+      db.query("UPDATE documents SET importedOutline = ? WHERE id = ?").run(
         value,
         document.id,
       );
-      expect(() => getGeneratedOutline(db, document.id)).toThrow(
-        "stored generated outline is invalid",
+      expect(() => getImportedOutline(db, document.id)).toThrow(
+        "stored imported outline is invalid",
       );
       expect(
         db
-          .query("SELECT generatedOutline FROM documents WHERE id = ?")
+          .query("SELECT importedOutline FROM documents WHERE id = ?")
           .get(document.id),
-      ).toEqual({ generatedOutline: value });
+      ).toEqual({ importedOutline: value });
     }
   });
 });

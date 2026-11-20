@@ -4,6 +4,7 @@ import {
   DOCUMENT_UPLOAD_QUERY_SCHEMA,
   MAX_EPUB_CFI_CHARS,
   documentIdSchema,
+  MAX_OUTLINE_JSON_BYTES,
   outlineEntriesSchema,
   pageNumberSchema,
   readerUpdateSchema,
@@ -28,7 +29,8 @@ import { EpubPackageError, readEpubSpineCount } from "./epub";
 import {
   getDocument,
   getDocumentFile,
-  getGeneratedOutline,
+  clearImportedOutline,
+  getImportedOutline,
   getReaderView,
   getSettings,
   getTranslation,
@@ -37,7 +39,7 @@ import {
   listTranslationLocations,
   listTranslations,
   removeDocument,
-  saveGeneratedOutline,
+  saveImportedOutline,
   saveReaderView,
   saveTranslation,
   storeDocument,
@@ -48,7 +50,6 @@ const MAX_TRANSLATION_BYTES = 1024 * 1024;
 const MAX_READER_BYTES = 64 * 1024;
 // A CFI is up to MAX_EPUB_CFI_CHARS characters of up to 4 UTF-8 bytes each.
 const MAX_READER_VIEW_BYTES = MAX_EPUB_CFI_CHARS * 4 + 2048;
-const MAX_OUTLINE_BYTES = 32 * 1024 * 1024;
 
 const languageQuerySchema = z.strictObject({
   targetLanguage: targetLanguageSchema,
@@ -293,18 +294,22 @@ export async function handleLibrary(
     }
     if (method === "GET") {
       return jsonResponse({
-        outline: getGeneratedOutline(ctx.db, documentId),
+        outline: getImportedOutline(ctx.db, documentId),
       });
     }
     if (method === "PUT") {
       const entries = await readJson(
         request,
-        MAX_OUTLINE_BYTES,
+        MAX_OUTLINE_JSON_BYTES,
         outlineEntriesSchema,
       );
       return jsonResponse({
-        outline: saveGeneratedOutline(ctx.db, documentId, entries),
+        outline: saveImportedOutline(ctx.db, documentId, entries),
       });
+    }
+    if (method === "DELETE") {
+      clearImportedOutline(ctx.db, documentId);
+      return jsonResponse({ outline: null });
     }
     throw new HttpError(405, "METHOD_NOT_ALLOWED", "method not allowed");
   }

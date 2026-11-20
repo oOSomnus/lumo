@@ -23,15 +23,21 @@ import {
   type GateConfig,
 } from "./http";
 import { handleLibrary } from "./library";
-import { handleOutlinePage } from "./outline";
 import { handleSettings } from "./settings";
-import { getUiLocale, openReaderDb, resolveDataDirectory } from "./storage";
+import {
+  getUiLocale,
+  openReaderDb,
+  ReaderUpgradeRequiredError,
+  resolveDataDirectory,
+} from "./storage";
 import { handleTranslate } from "./translate";
 
 // Windows has no POSIX modes; the per-user profile directory is its boundary.
 if (process.platform !== "win32") process.umask(0o077);
 
 const desktop = process.argv.includes("--desktop");
+/** The user agreed to upgrade a reader database of the previous schema. */
+const upgradeDatabase = process.argv.includes("--upgrade-database");
 
 function emit(event: DesktopEvent): void {
   if (desktop) emitDesktopEvent(event);
@@ -72,11 +78,27 @@ async function start(): Promise<void> {
     "Cannot determine data directory",
     () => resolveDataDirectory(process.env, homedir()),
   );
-  const reader = step(
-    "READER_DATABASE_FAILED",
-    `Cannot open reader database in ${dataDirectory}`,
-    () => openReaderDb(dataDirectory),
-  );
+  let reader: Database;
+  try {
+    reader = openReaderDb(dataDirectory, {
+      upgrade: upgradeDatabase,
+      onUpgraded: (backupPath) => {
+        console.log(`Upgraded the reader database; the previous copy is kept at ${backupPath}`);
+        emit({ type: "log", code: "reader_upgraded" });
+      },
+    });
+  } catch (error) {
+    if (error instanceof ReaderUpgradeRequiredError) {
+      throw new StartupError(
+        "READER_DATABASE_UPGRADE_REQUIRED",
+        `${error.message}. Start Lumo again with --upgrade-database to upgrade it; a backup copy is kept next to it.`,
+      );
+    }
+    throw new StartupError(
+      "READER_DATABASE_FAILED",
+      `Cannot open reader database in ${dataDirectory}: ${(error as Error).message}`,
+    );
+  }
   db = reader;
   const uiLocale = step(
     "READER_DATABASE_FAILED",
@@ -114,9 +136,6 @@ async function start(): Promise<void> {
       const url = new URL(request.url);
       if (url.pathname === "/api/translate") {
         return await handleTranslate(request, ctx);
-      }
-      if (url.pathname === "/api/outline-page") {
-        return await handleOutlinePage(request, ctx);
       }
       const settings = await handleSettings(request, url, ctx);
       if (settings) return settings;

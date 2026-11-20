@@ -3,6 +3,7 @@ import {
   TARGET_LANGUAGE_LABELS,
   type AiSettingsSnapshot,
   type DocumentRecord,
+  type OutlineEntry,
   type TargetLanguage,
   type TranslationRecord,
 } from "../../shared/contracts";
@@ -45,12 +46,11 @@ interface PdfExportDialogProps {
   /** The password the open PDF was unlocked with, if any. */
   password: () => string | undefined;
   outline: DocumentOutlineState;
-  outlineGenerationDisabledReason: string | null;
-  onGenerateOutline: () => void;
-  onCancelOutline: () => void;
+  outlineDraft: string | null;
+  onOutlineDraftChange: (draft: string | null) => void;
+  onImportOutline: (entries: OutlineEntry[]) => void;
+  onRemoveImportedOutline: () => void;
   onReloadOutline: () => void;
-  onRetrySaveOutline: () => void;
-  onDiscardOutline: () => void;
   onOpenOutlinePage: (pageNumber: number) => void;
   aiStatus: AiSettingsSnapshot["status"] | null;
   aiStatusError: UiError | null;
@@ -85,12 +85,11 @@ export function PdfExportDialog({
   translationDisabledReason,
   password,
   outline,
-  outlineGenerationDisabledReason,
-  onGenerateOutline,
-  onCancelOutline,
+  outlineDraft,
+  onOutlineDraftChange,
+  onImportOutline,
+  onRemoveImportedOutline,
   onReloadOutline,
-  onRetrySaveOutline,
-  onDiscardOutline,
   onOpenOutlinePage,
   aiStatus,
   aiStatusError,
@@ -303,15 +302,12 @@ export function PdfExportDialog({
             run: () => setSelection(new Set(savedPages)),
           }}
           outline={outline}
-          outlineGenerationDisabledReason={outlineGenerationDisabledReason}
-          onGenerateOutline={onGenerateOutline}
-          onCancelOutline={onCancelOutline}
+          outlineDraft={outlineDraft}
+          onOutlineDraftChange={onOutlineDraftChange}
+          onImportOutline={onImportOutline}
+          onRemoveImportedOutline={onRemoveImportedOutline}
           onReloadOutline={onReloadOutline}
-          onRetrySaveOutline={onRetrySaveOutline}
-          onDiscardOutline={onDiscardOutline}
           onOpenOutlinePage={onOpenOutlinePage}
-          aiStep={aiStep}
-          aiChecking={aiGate === "checking"}
         />
 
         <fieldset className="batch-method">

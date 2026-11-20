@@ -12,13 +12,16 @@ use url::Url;
 
 pub const LOG_LIMIT: usize = 200;
 pub const STARTUP_TIMEOUT_SECS: u64 = 45;
+const STARTUP_TIMEOUT_MS: u64 = STARTUP_TIMEOUT_SECS * 1000;
 pub const SHUTDOWN_TIMEOUT_SECS: u64 = 35;
+const SHUTDOWN_TIMEOUT_MS: u64 = SHUTDOWN_TIMEOUT_SECS * 1000;
 pub const SHUTDOWN_COMMAND: &[u8] = b"{\"type\":\"shutdown\"}\n";
 
 const ACCESS_LINE_PREFIX: &str = "Open in your browser: ";
 
 const SERVER_LOG_CODES: &[&str] = &[
     "starting",
+    "reader_upgraded",
     "reader_ready",
     "assets_ready",
     "credentials_ready",
@@ -27,12 +30,17 @@ const SERVER_LOG_CODES: &[&str] = &[
 const SERVER_FAILURE_CODES: &[&str] = &[
     "DATA_DIRECTORY_INVALID",
     "READER_DATABASE_FAILED",
+    UPGRADE_REQUIRED_CODE,
     "PDFJS_ASSETS_FAILED",
     "TYPST_ASSETS_FAILED",
     "CREDENTIALS_DATABASE_FAILED",
     "SERVER_LISTEN_FAILED",
     "CONTROL_PROTOCOL_INVALID",
 ];
+/// The reader database uses the previous schema; only the user may agree to upgrade it.
+const UPGRADE_REQUIRED_CODE: &str = "READER_DATABASE_UPGRADE_REQUIRED";
+/// The server argument that carries that agreement.
+pub const UPGRADE_DATABASE_ARG: &str = "--upgrade-database";
 const UI_LOCALES: &[&str] = &["en", "zh-CN"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -92,6 +100,14 @@ pub struct LauncherUpdateState {
     pub version: Option<String>,
     pub install_mode: InstallMode,
     pub error_code: Option<UpdateError>,
+}
+
+/// When the launcher saw something: wall-clock time for the activity log, and monotonic time
+/// (unaffected by clock changes) for the startup and shutdown deadlines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Moment {
+    pub wall_ms: u64,
+    pub monotonic_ms: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -223,8 +239,20 @@ pub struct Snapshot {
     pub ui_locale: Option<&'static str>,
     pub failure_code: Option<&'static str>,
     pub can_retry: bool,
+    pub can_upgrade: bool,
     pub update: LauncherUpdateState,
     pub logs: Vec<LogEntry>,
+}
+
+/// What a startup or shutdown watchdog does next for the run it watches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WatchdogCheck {
+    /// The run is no longer in the watched phase, or was replaced: stop watching.
+    Settled,
+    /// The run ran out of time: end its process.
+    Overdue,
+    /// Look again after this many milliseconds.
+    Wait(u64),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -350,6 +378,11 @@ pub struct State {
     exit_allowed: bool,
     stop_purpose: Option<StopPurpose>,
     stop_confirmed: bool,
+    /// An approved database upgrade is running; its backup and migration have no deadline.
+    upgrade_pending: bool,
+    /// When an upgrade run's reader database opened, in monotonic milliseconds; the ordinary
+    /// startup and shutdown deadlines count from here.
+    reader_opened_at: Option<u64>,
     logs: VecDeque<LogEntry>,
 }
 
@@ -376,6 +409,8 @@ impl State {
             exit_allowed: false,
             stop_purpose: None,
             stop_confirmed: false,
+            upgrade_pending: false,
+            reader_opened_at: None,
             logs: VecDeque::new(),
         }
     }
@@ -394,6 +429,7 @@ impl State {
             ui_locale: self.ui_locale,
             failure_code: self.failure_code,
             can_retry: self.can_retry(),
+            can_upgrade: self.can_upgrade(),
             update: self.update.snapshot(self.version),
             logs: self.logs.iter().cloned().collect(),
         }
@@ -405,6 +441,10 @@ impl State {
 
     fn can_retry(&self) -> bool {
         self.phase == Phase::Failed && !self.process_alive
+    }
+
+    fn can_upgrade(&self) -> bool {
+        self.can_retry() && self.failure_code == Some(UPGRADE_REQUIRED_CODE)
     }
 
     /// The full link, only while the server is running.
@@ -444,8 +484,21 @@ impl State {
         self.failure_code = None;
         self.stop_purpose = None;
         self.stop_confirmed = false;
+        self.upgrade_pending = false;
+        self.reader_opened_at = None;
         self.revision += 1;
         Some(self.generation)
+    }
+
+    /// Starts a run that upgrades the reader database, only after the server asked for that
+    /// agreement and its process has ended.
+    pub fn begin_upgrade(&mut self) -> Option<u64> {
+        if !self.can_upgrade() {
+            return None;
+        }
+        let generation = self.begin_start()?;
+        self.upgrade_pending = true;
+        Some(generation)
     }
 
     /// The process could not be spawned at all.
@@ -454,7 +507,18 @@ impl State {
         self.fail(at, code);
     }
 
-    pub fn on_line(&mut self, at: u64, generation: u64, line: &str) -> LineOutcome {
+    /// Records the end of an approved upgrade when the reader database is open, upgraded or
+    /// found current. False for every other line.
+    fn note_reader_opened(&mut self, at: Moment, code: &'static str) -> bool {
+        if !self.upgrade_pending || !matches!(code, "reader_upgraded" | "reader_ready") {
+            return false;
+        }
+        self.upgrade_pending = false;
+        self.reader_opened_at = Some(at.monotonic_ms);
+        true
+    }
+
+    pub fn on_line(&mut self, at: Moment, generation: u64, line: &str) -> LineOutcome {
         if generation != self.generation || !self.process_alive {
             return LineOutcome::Unchanged;
         }
@@ -469,16 +533,25 @@ impl State {
                 self.revision += 1;
                 LineOutcome::Changed
             }
+            // A stop during an approved upgrade waits for the database; the shutdown deadline
+            // counts from when it opened.
+            (Phase::Stopping, Parsed::Event(Event::Log(code)))
+                if self.note_reader_opened(at, code) =>
+            {
+                self.push(at.wall_ms, Level::Info, code);
+                LineOutcome::Changed
+            }
             (Phase::Stopping, _) => LineOutcome::Unchanged,
-            (_, Parsed::Invalid) => self.violation(at),
+            (_, Parsed::Invalid) => self.violation(at.wall_ms),
             (Phase::Starting, Parsed::Access(link)) if self.link.is_none() => {
                 self.link = Some(link);
                 self.revision += 1;
                 LineOutcome::Changed
             }
-            (_, Parsed::Access(_)) => self.violation(at),
+            (_, Parsed::Access(_)) => self.violation(at.wall_ms),
             (_, Parsed::Event(Event::Log(code))) => {
-                self.push(at, Level::Info, code);
+                self.note_reader_opened(at, code);
+                self.push(at.wall_ms, Level::Info, code);
                 LineOutcome::Changed
             }
             (Phase::Starting, Parsed::Event(Event::Ready { data_directory, ui_locale }))
@@ -487,12 +560,12 @@ impl State {
                 self.phase = Phase::Running;
                 self.data_directory = Some(data_directory);
                 self.ui_locale = Some(ui_locale);
-                self.push(at, Level::Info, "ready");
+                self.push(at.wall_ms, Level::Info, "ready");
                 LineOutcome::Changed
             }
-            (_, Parsed::Event(Event::Ready { .. })) => self.violation(at),
+            (_, Parsed::Event(Event::Ready { .. })) => self.violation(at.wall_ms),
             (_, Parsed::Event(Event::Failed(code))) => {
-                self.fail(at, code);
+                self.fail(at.wall_ms, code);
                 LineOutcome::Changed
             }
             (_, Parsed::Event(Event::Stopped)) => LineOutcome::Unchanged,
@@ -540,14 +613,28 @@ impl State {
     }
 
     /// True when this run never became ready in time and must be killed.
-    pub fn startup_overdue(&mut self, at: u64, generation: u64) -> bool {
-        let overdue = generation == self.generation
-            && self.process_alive
-            && self.phase == Phase::Starting;
-        if overdue {
-            self.fail(at, "startup_timeout");
+    /// Checked by the startup watchdog, first after [`STARTUP_TIMEOUT_SECS`]. A normal run is
+    /// overdue then. An approved upgrade waits while the server backs up and migrates the
+    /// database, then gets the same deadline counted from when the database opened.
+    pub fn startup_check(&mut self, at: Moment, generation: u64) -> WatchdogCheck {
+        if generation != self.generation || !self.process_alive || self.phase != Phase::Starting {
+            return WatchdogCheck::Settled;
         }
-        overdue
+        if let Some(wait) = self.upgrade_wait(at, STARTUP_TIMEOUT_MS) {
+            return WatchdogCheck::Wait(wait);
+        }
+        self.fail(at.wall_ms, "startup_timeout");
+        WatchdogCheck::Overdue
+    }
+
+    /// More time for a run that is upgrading its database: the whole timeout while the upgrade
+    /// runs, then what is left of it counted from when the database opened.
+    fn upgrade_wait(&self, at: Moment, timeout_ms: u64) -> Option<u64> {
+        if self.upgrade_pending {
+            return Some(timeout_ms);
+        }
+        let deadline = self.reader_opened_at?.saturating_add(timeout_ms);
+        (at.monotonic_ms < deadline).then(|| deadline - at.monotonic_ms)
     }
 
     pub fn begin_stop(&mut self, purpose: StopPurpose) -> StopPlan {
@@ -568,15 +655,19 @@ impl State {
         }
     }
 
-    /// True when the server ignored the shutdown request for too long and must be killed.
-    pub fn shutdown_overdue(&mut self, at: u64, generation: u64) -> bool {
-        let overdue = generation == self.generation
-            && self.process_alive
-            && self.phase == Phase::Stopping;
-        if overdue {
-            self.push(at, Level::Warn, "shutdown_timeout");
+    /// Checked by the shutdown watchdog, first after [`SHUTDOWN_TIMEOUT_SECS`]. Overdue when the
+    /// server ignored the shutdown request for too long and must be killed. The server reads
+    /// the request only once an approved database upgrade is done, so that run waits for the
+    /// upgrade and then gets the same deadline counted from when the database opened.
+    pub fn shutdown_check(&mut self, at: Moment, generation: u64) -> WatchdogCheck {
+        if generation != self.generation || !self.process_alive || self.phase != Phase::Stopping {
+            return WatchdogCheck::Settled;
         }
-        overdue
+        if let Some(wait) = self.upgrade_wait(at, SHUTDOWN_TIMEOUT_MS) {
+            return WatchdogCheck::Wait(wait);
+        }
+        self.push(at.wall_ms, Level::Warn, "shutdown_timeout");
+        WatchdogCheck::Overdue
     }
 
     /// Puts the panel at its starting point. True when the adapter should run the update loop.
@@ -783,6 +874,14 @@ mod tests {
     const TOKEN: &str = "11111111-2222-3333-4444-555555555555";
     const READY: &str = r#"{"type":"ready","dataDirectory":"/data/lumo","uiLocale":"zh-CN"}"#;
 
+    /// A moment whose wall clock and monotonic clock agree.
+    fn at(ms: u64) -> Moment {
+        Moment {
+            wall_ms: ms,
+            monotonic_ms: ms,
+        }
+    }
+
     fn started() -> (State, u64) {
         let mut state = State::new("9.9.9", false, InstallMode::Download);
         let generation = state.begin_start().expect("first start is allowed");
@@ -791,8 +890,8 @@ mod tests {
 
     fn running() -> (State, u64) {
         let (mut state, generation) = started();
-        assert_eq!(state.on_line(1, generation, LINK), LineOutcome::Changed);
-        assert_eq!(state.on_line(2, generation, READY), LineOutcome::Changed);
+        assert_eq!(state.on_line(at(1), generation, LINK), LineOutcome::Changed);
+        assert_eq!(state.on_line(at(2), generation, READY), LineOutcome::Changed);
         assert_eq!(state.phase(), Phase::Running);
         (state, generation)
     }
@@ -894,17 +993,17 @@ mod tests {
     #[test]
     fn ready_without_a_link_or_a_second_link_is_a_protocol_violation() {
         let (mut state, generation) = started();
-        assert_eq!(state.on_line(1, generation, READY), LineOutcome::ProtocolViolation);
+        assert_eq!(state.on_line(at(1), generation, READY), LineOutcome::ProtocolViolation);
         assert_eq!(state.snapshot().failure_code, Some("protocol_failed"));
         assert!(state.open_target().is_none());
 
         let (mut state, generation) = started();
-        state.on_line(1, generation, LINK);
-        assert_eq!(state.on_line(2, generation, LINK), LineOutcome::ProtocolViolation);
+        state.on_line(at(1), generation, LINK);
+        assert_eq!(state.on_line(at(2), generation, LINK), LineOutcome::ProtocolViolation);
 
         let (mut state, generation) = started();
         assert_eq!(
-            state.on_line(1, generation, r#"{"type":"log","code":"made_up"}"#),
+            state.on_line(at(1), generation, r#"{"type":"log","code":"made_up"}"#),
             LineOutcome::ProtocolViolation
         );
     }
@@ -912,7 +1011,7 @@ mod tests {
     #[test]
     fn link_is_not_offered_before_ready() {
         let (mut state, generation) = started();
-        state.on_line(1, generation, LINK);
+        state.on_line(at(1), generation, LINK);
         assert!(state.open_target().is_none());
         assert!(state.snapshot().web_ui_url.is_some());
     }
@@ -922,7 +1021,7 @@ mod tests {
         let (mut state, generation) = started();
         assert!(state.begin_start().is_none(), "starting server must not be restarted");
 
-        state.on_line(1, generation, r#"{"type":"failed","code":"READER_DATABASE_FAILED"}"#);
+        state.on_line(at(1), generation, r#"{"type":"failed","code":"READER_DATABASE_FAILED"}"#);
         assert_eq!(state.phase(), Phase::Failed);
         assert!(!state.snapshot().can_retry, "process may still be exiting");
         assert!(state.begin_start().is_none());
@@ -937,19 +1036,49 @@ mod tests {
     }
 
     #[test]
+    fn an_upgrade_is_offered_only_after_the_server_asked_for_it_and_ended() {
+        let (mut state, generation) = started();
+        assert!(state.begin_upgrade().is_none(), "nothing to upgrade while starting");
+        state.on_line(at(1), generation, r#"{"type":"log","code":"reader_upgraded"}"#);
+        assert_eq!(state.phase(), Phase::Starting);
+
+        state.on_line(at(2),
+            generation,
+            r#"{"type":"failed","code":"READER_DATABASE_UPGRADE_REQUIRED"}"#,
+        );
+        assert_eq!(state.snapshot().failure_code, Some("READER_DATABASE_UPGRADE_REQUIRED"));
+        assert!(!state.snapshot().can_upgrade, "process may still be exiting");
+        assert!(state.begin_upgrade().is_none());
+
+        state.on_terminated(3, generation, false);
+        assert!(state.snapshot().can_upgrade);
+        let upgrade = state.begin_upgrade().expect("upgrade after the process ended");
+        assert_eq!(upgrade, generation + 1);
+        assert!(!state.snapshot().can_upgrade);
+        assert!(state.begin_upgrade().is_none(), "no second run while the upgrade runs");
+
+        let (mut state, generation) = started();
+        state.on_line(at(1), generation, r#"{"type":"failed","code":"READER_DATABASE_FAILED"}"#);
+        state.on_terminated(2, generation, false);
+        assert!(state.snapshot().can_retry);
+        assert!(!state.snapshot().can_upgrade, "other failures are never upgraded");
+        assert!(state.begin_upgrade().is_none());
+    }
+
+    #[test]
     fn a_retry_ignores_the_old_runs_output_and_exit() {
         let (mut state, old) = started();
-        state.on_line(1, old, r#"{"type":"failed","code":"SERVER_LISTEN_FAILED"}"#);
+        state.on_line(at(1), old, r#"{"type":"failed","code":"SERVER_LISTEN_FAILED"}"#);
         state.on_terminated(2, old, true);
         let new = state.begin_start().unwrap();
 
-        assert_eq!(state.on_line(3, old, LINK), LineOutcome::Unchanged);
+        assert_eq!(state.on_line(at(3), old, LINK), LineOutcome::Unchanged);
         assert!(state.snapshot().web_ui_url.is_none());
         assert_eq!(state.on_terminated(4, old, true), Termination::Ignored);
         assert_eq!(state.phase(), Phase::Starting);
 
-        state.on_line(5, new, LINK);
-        state.on_line(6, new, READY);
+        state.on_line(at(5), new, LINK);
+        state.on_line(at(6), new, READY);
         assert_eq!(state.phase(), Phase::Running);
     }
 
@@ -968,7 +1097,7 @@ mod tests {
     #[test]
     fn a_backend_failure_is_not_overwritten_by_the_exit_that_follows() {
         let (mut state, generation) = started();
-        state.on_line(1, generation, r#"{"type":"failed","code":"PDFJS_ASSETS_FAILED"}"#);
+        state.on_line(at(1), generation, r#"{"type":"failed","code":"PDFJS_ASSETS_FAILED"}"#);
         state.on_terminated(2, generation, true);
         assert_eq!(state.snapshot().failure_code, Some("PDFJS_ASSETS_FAILED"));
     }
@@ -982,7 +1111,7 @@ mod tests {
 
         // Late output from the stopping server is not acted on.
         assert_eq!(
-            state.on_line(3, generation, r#"{"type":"log","code":"stopping"}"#),
+            state.on_line(at(3), generation, r#"{"type":"log","code":"stopping"}"#),
             LineOutcome::Unchanged
         );
         assert_eq!(state.on_terminated(4, generation, true), Termination::Quit);
@@ -996,7 +1125,7 @@ mod tests {
             StopPlan::SendShutdown { generation }
         );
         assert_eq!(
-            state.on_line(3, generation, r#"{"type":"stopped"}"#),
+            state.on_line(at(3), generation, r#"{"type":"stopped"}"#),
             LineOutcome::Changed
         );
         assert_eq!(
@@ -1016,7 +1145,7 @@ mod tests {
 
         let (mut state, generation) = running();
         state.begin_stop(StopPurpose::Update);
-        state.on_line(3, generation, r#"{"type":"stopped"}"#);
+        state.on_line(at(3), generation, r#"{"type":"stopped"}"#);
         assert_eq!(
             state.on_terminated(4, generation, false),
             Termination::UpdateAborted,
@@ -1044,18 +1173,119 @@ mod tests {
     #[test]
     fn overdue_checks_only_apply_to_the_run_they_were_armed_for() {
         let (mut state, generation) = started();
-        assert!(!state.startup_overdue(1, generation + 1));
-        assert!(state.startup_overdue(2, generation));
+        assert_eq!(state.startup_check(at(1), generation + 1), WatchdogCheck::Settled);
+        assert_eq!(state.startup_check(at(2), generation), WatchdogCheck::Overdue);
         assert_eq!(state.snapshot().failure_code, Some("startup_timeout"));
-        assert!(!state.startup_overdue(3, generation), "already failed");
+        assert_eq!(state.startup_check(at(3), generation), WatchdogCheck::Settled, "already failed");
 
         let (mut state, generation) = running();
-        assert!(!state.startup_overdue(1, generation), "ready in time");
-        assert!(!state.shutdown_overdue(1, generation), "not stopping");
+        assert_eq!(state.startup_check(at(1), generation), WatchdogCheck::Settled, "ready in time");
+        assert_eq!(state.shutdown_check(at(1), generation), WatchdogCheck::Settled, "not stopping");
         state.begin_stop(StopPurpose::Quit);
-        assert!(state.shutdown_overdue(2, generation));
+        assert_eq!(state.shutdown_check(at(2), generation + 1), WatchdogCheck::Settled);
+        assert_eq!(state.shutdown_check(at(2), generation), WatchdogCheck::Overdue);
         assert_eq!(state.on_terminated(3, generation, true), Termination::Quit);
-        assert!(!state.shutdown_overdue(4, generation), "process already ended");
+        assert_eq!(
+            state.shutdown_check(at(4), generation),
+            WatchdogCheck::Settled,
+            "process already ended"
+        );
+    }
+
+    #[test]
+    fn an_approved_upgrade_has_no_deadline_until_the_database_opens() {
+        let (mut state, generation) = started();
+        state.on_line(at(1),
+            generation,
+            r#"{"type":"failed","code":"READER_DATABASE_UPGRADE_REQUIRED"}"#,
+        );
+        state.on_terminated(2, generation, false);
+        let upgrade = state.begin_upgrade().expect("upgrade after the process ended");
+
+        // Backing up and migrating a large library may take far longer than a normal start.
+        assert_eq!(state.startup_check(at(45_000), upgrade), WatchdogCheck::Wait(STARTUP_TIMEOUT_MS));
+        assert_eq!(state.startup_check(at(600_000), upgrade), WatchdogCheck::Wait(STARTUP_TIMEOUT_MS));
+        assert_eq!(state.phase(), Phase::Starting);
+
+        // Once the database is open, the rest of startup has the ordinary deadline.
+        state.on_line(at(610_000), upgrade, r#"{"type":"log","code":"reader_upgraded"}"#);
+        assert_eq!(state.startup_check(at(645_000), upgrade), WatchdogCheck::Wait(10_000));
+        assert_eq!(state.startup_check(at(655_000), upgrade), WatchdogCheck::Overdue);
+        assert_eq!(state.snapshot().failure_code, Some("startup_timeout"));
+
+        // A database another run already upgraded opens without `reader_upgraded`.
+        let (mut state, generation) = started();
+        state.on_line(at(1),
+            generation,
+            r#"{"type":"failed","code":"READER_DATABASE_UPGRADE_REQUIRED"}"#,
+        );
+        state.on_terminated(2, generation, false);
+        let upgrade = state.begin_upgrade().expect("upgrade after the process ended");
+        state.on_line(at(3), upgrade, r#"{"type":"log","code":"reader_ready"}"#);
+        assert_eq!(state.startup_check(at(45_000), upgrade), WatchdogCheck::Wait(3));
+
+        // A normal retry keeps the plain deadline even after an upgrade run.
+        state.on_line(at(4), upgrade, r#"{"type":"failed","code":"SERVER_LISTEN_FAILED"}"#);
+        state.on_terminated(5, upgrade, false);
+        let retry = state.begin_start().expect("retry after the process ended");
+        assert_eq!(state.startup_check(at(45_000), retry), WatchdogCheck::Overdue);
+    }
+
+    #[test]
+    fn deadlines_follow_the_monotonic_clock_not_the_wall_clock() {
+        let (mut state, generation) = started();
+        state.on_line(at(1), generation, r#"{"type":"failed","code":"READER_DATABASE_UPGRADE_REQUIRED"}"#);
+        state.on_terminated(2, generation, false);
+        let upgrade = state.begin_upgrade().expect("upgrade after the process ended");
+        let opened = Moment {
+            wall_ms: 1_000_000,
+            monotonic_ms: 10_000,
+        };
+        state.on_line(opened, upgrade, r#"{"type":"log","code":"reader_upgraded"}"#);
+        assert_eq!(state.snapshot().logs.last().unwrap().at, 1_000_000, "logs keep wall time");
+
+        // The wall clock was set back; the deadline does not move.
+        let later = Moment {
+            wall_ms: 0,
+            monotonic_ms: 40_000,
+        };
+        assert_eq!(state.startup_check(later, upgrade), WatchdogCheck::Wait(15_000));
+        let overdue = Moment {
+            wall_ms: 0,
+            monotonic_ms: 55_000,
+        };
+        assert_eq!(state.startup_check(overdue, upgrade), WatchdogCheck::Overdue);
+    }
+
+    #[test]
+    fn a_stop_during_an_approved_upgrade_waits_for_the_database() {
+        let (mut state, generation) = started();
+        state.on_line(at(1), generation, r#"{"type":"failed","code":"READER_DATABASE_UPGRADE_REQUIRED"}"#);
+        state.on_terminated(2, generation, false);
+        let upgrade = state.begin_upgrade().expect("upgrade after the process ended");
+        assert_eq!(
+            state.begin_stop(StopPurpose::Quit),
+            StopPlan::SendShutdown { generation: upgrade }
+        );
+
+        // The server reads the shutdown request only after the upgrade; killing it would cut
+        // the backup or the migration short.
+        assert_eq!(state.shutdown_check(at(35_000), upgrade), WatchdogCheck::Wait(SHUTDOWN_TIMEOUT_MS));
+        assert_eq!(state.shutdown_check(at(600_000), upgrade), WatchdogCheck::Wait(SHUTDOWN_TIMEOUT_MS));
+
+        // Once the database is open, the ordinary deadline counts from there.
+        assert_eq!(
+            state.on_line(at(610_000), upgrade, r#"{"type":"log","code":"reader_upgraded"}"#),
+            LineOutcome::Changed
+        );
+        assert_eq!(
+            state.on_line(at(610_001), upgrade, r#"{"type":"log","code":"assets_ready"}"#),
+            LineOutcome::Unchanged,
+            "other output while stopping is still not acted on"
+        );
+        assert_eq!(state.shutdown_check(at(635_000), upgrade), WatchdogCheck::Wait(10_000));
+        assert_eq!(state.shutdown_check(at(645_000), upgrade), WatchdogCheck::Overdue);
+        assert_eq!(state.on_terminated(645_001, upgrade, false), Termination::Quit);
     }
 
     /// Stands in for the child handle, whose drop kills the process: counts how often it is released.
@@ -1074,7 +1304,7 @@ mod tests {
         let mut slot = Some((old, Process(released.clone())));
 
         // The old run's startup watchdog fires, but the process ends on its own before the kill.
-        assert!(state.startup_overdue(1, old));
+        assert_eq!(state.startup_check(at(1), old), WatchdogCheck::Overdue);
         assert_eq!(state.on_terminated(2, old, true), Termination::Ignored);
         drop(take_run(&mut slot, old));
         assert_eq!(released.get(), 1);
@@ -1124,7 +1354,7 @@ mod tests {
         let (mut state, generation) = started();
         let mut seen = state.snapshot().revision;
         for line in [LINK, r#"{"type":"log","code":"assets_ready"}"#, READY] {
-            state.on_line(1, generation, line);
+            state.on_line(at(1), generation, line);
             let now = state.snapshot().revision;
             assert!(now > seen, "{line}");
             seen = now;
@@ -1145,8 +1375,8 @@ mod tests {
     fn running_with_updates(mode: InstallMode) -> (State, u64) {
         let mut state = enabled_state(mode);
         let generation = state.begin_start().expect("first start is allowed");
-        assert_eq!(state.on_line(1, generation, LINK), LineOutcome::Changed);
-        assert_eq!(state.on_line(2, generation, READY), LineOutcome::Changed);
+        assert_eq!(state.on_line(at(1), generation, LINK), LineOutcome::Changed);
+        assert_eq!(state.on_line(at(2), generation, READY), LineOutcome::Changed);
         (state, generation)
     }
 
@@ -1365,7 +1595,7 @@ mod tests {
             state.begin_stop(StopPurpose::Update),
             StopPlan::SendShutdown { generation }
         );
-        state.on_line(3, generation, r#"{"type":"stopped"}"#);
+        state.on_line(at(3), generation, r#"{"type":"stopped"}"#);
         assert_eq!(state.on_terminated(4, generation, true), Termination::UpdateReady);
     }
 
@@ -1408,7 +1638,7 @@ mod tests {
             state.begin_stop(StopPurpose::Quit),
             StopPlan::AlreadyStopping
         );
-        state.on_line(3, generation, r#"{"type":"stopped"}"#);
+        state.on_line(at(3), generation, r#"{"type":"stopped"}"#);
         assert_eq!(state.on_terminated(4, generation, true), Termination::UpdateReady);
     }
 
@@ -1436,7 +1666,7 @@ mod tests {
         let (mut state, generation) = running_with_updates(InstallMode::InApp);
         assert!(state.begin_update_install(Some("2.0.0")));
         state.begin_stop(StopPurpose::Update);
-        state.on_line(3, generation, r#"{"type":"stopped"}"#);
+        state.on_line(at(3), generation, r#"{"type":"stopped"}"#);
         assert_eq!(state.on_terminated(4, generation, true), Termination::UpdateReady);
 
         state.set_exit_allowed(true);

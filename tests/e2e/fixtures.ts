@@ -34,13 +34,19 @@ function redact(text: string): string {
     .replace(/Bearer\s+\S+/g, "Bearer ***");
 }
 
-export function fixturePdf(label: string, pageCount = 2): Uint8Array {
+export function fixturePdf(
+  label: string,
+  pageCount = 2,
+  /** A native document outline, flat, each entry pointing at a 1-based page. */
+  outline: readonly { title: string; page: number }[] = [],
+): Uint8Array {
   const pageIds = [
     3,
     ...Array.from({ length: pageCount - 1 }, (_, i) => i + 7),
   ];
+  const outlinesId = 7 + pageCount - 1;
   const objects = [
-    "<< /Type /Catalog /Pages 2 0 R /AcroForm 6 0 R >>",
+    `<< /Type /Catalog /Pages 2 0 R /AcroForm 6 0 R${outline.length > 0 ? ` /Outlines ${outlinesId} 0 R` : ""} >>`,
     `<< /Type /Pages /Kids [${pageIds.map(id => `${id} 0 R`).join(" ")}] /Count ${pageCount} >>`,
     "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 400] /Resources << /Font << /Helv 4 0 R >> >> /Annots [5 0 R] >>",
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
@@ -49,6 +55,21 @@ export function fixturePdf(label: string, pageCount = 2): Uint8Array {
   ];
   for (let i = 1; i < pageCount; i++) {
     objects.push("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 400] /Resources << >> >>");
+  }
+  if (outline.length > 0) {
+    const itemId = (index: number) => outlinesId + 1 + index;
+    objects.push(
+      `<< /Type /Outlines /First ${itemId(0)} 0 R /Last ${itemId(outline.length - 1)} 0 R /Count ${outline.length} >>`,
+    );
+    for (const [index, item] of outline.entries()) {
+      const links = [
+        index > 0 ? `/Prev ${itemId(index - 1)} 0 R` : "",
+        index < outline.length - 1 ? `/Next ${itemId(index + 1)} 0 R` : "",
+      ].join(" ");
+      objects.push(
+        `<< /Title (${item.title}) /Parent ${outlinesId} 0 R ${links} /Dest [${pageIds[item.page - 1]} 0 R /XYZ null null null] >>`,
+      );
+    }
   }
   let pdf = "%PDF-1.7\n";
   const offsets: number[] = [];

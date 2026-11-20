@@ -3,15 +3,15 @@ import {
   AI_REASONING_EFFORTS,
   MAX_EPUB_CFI_CHARS,
   MAX_OUTLINE_ENTRIES,
-  MAX_OUTLINE_HEADINGS_PER_PAGE,
+  MAX_OUTLINE_JSON_BYTES,
+  MAX_OUTLINE_LEVEL,
+  MAX_OUTLINE_TITLE_CHARS,
   MAX_TYPST_CHARS,
   MAX_TYPST_DIAGNOSTICS_CHARS,
   TARGET_LANGUAGES,
   aiConfigSchema,
   outlineEntriesSchema,
-  outlineHeadingSchema,
-  outlinePageInputSchema,
-  outlinePageResultSchema,
+  outlineEntrySchema,
   readerUpdateSchema,
   readerViewSchema,
   translatePageInputSchema,
@@ -398,10 +398,11 @@ describe("readerViewSchema", () => {
 describe("outline schemas", () => {
   const entry = { title: "Chapter 1", level: 1, pageNumber: 1 };
 
-  test("accepts headings, entries and page results at their boundaries", () => {
-    expect(outlineHeadingSchema.parse({ title: "  Intro  ", level: 10_000 })).toEqual({
+  test("accepts entries at their boundaries", () => {
+    expect(outlineEntrySchema.parse({ title: "  Intro  ", level: 10_000, pageNumber: 2 })).toEqual({
       title: "Intro",
       level: 10_000,
+      pageNumber: 2,
     });
     expect(outlineEntriesSchema.parse([entry])).toEqual([entry]);
     expect(
@@ -411,24 +412,16 @@ describe("outline schemas", () => {
         { title: "Section 1.1", level: 2, pageNumber: 3 },
       ]),
     ).toHaveLength(3);
-    expect(outlinePageResultSchema.parse({ headings: [] })).toEqual({ headings: [] });
-    expect(
-      outlinePageResultSchema.parse({
-        headings: Array.from({ length: MAX_OUTLINE_HEADINGS_PER_PAGE }, () => ({
-          title: "Heading",
-          level: 1,
-        })),
-      }).headings,
-    ).toHaveLength(MAX_OUTLINE_HEADINGS_PER_PAGE);
   });
 
-  test("rejects invalid titles, levels, skipped levels and decreasing pages", () => {
+  test("rejects invalid titles, levels, extra fields, skipped levels and decreasing pages", () => {
     for (const title of ["", "   ", "x".repeat(501), "bad\u0000title"]) {
-      expect(() => outlineHeadingSchema.parse({ title, level: 1 })).toThrow();
+      expect(() => outlineEntrySchema.parse({ ...entry, title })).toThrow();
     }
     for (const level of [0, -1, 1.5, 10_001, Number.MAX_SAFE_INTEGER + 1]) {
-      expect(() => outlineHeadingSchema.parse({ title: "Heading", level })).toThrow();
+      expect(() => outlineEntrySchema.parse({ ...entry, level })).toThrow();
     }
+    expect(() => outlineEntrySchema.parse({ ...entry, extra: true })).toThrow();
     expect(() => outlineEntriesSchema.parse([])).toThrow();
     expect(() =>
       outlineEntriesSchema.parse([{ ...entry, level: 2 }]),
@@ -452,49 +445,19 @@ describe("outline schemas", () => {
       ),
     ).toThrow();
   });
+});
 
-  test("reuses the page input limits and bounds previous headings", () => {
-    const input = {
-      documentId: "a".repeat(64),
-      pageNumber: 3,
-      text: "Text",
-      imageBase64: "/9j/AAAA",
-      previousHeadings: [
-        { title: "A", level: 1, pageNumber: 1 },
-        { title: "A.1", level: 2, pageNumber: 2 },
-      ],
-    };
-    expect(outlinePageInputSchema.parse(input)).toEqual(input);
-    expect(() =>
-      outlinePageInputSchema.parse({ ...input, extra: true }),
-    ).toThrow();
-    expect(() =>
-      outlinePageInputSchema.parse({ ...input, imageBase64: "iVBORw0KGgo=" }),
-    ).toThrow();
-    expect(() =>
-      outlinePageInputSchema.parse({
-        ...input,
-        previousHeadings: [
-          { title: "Later", level: 1, pageNumber: 4 },
-        ],
-      }),
-    ).toThrow();
-    expect(() =>
-      outlinePageInputSchema.parse({
-        ...input,
-        previousHeadings: Array.from({ length: 33 }, () => ({
-          title: "A",
-          level: 1,
-          pageNumber: 1,
-        })),
-      }),
-    ).toThrow();
-  });
-
-  test("rejects extra page result fields", () => {
-    expect(() =>
-      outlinePageResultSchema.parse({ headings: [], extra: true }),
-    ).toThrow();
+describe("outline body limit", () => {
+  test("fits the largest outline the schema accepts", () => {
+    const title = "\u0001".repeat(MAX_OUTLINE_TITLE_CHARS);
+    const entries = Array.from({ length: MAX_OUTLINE_ENTRIES }, (_, index) => ({
+      title,
+      level: Math.min(index + 1, MAX_OUTLINE_LEVEL),
+      pageNumber: Number.MAX_SAFE_INTEGER,
+    }));
+    expect(outlineEntriesSchema.parse(entries)).toHaveLength(MAX_OUTLINE_ENTRIES);
+    const bytes = new TextEncoder().encode(JSON.stringify(entries)).byteLength;
+    expect(bytes).toBeLessThanOrEqual(MAX_OUTLINE_JSON_BYTES);
   });
 });
 

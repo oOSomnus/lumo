@@ -66,11 +66,37 @@ interface PdfViewerLike {
   }): void;
 }
 
+/** One node of the tree PDF.js renders in its outline sidebar. */
+export interface PdfJsOutlineNode {
+  title: string;
+  dest: unknown[] | string | null;
+  items: PdfJsOutlineNode[];
+  count?: number;
+  bold?: boolean;
+  italic?: boolean;
+  color?: Uint8ClampedArray | null;
+  url?: string | null;
+  action?: string | null;
+}
+
+/**
+ * The sidebar outline view of the pinned PDF.js viewer. The underscored fields are
+ * its internals: replacing a rendered outline resets them, and the bridge puts them back.
+ */
+interface PdfOutlineViewerLike {
+  container?: EventTarget | null;
+  render(args: { outline: PdfJsOutlineNode[] | null; pdfDocument?: PdfDocumentLike | null }): void;
+  _currentPageNumber?: number;
+  _isPagesLoaded?: boolean | null;
+  _currentOutlineItemCapability?: { resolve(value: boolean): void } | null;
+}
+
 export interface PdfViewerApplicationLike {
   initializedPromise: Promise<void>;
   eventBus: PdfEventBusLike;
   pdfDocument?: PdfDocumentLike;
   pdfViewer: PdfViewerLike;
+  pdfOutlineViewer?: PdfOutlineViewerLike | null;
   page: number;
   pagesCount: number;
   open(args: {
@@ -99,6 +125,38 @@ function annotationStorageHash(storage: AnnotationStorageLike): string {
   return serializable.hash;
 }
 
+/**
+ * The sidebar tree for a validated outline. Each entry opens the top of its page and
+ * keeps the zoom; a positive count shows a section's children expanded.
+ */
+export function toPdfJsOutline(entries: readonly OutlineEntry[]): PdfJsOutlineNode[] {
+  const root: PdfJsOutlineNode[] = [];
+  const stack: { level: number; node: PdfJsOutlineNode }[] = [];
+  for (const entry of entries) {
+    const node: PdfJsOutlineNode = {
+      title: entry.title,
+      dest: [entry.pageNumber - 1, { name: "XYZ" }, null, null, null],
+      items: [],
+      count: 0,
+      bold: false,
+      italic: false,
+      color: null,
+      url: null,
+      action: null,
+    };
+    while (stack.length > 0 && stack[stack.length - 1]!.level >= entry.level) stack.pop();
+    const parent = stack[stack.length - 1]?.node;
+    if (parent) {
+      parent.items.push(node);
+      parent.count = parent.items.length;
+    } else {
+      root.push(node);
+    }
+    stack.push({ level: entry.level, node });
+  }
+  return root;
+}
+
 /** Where the visible part of a page sits, in PDF user space (the units the outline uses). */
 export interface PdfScrollLocation {
   pageNumber: number;
@@ -120,10 +178,72 @@ export class ViewerBridge {
   readonly #window: Window;
   #modifiedListener: ((modified: boolean) => void) | null = null;
   #restoring = 0;
+  // An imported outline shown in the sidebar instead of the PDF's own, for one open document.
+  #sidebarOverride: { document: PdfDocumentLike; tree: PdfJsOutlineNode[] } | null = null;
+  #renderingSidebar = false;
+  #outlineLoadedListener: ((event: unknown) => void) | null = null;
+  // Whether the pages of a document have loaded, from PDF.js's `pagesloaded`. Kept here
+  // because every outline render makes the outline view forget it.
+  #pagesLoaded: { document: PdfDocumentLike; loaded: boolean } | null = null;
+  readonly #pagesLoadedListener = (event: unknown): void => {
+    const document = this.#app.pdfDocument;
+    const pagesCount = (event as { pagesCount?: unknown } | null)?.pagesCount;
+    this.#pagesLoaded = document
+      ? { document, loaded: typeof pagesCount === "number" && pagesCount > 0 }
+      : null;
+  };
+  #unwrapOutlineRender: (() => void) | null = null;
 
   constructor(app: PdfViewerApplicationLike, window: Window) {
     this.#app = app;
     this.#window = window;
+    app.eventBus.on("pagesloaded", this.#pagesLoadedListener);
+    this.#wrapOutlineRender();
+  }
+
+  /**
+   * Wraps the outline view's render, for PDF.js's own renders as well as imported outlines,
+   * before any document opens. A render of a nested outline adds a collapse listener to the
+   * sidebar container; only the latest is kept, since two would undo each other's toggle. A
+   * render also resets the page the view is on to 1 and forgets that the pages loaded, which
+   * would point "current outline item" at page 1 or keep it disabled; both are put back.
+   */
+  #wrapOutlineRender(): void {
+    const outlineViewer = this.#app.pdfOutlineViewer;
+    if (!outlineViewer) return;
+    const render = outlineViewer.render;
+    let collapseListener: EventListenerOrEventListenerObject | null = null;
+    outlineViewer.render = (args) => {
+      const container = outlineViewer.container;
+      const pageNumber = this.#app.page;
+      if (container) {
+        container.addEventListener = (type, listener, options) => {
+          if (type === "click" && listener) {
+            if (collapseListener) {
+              EventTarget.prototype.removeEventListener.call(container, "click", collapseListener);
+            }
+            collapseListener = listener;
+          }
+          EventTarget.prototype.addEventListener.call(container, type, listener, options);
+        };
+      }
+      try {
+        render.call(outlineViewer, args);
+      } finally {
+        if (container) Reflect.deleteProperty(container, "addEventListener");
+      }
+      if (Number.isSafeInteger(pageNumber) && pageNumber >= 1) {
+        outlineViewer._currentPageNumber = pageNumber;
+      }
+      const pages = this.#pagesLoaded;
+      if (pages && pages.document === args.pdfDocument && outlineViewer._isPagesLoaded === null) {
+        outlineViewer._isPagesLoaded = pages.loaded;
+        outlineViewer._currentOutlineItemCapability?.resolve(pages.loaded);
+      }
+    };
+    this.#unwrapOutlineRender = () => {
+      outlineViewer.render = render;
+    };
   }
 
   get document(): Document {
@@ -448,8 +568,76 @@ export class ViewerBridge {
     };
   }
 
+  /**
+   * Shows an imported outline in the viewer's outline sidebar, or with null brings back
+   * the PDF's own. The PDF bytes are never changed. PDF.js renders the native outline
+   * after the first page and again on later loads, so an override is re-applied whenever
+   * the sidebar reloads for the same document.
+   */
+  async setSidebarOutline(entries: readonly OutlineEntry[] | null): Promise<void> {
+    const outlineViewer = this.#app.pdfOutlineViewer;
+    const document = this.#app.pdfDocument;
+    if (!outlineViewer || !document) return;
+    this.#watchSidebar();
+
+    if (entries) {
+      this.#sidebarOverride = { document, tree: toPdfJsOutline(entries) };
+      this.#renderSidebar(this.#sidebarOverride.tree, document);
+      return;
+    }
+    const previous = this.#sidebarOverride;
+    this.#sidebarOverride = null;
+    if (previous?.document !== document) return;
+    const native = await document.getOutline();
+    if (this.#app.pdfDocument !== document || this.#sidebarOverride) return;
+    this.#renderSidebar((native as PdfJsOutlineNode[] | null) ?? null, document);
+  }
+
+  #watchSidebar(): void {
+    if (this.#outlineLoadedListener) return;
+    const listener = (event: unknown): void => {
+      const outlineViewer = this.#app.pdfOutlineViewer;
+      if (this.#renderingSidebar || !outlineViewer) return;
+      if ((event as { source?: unknown } | null)?.source !== outlineViewer) return;
+      const override = this.#sidebarOverride;
+      if (!override) return;
+      if (override.document !== this.#app.pdfDocument) {
+        this.#sidebarOverride = null;
+        return;
+      }
+      // After the viewer finishes its own render, not inside it.
+      queueMicrotask(() => {
+        if (this.#sidebarOverride === override && override.document === this.#app.pdfDocument) {
+          this.#renderSidebar(override.tree, override.document);
+        }
+      });
+    };
+    this.#outlineLoadedListener = listener;
+    this.#app.eventBus.on("outlineloaded", listener);
+  }
+
+  #renderSidebar(tree: PdfJsOutlineNode[] | null, document: PdfDocumentLike): void {
+    const outlineViewer = this.#app.pdfOutlineViewer;
+    if (!outlineViewer) return;
+    this.#renderingSidebar = true;
+    try {
+      outlineViewer.render({ outline: tree, pdfDocument: document });
+    } finally {
+      this.#renderingSidebar = false;
+    }
+  }
+
   destroy(): void {
     this.#modifiedListener = null;
+    this.#app.eventBus.off("pagesloaded", this.#pagesLoadedListener);
+    this.#unwrapOutlineRender?.();
+    this.#unwrapOutlineRender = null;
+    this.#pagesLoaded = null;
+    if (this.#outlineLoadedListener) {
+      this.#app.eventBus.off("outlineloaded", this.#outlineLoadedListener);
+      this.#outlineLoadedListener = null;
+    }
+    this.#sidebarOverride = null;
   }
 }
 

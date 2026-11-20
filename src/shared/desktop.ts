@@ -7,6 +7,7 @@ import type { UiLocale } from "./contracts";
  */
 export const DESKTOP_LOG_CODES = [
   "starting",
+  "reader_upgraded",
   "reader_ready",
   "assets_ready",
   "credentials_ready",
@@ -16,6 +17,7 @@ export const DESKTOP_LOG_CODES = [
 export const DESKTOP_FAILURE_CODES = [
   "DATA_DIRECTORY_INVALID",
   "READER_DATABASE_FAILED",
+  "READER_DATABASE_UPGRADE_REQUIRED",
   "PDFJS_ASSETS_FAILED",
   "TYPST_ASSETS_FAILED",
   "CREDENTIALS_DATABASE_FAILED",
@@ -105,6 +107,8 @@ export interface LauncherSnapshot {
   uiLocale: UiLocale | null;
   failureCode: LauncherLogCode | null;
   canRetry: boolean;
+  /** The reader database uses the previous schema and the user may agree to upgrade it. */
+  canUpgrade: boolean;
   update: LauncherUpdateState;
   logs: LauncherLogEntry[];
 }

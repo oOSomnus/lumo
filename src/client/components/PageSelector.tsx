@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { DocumentRecord } from "../../shared/contracts";
+import type { DocumentRecord, OutlineEntry } from "../../shared/contracts";
 import { errorText, toUiError, useI18n, type UiError } from "../i18n";
 import {
   buildOutlineRanges,
@@ -7,8 +7,10 @@ import {
   type DocumentOutlineState,
   type OutlineRange,
 } from "../outline";
+import { formatOutlineImport } from "../outline-import";
 import { parsePageSelection } from "../page-selection";
 import type { TranslatedPages } from "../translated-pages";
+import { OutlineImportEditor } from "./OutlineImportEditor";
 
 interface PageSelectorProps {
   /** Prefixes element ids and the radio group name, so two selectors can coexist. */
@@ -22,16 +24,13 @@ interface PageSelectorProps {
   /** The third quick-selection button, after the current and all pages. */
   quickSelect: { label: string; disabled: boolean; run: () => void };
   outline: DocumentOutlineState;
-  outlineGenerationDisabledReason: string | null;
-  onGenerateOutline: () => void;
-  onCancelOutline: () => void;
+  /** The outline text being imported; null while the import editor is closed. */
+  outlineDraft: string | null;
+  onOutlineDraftChange: (draft: string | null) => void;
+  onImportOutline: (entries: OutlineEntry[]) => void;
+  onRemoveImportedOutline: () => void;
   onReloadOutline: () => void;
-  onRetrySaveOutline: () => void;
-  onDiscardOutline: () => void;
   onOpenOutlinePage: (pageNumber: number) => void;
-  /** The step that makes generating an outline possible, while the AI is not ready. */
-  aiStep: { label: string; run: () => void } | null;
-  aiChecking: boolean;
 }
 
 const PAGE_GROUP_SIZE = 100;
@@ -51,15 +50,12 @@ export function PageSelector({
   translated,
   quickSelect,
   outline,
-  outlineGenerationDisabledReason,
-  onGenerateOutline,
-  onCancelOutline,
+  outlineDraft,
+  onOutlineDraftChange,
+  onImportOutline,
+  onRemoveImportedOutline,
   onReloadOutline,
-  onRetrySaveOutline,
-  onDiscardOutline,
   onOpenOutlinePage,
-  aiStep,
-  aiChecking,
 }: PageSelectorProps) {
   const { locale, t } = useI18n();
   const isEpub = document.format === "epub";
@@ -114,6 +110,9 @@ export function PageSelector({
     () => buildOutlineRows(outlineRanges, collapsed, selection, pageCount),
     [outlineRanges, collapsed, selection, pageCount],
   );
+
+  // EPUB books keep their own table of contents; only a PDF imports an outline.
+  const editingOutline = !isEpub && outlineDraft !== null;
 
   const toggleOutlineRange = (range: OutlineRange, selected: boolean): void => {
     const next = new Set(selection);
@@ -211,48 +210,76 @@ export function PageSelector({
         )}
         {outline.loadStatus === "ready" && (
           <>
-            {outline.stage === "generating" && (
-              <div className="outline-progress">
-                <p aria-live="polite">
-                  {t.outline.generating(outline.processedPages, pageCount)}
-                </p>
-                <button type="button" onClick={onCancelOutline}>
-                  {t.outline.cancelGeneration}
-                </button>
-              </div>
+            {editingOutline && (
+              <OutlineImportEditor
+                // A new editor per document, so a file still being read never lands in another's draft.
+                key={document.id}
+                pageCount={pageCount}
+                draft={outlineDraft}
+                saving={outline.stage === "saving"}
+                error={outline.error}
+                onDraftChange={onOutlineDraftChange}
+                onSave={onImportOutline}
+                onCancel={() => onOutlineDraftChange(null)}
+              />
             )}
-            {outline.stage === "saving" && (
+            {!editingOutline && outline.stage === "saving" && (
               <p className="muted" aria-live="polite">
                 {t.outline.saving}
               </p>
             )}
-            {outline.stage === "unsaved" && (
+            {!editingOutline && outline.error && (
+              <p className="field-error" role="alert">
+                {errorText(outline.error, locale)}
+              </p>
+            )}
+            {!editingOutline && outline.importIssue && (
               <div className="inline-error" role="alert">
-                <strong>{t.outline.unsavedTitle}</strong>
-                <p>{t.outline.unsavedBody}</p>
-                {outline.error && (
-                  <p>{errorText(outline.error, locale)}</p>
-                )}
-                <div className="inline-actions">
-                  <button type="button" onClick={onRetrySaveOutline}>
-                    {t.outline.retrySave}
-                  </button>
-                  <button type="button" onClick={onDiscardOutline}>
-                    {t.outline.discard}
-                  </button>
-                </div>
+                {t.outline.importedFailed(errorText(outline.importIssue, locale))}
+                <button type="button" onClick={onReloadOutline}>
+                  {t.outline.reload}
+                </button>
+                <button
+                  type="button"
+                  disabled={outline.stage !== "idle"}
+                  onClick={onRemoveImportedOutline}
+                >
+                  {t.outline.remove}
+                </button>
               </div>
             )}
-            {outline.entries.length > 0 && (
+            {!editingOutline && outline.entries.length > 0 && (
               <>
                 <div className="outline-meta">
                   <span>
-                    {outline.source === "native"
-                      ? t.outline.sourceNative
-                      : t.outline.sourceGenerated}
+                    {outline.source === "imported"
+                      ? t.outline.sourceImported
+                      : t.outline.sourceNative}
                   </span>
                   {outline.skipped > 0 && (
                     <span>{t.outline.skipped(outline.skipped)}</span>
+                  )}
+                  {!isEpub && (
+                    <span className="inline-actions">
+                      <button
+                        type="button"
+                        disabled={outline.stage !== "idle"}
+                        onClick={() =>
+                          onOutlineDraftChange(formatOutlineImport(outline.entries))
+                        }
+                      >
+                        {outline.source === "imported" ? t.outline.edit : t.outline.import}
+                      </button>
+                      {outline.source === "imported" && (
+                        <button
+                          type="button"
+                          disabled={outline.stage !== "idle"}
+                          onClick={onRemoveImportedOutline}
+                        >
+                          {t.outline.remove}
+                        </button>
+                      )}
+                    </span>
                   )}
                 </div>
                 {outlineRows.length > 0 && (
@@ -328,29 +355,12 @@ export function PageSelector({
                 </p>
               </>
             )}
-            {!isEpub && outline.entries.length === 0 && outline.stage === "idle" && (
+            {!isEpub && !editingOutline && outline.entries.length === 0 && outline.stage === "idle" && (
               <>
-                {outline.error && (
-                  <p className="field-error" role="alert">
-                    {errorText(outline.error, locale)}
-                  </p>
-                )}
-                <p className="muted">{t.outline.generateBody(pageCount)}</p>
-                <button
-                  type="button"
-                  disabled={
-                    aiStep ? false : Boolean(outlineGenerationDisabledReason) || aiChecking
-                  }
-                  onClick={aiStep?.run ?? onGenerateOutline}
-                >
-                  {aiStep?.label ??
-                    (outline.error ? t.outline.retryGenerate : t.outline.generate)}
+                <p className="muted">{t.outline.empty}</p>
+                <button type="button" onClick={() => onOutlineDraftChange("")}>
+                  {t.outline.import}
                 </button>
-                {outlineGenerationDisabledReason && (
-                  <p className="muted">
-                    {outlineGenerationDisabledReason}
-                  </p>
-                )}
               </>
             )}
             {isEpub && outline.entries.length === 0 && (

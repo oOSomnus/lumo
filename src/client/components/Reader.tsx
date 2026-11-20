@@ -11,16 +11,13 @@ import {
   DEFAULT_EPUB_READER_VIEW,
   DEFAULT_PDF_READER_VIEW,
   DEFAULT_TRANSLATION_ZOOM,
-  MAX_OUTLINE_ENTRIES,
   outlineEntriesSchema,
-  outlinePageResultSchema,
   TARGET_LANGUAGE_LABELS,
   type AiSettingsSnapshot,
   type DocumentRecord,
   type EpubReaderView,
   type LibrarySnapshot,
   type OutlineEntry,
-  type OutlinePageInput,
   type ReaderUpdate,
   type ReaderScrollMemory,
   type ReaderView,
@@ -94,8 +91,8 @@ import {
 } from "../../shared/epub";
 import JSZip from "jszip/dist/jszip.min.js";
 import {
+  assertOutlineFits,
   emptyOutlineState,
-  OutlineError,
   type DocumentOutlineState,
 } from "../outline";
 import {
@@ -273,6 +270,14 @@ function LocaleSwitch() {
       </button>
     </div>
   );
+}
+
+/** The viewer's outline sidebar follows the outline in use; it is cosmetic, so a failure is ignored. */
+function showSidebarOutline(
+  bridge: ViewerBridge,
+  entries: readonly OutlineEntry[] | null,
+): void {
+  void bridge.setSidebarOutline(entries).catch(() => {});
 }
 
 export function Reader() {
@@ -841,6 +846,42 @@ export function Reader() {
 
   const [selection, setSelection] = useState<Set<number>>(new Set());
   const [outline, setOutline] = useState<DocumentOutlineState>(emptyOutlineState);
+  // Outline text being imported, per PDF: a draft stays with its document while others are
+  // open (including an edited copy saved from it) and is dropped only once saved, cancelled
+  // or its document is deleted. A document without an entry has the editor closed.
+  const [outlineDrafts, setOutlineDrafts] = useState<ReadonlyMap<string, string>>(
+    () => new Map(),
+  );
+  const outlineDraft =
+    currentDocument?.format === "pdf"
+      ? outlineDrafts.get(currentDocument.id) ?? null
+      : null;
+  // A reload loses every draft, not only the open document's.
+  const hasOutlineDraft = useMemo(
+    () => [...outlineDrafts.values()].some((draft) => draft.trim().length > 0),
+    [outlineDrafts],
+  );
+  const updateOutlineDraft = useCallback(
+    (documentId: string, draft: string | null) => {
+      setOutlineDrafts((previous) => {
+        if (draft === null ? !previous.has(documentId) : previous.get(documentId) === draft) {
+          return previous;
+        }
+        const next = new Map(previous);
+        if (draft === null) next.delete(documentId);
+        else next.set(documentId, draft);
+        return next;
+      });
+    },
+    [],
+  );
+  const setOutlineDraft = useCallback(
+    (draft: string | null) => {
+      const document = currentDocumentRef.current;
+      if (document?.format === "pdf") updateOutlineDraft(document.id, draft);
+    },
+    [updateOutlineDraft],
+  );
   const outlineRef = useRef(outline);
   const outlineAttemptRef = useRef(0);
   const outlineControllerRef = useRef<AbortController | null>(null);
@@ -996,21 +1037,6 @@ export function Reader() {
   useEffect(() => {
     if (!modified) return;
     queue.cancelAll();
-    if (outlineRef.current.stage !== "generating") return;
-    outlineAttemptRef.current += 1;
-    outlineControllerRef.current?.abort();
-    outlineControllerRef.current = null;
-    setOutline((previous) =>
-      previous.stage === "generating"
-        ? {
-            ...previous,
-            entries: [],
-            stage: "idle",
-            processedPages: 0,
-            error: null,
-          }
-        : previous,
-    );
   }, [modified, queue]);
 
   useEffect(() => {
@@ -1498,8 +1524,42 @@ export function Reader() {
       const controller = new AbortController();
       outlineControllerRef.current = controller;
       setOutline({ ...emptyOutlineState(), loadStatus: "loading" });
+      const stale = (): boolean =>
+        attempt !== outlineAttemptRef.current ||
+        sessionRef.current !== sessionAtStart ||
+        bridgeRef.current !== bridge;
 
       try {
+        // An imported outline replaces the PDF's own one until it is removed. One that
+        // cannot be read, or does not fit the open PDF, leaves the native outline in use
+        // and says why, so it can be retried, replaced or removed.
+        let importIssue: UiError | null = null;
+        try {
+          const result = await apiJson<{ outline: OutlineEntry[] | null }>(
+            `/api/documents/${documentId}/outline`,
+            { signal: controller.signal },
+          );
+          if (stale()) return;
+          if (result.outline && result.outline.length > 0) {
+            const entries = outlineEntriesSchema.parse(result.outline);
+            assertOutlineFits(entries, bridge.pageCount);
+            setOutline({
+              entries,
+              source: "imported",
+              loadStatus: "ready",
+              stage: "idle",
+              skipped: 0,
+              error: null,
+              importIssue: null,
+            });
+            showSidebarOutline(bridge, entries);
+            return;
+          }
+        } catch (error) {
+          if (stale() || controller.signal.aborted) return;
+          importIssue = toUiError(error);
+        }
+
         let native: { entries: OutlineEntry[]; skipped: number } | null = null;
         try {
           native = await bridge.getOutline();
@@ -1511,52 +1571,16 @@ export function Reader() {
             throw error;
           }
         }
-        if (
-          attempt !== outlineAttemptRef.current ||
-          sessionRef.current !== sessionAtStart ||
-          bridgeRef.current !== bridge
-        ) {
-          return;
-        }
-        if (native && native.entries.length > 0) {
-          setOutline({
-            entries: native.entries,
-            source: "native",
-            loadStatus: "ready",
-            stage: "idle",
-            processedPages: 0,
-            skipped: native.skipped,
-            error: null,
-          });
-          return;
-        }
-
-        const result = await apiJson<{ outline: OutlineEntry[] | null }>(
-          `/api/documents/${documentId}/outline`,
-          { signal: controller.signal },
-        );
-        if (
-          attempt !== outlineAttemptRef.current ||
-          sessionRef.current !== sessionAtStart ||
-          bridgeRef.current !== bridge
-        ) {
-          return;
-        }
-        if (result.outline && result.outline.length > 0) {
-          setOutline({
-            entries: outlineEntriesSchema.parse(result.outline),
-            source: "generated",
-            loadStatus: "ready",
-            stage: "idle",
-            processedPages: 0,
-            skipped: 0,
-            error: null,
-          });
-          return;
-        }
+        if (stale()) return;
+        showSidebarOutline(bridge, null);
+        const hasNative = native !== null && native.entries.length > 0;
         setOutline({
           ...emptyOutlineState(),
+          entries: hasNative ? native!.entries : [],
+          source: hasNative ? "native" : null,
           loadStatus: "ready",
+          skipped: hasNative ? native!.skipped : 0,
+          importIssue,
         });
       } catch (error) {
         if (
@@ -1579,305 +1603,143 @@ export function Reader() {
     [],
   );
 
-  const cancelOutlineGeneration = useCallback(() => {
-    outlineAttemptRef.current += 1;
-    outlineControllerRef.current?.abort();
-    outlineControllerRef.current = null;
-    setOutline((previous) =>
-      previous.stage === "generating"
-        ? {
-            ...previous,
-            entries: [],
-            stage: "idle",
-            processedPages: 0,
-            error: null,
-          }
-        : previous,
-    );
-  }, []);
+  /** Saves an outline the user imported; on failure the editor keeps the text for another try. */
+  const importOutline = useCallback(
+    async (entries: readonly OutlineEntry[]): Promise<void> => {
+      const bridge = bridgeRef.current;
+      const document = currentDocumentRef.current;
+      if (
+        !bridge ||
+        !document ||
+        document.format !== "pdf" ||
+        !viewerReadyRef.current ||
+        previewOnlyRef.current ||
+        outlineRef.current.loadStatus !== "ready" ||
+        outlineRef.current.stage !== "idle"
+      ) {
+        return;
+      }
+      const total = bridge.pageCount;
+      const parsedCopy = outlineEntriesSchema.safeParse(structuredClone(entries));
+      if (!parsedCopy.success) {
+        setOutline((previous) => ({ ...previous, error: { code: "OUTLINE_INVALID" } }));
+        return;
+      }
+      try {
+        assertOutlineFits(parsedCopy.data, total);
+      } catch (error) {
+        setOutline((previous) => ({ ...previous, error: toUiError(error) }));
+        return;
+      }
 
-  const generateOutline = useCallback(async (): Promise<void> => {
-    const bridge = bridgeRef.current;
-    const document = currentDocumentRef.current;
-    const state = outlineRef.current;
-    if (
-      !bridge ||
-      !document ||
-      !viewerReadyRef.current ||
-      previewOnlyRef.current ||
-      modified ||
-      bridge.hasEdits ||
-      state.loadStatus !== "ready" ||
-      state.stage !== "idle" ||
-      state.entries.length > 0
-    ) {
-      return;
-    }
-    if (
-      tasks.some(
-        (task) =>
-          task.documentId === document.id &&
-          isActiveStage(task.stage),
-      )
-    ) {
-      return;
-    }
-    if (!requireAi()) return;
-
-    const sessionAtStart = sessionRef.current;
-    const pageCount = bridge.pageCount;
-    const confirmed = await ask({
-      title: t.outline.generateTitle,
-      body: t.outline.generateBody(pageCount),
-      confirmLabel: t.outline.generateConfirm,
-    });
-    if (!confirmed) return;
-    if (
-      currentDocumentRef.current?.id !== document.id ||
-      sessionRef.current !== sessionAtStart ||
-      bridgeRef.current !== bridge ||
-      !viewerReadyRef.current ||
-      previewOnlyRef.current ||
-      modified ||
-      bridge.hasEdits ||
-      outlineRef.current.stage !== "idle" ||
-      outlineRef.current.entries.length > 0
-    ) {
-      return;
-    }
-
-    const attempt = ++outlineAttemptRef.current;
-    const controller = new AbortController();
-    outlineControllerRef.current = controller;
-    setOutline({
-      entries: [],
-      source: null,
-      loadStatus: "ready",
-      stage: "generating",
-      processedPages: 0,
-      skipped: 0,
-      error: null,
-    });
-
-    const entries: OutlineEntry[] = [];
-    let saving = false;
-    try {
-      for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+      const sessionAtStart = sessionRef.current;
+      const attempt = ++outlineAttemptRef.current;
+      outlineControllerRef.current?.abort();
+      const controller = new AbortController();
+      outlineControllerRef.current = controller;
+      const saving: DocumentOutlineState = {
+        ...outlineRef.current,
+        stage: "saving",
+        error: null,
+      };
+      outlineRef.current = saving;
+      setOutline(saving);
+      try {
+        const saved = await apiJson<{ outline: OutlineEntry[] }>(
+          `/api/documents/${document.id}/outline`,
+          { ...jsonInit("PUT", parsedCopy.data), signal: controller.signal },
+        );
         if (
           attempt !== outlineAttemptRef.current ||
-          controller.signal.aborted ||
           sessionRef.current !== sessionAtStart ||
-          bridgeRef.current !== bridge ||
           currentDocumentRef.current?.id !== document.id
         ) {
           return;
         }
-
-        const pageProxy = await bridge.getPage(pageNumber);
-        let prepared: { text: string; imageBase64: string };
-        try {
-          prepared = await preparePageForTranslation(
-            pageProxy,
-            bridge.document,
-            controller.signal,
-          );
-        } finally {
-          if (pageNumber !== bridge.page) pageProxy.cleanup();
-        }
-
-        if (
-          attempt !== outlineAttemptRef.current ||
-          controller.signal.aborted ||
-          sessionRef.current !== sessionAtStart ||
-          bridgeRef.current !== bridge
-        ) {
-          return;
-        }
-
-        const previousHeadings = entries.slice(-32);
-        const input: OutlinePageInput = {
-          documentId: document.id,
-          pageNumber,
-          text: prepared.text,
-          imageBase64: prepared.imageBase64,
-          previousHeadings,
+        const parsed = outlineEntriesSchema.parse(saved.outline);
+        assertOutlineFits(parsed, total);
+        const next: DocumentOutlineState = {
+          entries: parsed,
+          source: "imported",
+          loadStatus: "ready",
+          stage: "idle",
+          skipped: 0,
+          error: null,
+          importIssue: null,
         };
-        const response = await apiJson<{ headings: unknown }>(
-          "/api/outline-page",
-          { ...jsonInit("POST", input), signal: controller.signal },
-        );
-        if (
-          attempt !== outlineAttemptRef.current ||
-          controller.signal.aborted ||
-          sessionRef.current !== sessionAtStart ||
-          bridgeRef.current !== bridge
-        ) {
-          return;
-        }
-
-        const result = outlinePageResultSchema.parse(response);
-        let previousLevel = previousHeadings.at(-1)?.level ?? 0;
-        for (const heading of result.headings) {
-          if (heading.level > previousLevel + 1) {
-            throw new OutlineError(
-              "OUTLINE_INVALID",
-              "the model returned headings that skip a level",
-            );
-          }
-          previousLevel = heading.level;
-          entries.push({ ...heading, pageNumber });
-        }
-        if (entries.length > MAX_OUTLINE_ENTRIES) {
-          throw new OutlineError("OUTLINE_INVALID", "the outline is too long");
-        }
-
-        setOutline((previous) =>
-          previous.stage === "generating"
-            ? { ...previous, processedPages: pageNumber }
-            : previous,
-        );
-      }
-
-      if (entries.length === 0) {
+        outlineRef.current = next;
+        setOutline(next);
+        updateOutlineDraft(document.id, null);
+        if (bridgeRef.current === bridge) showSidebarOutline(bridge, parsed);
+      } catch (error) {
+        if (attempt !== outlineAttemptRef.current) return;
         setOutline((previous) => ({
           ...previous,
-          entries: [],
           stage: "idle",
-          processedPages: pageCount,
-          error: { code: "OUTLINE_EMPTY" },
+          error: toUiError(error),
         }));
-        return;
+      } finally {
+        if (outlineControllerRef.current === controller) {
+          outlineControllerRef.current = null;
+        }
       }
-      const complete = outlineEntriesSchema.parse(entries);
+    },
+    [updateOutlineDraft],
+  );
 
-      saving = true;
-      setOutline((previous) => ({
-        ...previous,
-        entries: complete,
-        source: "generated",
-        stage: "saving",
-        processedPages: pageCount,
-        error: null,
-      }));
-      const saved = await apiJson<{ outline: OutlineEntry[] }>(
-        `/api/documents/${document.id}/outline`,
-        { ...jsonInit("PUT", complete), signal: controller.signal },
-      );
-      if (
-        attempt !== outlineAttemptRef.current ||
-        sessionRef.current !== sessionAtStart ||
-        currentDocumentRef.current?.id !== document.id
-      ) {
-        return;
-      }
-      const parsed = outlineEntriesSchema.parse(saved.outline);
-      if (parsed.some((entry) => entry.pageNumber > pageCount)) {
-        throw new OutlineError(
-          "OUTLINE_INVALID",
-          "the saved outline is outside the document",
-        );
-      }
-      setOutline({
-        entries: parsed,
-        source: "generated",
-        loadStatus: "ready",
-        stage: "idle",
-        processedPages: pageCount,
-        skipped: 0,
-        error: null,
-      });
-    } catch (error) {
-      if (attempt !== outlineAttemptRef.current) return;
-      if (controller.signal.aborted) return;
-      const uiError = toUiError(error);
-      setOutline((previous) =>
-        saving
-          ? { ...previous, stage: "unsaved", error: uiError }
-          : {
-              ...previous,
-              entries: [],
-              stage: "idle",
-              processedPages: 0,
-              error: uiError,
-            },
-      );
-    } finally {
-      if (outlineControllerRef.current === controller) {
-        outlineControllerRef.current = null;
-      }
-    }
-  }, [ask, modified, requireAi, t, tasks]);
-
-  const retrySaveOutline = useCallback(async (): Promise<void> => {
+  /** Deletes the imported outline; the PDF's own outline, if any, shows again. */
+  const removeImportedOutline = useCallback(async (): Promise<void> => {
+    const bridge = bridgeRef.current;
     const document = currentDocumentRef.current;
-    const state = outlineRef.current;
     if (
+      !bridge ||
       !document ||
-      state.stage !== "unsaved" ||
-      state.entries.length === 0
+      document.format !== "pdf" ||
+      previewOnlyRef.current ||
+      (outlineRef.current.source !== "imported" &&
+        outlineRef.current.importIssue === null) ||
+      outlineRef.current.stage !== "idle"
     ) {
       return;
     }
+    const sessionAtStart = sessionRef.current;
     const attempt = ++outlineAttemptRef.current;
+    outlineControllerRef.current?.abort();
     const controller = new AbortController();
     outlineControllerRef.current = controller;
-    const sessionAtStart = sessionRef.current;
-    const pageCount = bridgeRef.current?.pageCount ?? document.pageCount;
-    setOutline((previous) => ({
-      ...previous,
+    const saving: DocumentOutlineState = {
+      ...outlineRef.current,
       stage: "saving",
       error: null,
-    }));
-
+    };
+    outlineRef.current = saving;
+    setOutline(saving);
     try {
-      const saved = await apiJson<{ outline: OutlineEntry[] }>(
-        `/api/documents/${document.id}/outline`,
-        { ...jsonInit("PUT", state.entries), signal: controller.signal },
-      );
+      await apiJson<{ outline: null }>(`/api/documents/${document.id}/outline`, {
+        method: "DELETE",
+        signal: controller.signal,
+      });
       if (
         attempt !== outlineAttemptRef.current ||
         sessionRef.current !== sessionAtStart ||
-        currentDocumentRef.current?.id !== document.id
+        bridgeRef.current !== bridge
       ) {
         return;
       }
-      const parsed = outlineEntriesSchema.parse(saved.outline);
-      if (parsed.some((entry) => entry.pageNumber > pageCount)) {
-        throw new OutlineError(
-          "OUTLINE_INVALID",
-          "the saved outline is outside the document",
-        );
-      }
-      setOutline({
-        entries: parsed,
-        source: "generated",
-        loadStatus: "ready",
-        stage: "idle",
-        processedPages: state.processedPages,
-        skipped: 0,
-        error: null,
-      });
+      await loadOutline(bridge, document.id, sessionAtStart, true);
     } catch (error) {
       if (attempt !== outlineAttemptRef.current) return;
-      if (controller.signal.aborted) return;
-      setOutline((previous) =>
-        previous.stage === "saving"
-          ? { ...previous, stage: "unsaved", error: toUiError(error) }
-          : previous,
-      );
+      setOutline((previous) => ({
+        ...previous,
+        stage: "idle",
+        error: toUiError(error),
+      }));
     } finally {
       if (outlineControllerRef.current === controller) {
         outlineControllerRef.current = null;
       }
     }
-  }, []);
-
-  const discardOutline = useCallback(() => {
-    outlineAttemptRef.current += 1;
-    outlineControllerRef.current?.abort();
-    outlineControllerRef.current = null;
-    setOutline({ ...emptyOutlineState(), loadStatus: "ready" });
-  }, []);
+  }, [loadOutline]);
 
   const reloadOutline = useCallback(() => {
     const bridge = bridgeRef.current;
@@ -1927,16 +1789,13 @@ export function Reader() {
   const confirmSwitch = useCallback(async (): Promise<boolean> => {
     const document = currentDocumentRef.current;
     const { active, drafts } = currentHasWork(document?.id ?? null);
-    const outlineActive =
-      outline.stage === "generating" || outline.stage === "saving";
-    const outlineUnsaved = outline.stage === "unsaved";
+    const outlineActive = outline.stage === "saving";
     if (
       !active &&
       !modified &&
       !previewOnly &&
       drafts.length === 0 &&
-      !outlineActive &&
-      !outlineUnsaved
+      !outlineActive
     ) {
       return true;
     }
@@ -1944,7 +1803,6 @@ export function Reader() {
       active ? t.confirm.switchActive : null,
       drafts.length > 0 ? t.confirm.switchDrafts(drafts.length) : null,
       outlineActive ? t.confirm.switchOutlineActive : null,
-      outlineUnsaved ? t.confirm.switchOutlineUnsaved : null,
       modified ? t.confirm.switchModified : null,
       previewOnly ? t.confirm.switchPreview : null,
     ].filter((value): value is string => value !== null);
@@ -2360,9 +2218,9 @@ export function Reader() {
         source: "native",
         loadStatus: "ready",
         stage: "idle",
-        processedPages: 0,
         skipped: 0,
         error: null,
+        importIssue: null,
       });
       const view = await resolveInitialView(
         document.id,
@@ -2620,12 +2478,6 @@ export function Reader() {
     async (force: boolean) => {
       const document = currentDocumentRef.current;
       if (!document || !currentKey || modified || previewOnlyRef.current) return;
-      if (
-        outlineRef.current.stage === "generating" ||
-        outlineRef.current.stage === "saving"
-      ) {
-        return;
-      }
       // Reading settings are still being applied: the page on screen is about to change.
       if (document.format === "epub" && (!epubTarget || epubStyleBusy)) return;
       const existing = queue.getTask(currentKey);
@@ -3213,6 +3065,7 @@ export function Reader() {
           };
         });
         queue.cancelDocument(document.id);
+        updateOutlineDraft(document.id, null);
         if (currentDocumentRef.current?.id === document.id) {
           openAttemptRef.current += 1;
           abortOutlineWork();
@@ -3248,6 +3101,7 @@ export function Reader() {
       setPageCount,
       setPageValue,
       t,
+      updateOutlineDraft,
       viewStore,
     ],
   );
@@ -3257,6 +3111,7 @@ export function Reader() {
       modified ||
       previewOnly ||
       outline.stage !== "idle" ||
+      hasOutlineDraft ||
       epubBatch.status === "running" ||
       tasks.some(
         (task) => isActiveStage(task.stage) || hasRetainedDraft(task),
@@ -3268,7 +3123,7 @@ export function Reader() {
     };
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
-  }, [epubBatch.status, modified, outline.stage, previewOnly, tasks]);
+  }, [epubBatch.status, hasOutlineDraft, modified, outline.stage, previewOnly, tasks]);
 
   useEffect(() => {
     const handler = (): void => {
@@ -3399,19 +3254,15 @@ export function Reader() {
   const atFirstPage = isEpubDocument ? (epubLocation?.atStart ?? true) : page <= 1;
   const atLastPage = isEpubDocument ? (epubLocation?.atEnd ?? true) : page >= pageCount;
 
-  const outlineBusy =
-    outline.stage === "generating" || outline.stage === "saving";
   const pageDisabledReason = !currentDocument
     ? previewOnly
       ? t.page.disabled.previewOnly
       : t.page.disabled.noPdf
     : !viewerReady || pageCount === 0
       ? t.page.disabled.loading
-      : outlineBusy
-        ? t.page.disabled.outlineBusy
-        : modified
-          ? t.page.disabled.modified
-          : null;
+      : modified
+        ? t.page.disabled.modified
+        : null;
   const epubLocatingReason =
     isEpubDocument && (!epubTarget || epubStyleBusy)
       ? epubLocation && !epubStyleBusy
@@ -3436,17 +3287,6 @@ export function Reader() {
           : currentUnit && !isEpubPageUnit(currentUnit)
             ? t.page.translateSelection
             : t.page.translate;
-
-  const outlineGenerationDisabledReason =
-    !currentDocument || currentDocument.format === "epub"
-      ? null
-      : pageDisabledReason ??
-        (tasks.some(
-          (task) =>
-            task.documentId === currentDocument.id && isActiveStage(task.stage),
-        )
-          ? t.outline.disabledActive
-          : null);
 
   const previewTypst =
     currentTask?.stage === "generating"
@@ -3676,11 +3516,11 @@ export function Reader() {
     if (tasks.some((task) => hasRetainedDraft(task))) {
       return t.settings.languageBlockedUnsaved;
     }
-    if (outline.stage === "generating" || outline.stage === "saving") {
+    if (outline.stage === "saving") {
       return t.settings.languageBlockedOutline;
     }
-    if (outline.stage === "unsaved") {
-      return t.settings.languageBlockedOutlineUnsaved;
+    if (hasOutlineDraft) {
+      return t.settings.languageBlockedOutlineDraft;
     }
     if (modified || bridgeRef.current?.hasEdits) {
       return t.settings.languageBlockedModified;
@@ -3702,6 +3542,7 @@ export function Reader() {
         modified ||
         previewOnly ||
         outline.stage !== "idle" ||
+        hasOutlineDraft ||
         savingCopy ||
         previewUploadCount > 0 ||
         Boolean(bridgeRef.current?.hasEdits);
@@ -3729,7 +3570,7 @@ export function Reader() {
       await saveUiLocale(next);
       location.reload();
     },
-    [commitCurrentView, modified, outline.stage, previewOnly, previewUploadCount, savingCopy, tasks],
+    [commitCurrentView, hasOutlineDraft, modified, outline.stage, previewOnly, previewUploadCount, savingCopy, tasks],
   );
 
   if (!token) {
@@ -4181,12 +4022,11 @@ export function Reader() {
                   selection={selection}
                   onSelectionChange={setSelection}
                   outline={outline}
-                  outlineGenerationDisabledReason={outlineGenerationDisabledReason}
-                  onGenerateOutline={() => void generateOutline()}
-                  onCancelOutline={cancelOutlineGeneration}
+                  outlineDraft={outlineDraft}
+                  onOutlineDraftChange={setOutlineDraft}
+                  onImportOutline={(entries) => void importOutline(entries)}
+                  onRemoveImportedOutline={() => void removeImportedOutline()}
                   onReloadOutline={reloadOutline}
-                  onRetrySaveOutline={() => void retrySaveOutline()}
-                  onDiscardOutline={discardOutline}
                   onOpenOutlinePage={openOutlinePage}
                   epubBatch={epubBatch}
                   onStartEpubBatch={(options) => void startEpubBatch(options)}
@@ -4680,12 +4520,11 @@ export function Reader() {
           translationDisabledReason={pageDisabledReason}
           password={() => passwordRef.current ?? undefined}
           outline={outline}
-          outlineGenerationDisabledReason={outlineGenerationDisabledReason}
-          onGenerateOutline={() => void generateOutline()}
-          onCancelOutline={cancelOutlineGeneration}
+          outlineDraft={outlineDraft}
+          onOutlineDraftChange={setOutlineDraft}
+          onImportOutline={(entries) => void importOutline(entries)}
+          onRemoveImportedOutline={() => void removeImportedOutline()}
           onReloadOutline={reloadOutline}
-          onRetrySaveOutline={() => void retrySaveOutline()}
-          onDiscardOutline={discardOutline}
           onOpenOutlinePage={openOutlinePage}
           aiStatus={ai.state === "ready" ? ai.snapshot.status : null}
           aiStatusError={ai.state === "error" ? ai.error : null}

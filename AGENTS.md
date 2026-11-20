@@ -1,6 +1,6 @@
 # Lumo agent notes
 
-Personal project. Make clean cutovers: change current behavior, update every caller, and delete replaced code, aliases, shims and dead getters. Storage accepts the current schema only; older databases are rejected untouched, never migrated, reset or rewritten. Keep source mode and the standalone build behaviorally aligned.
+Personal project. Make clean cutovers: change current behavior, update every caller, and delete replaced code, aliases, shims and dead getters. Storage accepts the current schema. Only the previous schema may be upgraded, and only with the user's consent (`--upgrade-database`, or the launcher's Upgrade library button): first a `VACUUM INTO` backup, then one immediate transaction. Without consent it is left untouched; every other version is rejected untouched, never reset or rewritten. Keep source mode and the standalone build behaviorally aligned.
 
 ## Invariants
 
@@ -16,6 +16,7 @@ Personal project. Make clean cutovers: change current behavior, update every cal
 ## Where to look
 
 - Auth, credentials, login: `src/server/{ai-settings,ai-credentials,ai-auth}.ts` and their tests.
+- Outline import and selection: `src/client/{outline,outline-import}.ts`, `src/client/components/{PageSelector,OutlineImportEditor}.tsx`, the `/outline` route in `src/server/library.ts`.
 - Streaming, queue, wire contracts: `src/shared/contracts.ts`, `src/server/translate.ts`, `src/client/{api,translation-queue}.ts` and their tests.
 - PDF bridge, pinned viewer, fetch/build scripts: `src/client/{pdf,pdfBridge}.ts`, `vendor/pdfjs/`, `scripts/`. Pi is updated with `bun run update:pi`.
 - EPUB and Typst: `src/server/epub.ts`, `src/shared/{epub,limits,typst}.ts`; the iframe `src/client/{epub-viewer,epub-content,epub-image,epub-page,epub-style,epub-toc,epub-js}.ts` and its protocol `src/client/{epub-protocol,epub-bridge,epub-bridge-client}.ts`; the reader side `src/client/{epub-batch,toc,translation-input,typst,typst-worker}.ts`; `scripts/prepare-typst.ts`, `vendor/typst/`.

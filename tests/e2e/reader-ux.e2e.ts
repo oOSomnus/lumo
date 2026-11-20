@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import type { APIRequestContext, Locator, Page } from "@playwright/test";
+import type { APIRequestContext, FrameLocator, Locator, Page } from "@playwright/test";
 import {
   configureCustomAi,
   expect,
@@ -33,6 +33,17 @@ function tokenColors(block: Locator): Promise<number> {
   return block
     .locator("span[style*='color']")
     .evaluateAll((spans) => new Set(spans.map((span) => span.style.color)).size);
+}
+
+/** Opens the PDF.js sidebar on its outline view. */
+async function openOutlineSidebar(viewer: FrameLocator): Promise<void> {
+  const view = viewer.locator("#outlinesView");
+  if (await view.isVisible()) return;
+  await viewer.locator("#viewsManagerToggleButton").click();
+  if (await view.isVisible()) return;
+  await viewer.locator("#viewsManagerSelectorButton").click();
+  await viewer.locator("#outlinesViewMenu").click();
+  await expect(view).toBeVisible();
 }
 
 /** A /api/translate answer that ends in a finished document, in the wire format of the real endpoint. */
@@ -782,6 +793,215 @@ test("The PDF batch summary counts selected, skipped and to-translate pages, and
   release.resolve();
   await expect(panel.locator(".task-error").first()).toBeVisible();
   await expect(panel.getByRole("button", { name: "Stop all", exact: true })).toHaveCount(0);
+});
+
+test("An imported outline is checked line by line, saved, used for selection, kept across reloads and removed", async ({
+  page,
+  lumo,
+}) => {
+  const stored = await uploadPdf(lumo.api, "imported-outline.pdf", 4, "outline");
+  await openTranslatedPage(page, lumo.url, "imported-outline.pdf");
+  await expect(page.frameLocator("iframe.pdf-frame").locator("#pageNumber")).toHaveAttribute("max", "4");
+  await page.getByRole("tab", { name: "Batch translation" }).click();
+  const panel = page.locator(".batch-panel");
+  await panel.getByRole("radio", { name: "By outline" }).check();
+  await expect(panel).toContainText("This PDF has no outline.");
+  await panel.getByRole("button", { name: "Import outline…" }).click();
+
+  const text = panel.getByRole("textbox", { name: "Outline text" });
+  const save = panel.getByRole("button", { name: "Save outline" });
+  await text.fill("# Part One  1\nnot a heading\n## Chapter  9");
+  await expect(panel).toContainText("Line 2: not a heading; start the line with #.");
+  await expect(panel).toContainText("Line 3: the page is outside this PDF.");
+  await expect(save).toBeDisabled();
+
+  await text.fill("```\n# Part One  1\n## Chapter A ..... 2\n# Part Two  3\n```");
+  await expect(panel).toContainText("3 headings · pages 1–3");
+  await save.click();
+  await expect(panel).toContainText("Imported outline");
+  await expect(panel.getByRole("button", { name: "Chapter A" })).toBeVisible();
+  const savedOutline = await (await lumo.api.get(`/api/documents/${stored.id}/outline`)).json();
+  expect(savedOutline.outline).toEqual([
+    { title: "Part One", level: 1, pageNumber: 1 },
+    { title: "Chapter A", level: 2, pageNumber: 2 },
+    { title: "Part Two", level: 1, pageNumber: 3 },
+  ]);
+
+  // The viewer's outline sidebar shows the imported outline, and its entries open their pages.
+  const viewer = page.frameLocator("iframe.pdf-frame");
+  const sidebarLinks = viewer.locator("#outlinesView a");
+  await expect(sidebarLinks).toHaveText(["Part One", "Chapter A", "Part Two"]);
+  await openOutlineSidebar(viewer);
+  await sidebarLinks.filter({ hasText: "Part Two" }).click();
+  await expect(viewer.locator("#pageNumber")).toHaveValue("3");
+
+  // Ticking a part selects its whole page range.
+  await panel.getByRole("checkbox", { name: "Select pages 3–4" }).check();
+  await panel.getByRole("radio", { name: "By page numbers" }).check();
+  await expect(panel).toContainText("2 selected");
+
+  await page.reload();
+  await openFromLibrary(page, "imported-outline.pdf");
+  await page.getByRole("tab", { name: "Batch translation" }).click();
+  await panel.getByRole("radio", { name: "By outline" }).check();
+  await expect(panel).toContainText("Imported outline");
+  await expect(viewer.locator("#outlinesView a")).toHaveText(["Part One", "Chapter A", "Part Two"]);
+
+  // Editing starts from the saved outline.
+  await panel.getByRole("button", { name: "Edit outline…" }).click();
+  await expect(text).toHaveValue("# Part One  1\n## Chapter A  2\n# Part Two  3");
+  await panel.getByRole("button", { name: "Cancel", exact: true }).click();
+
+  await panel.getByRole("button", { name: "Remove imported outline" }).click();
+  await expect(panel).toContainText("This PDF has no outline.");
+  await expect(viewer.locator("#outlinesView a")).toHaveCount(0);
+  expect((await (await lumo.api.get(`/api/documents/${stored.id}/outline`)).json()).outline).toBeNull();
+});
+
+test("A PDF's own outline gives way to an imported one in the viewer sidebar and comes back once it is removed", async ({
+  page,
+  lumo,
+}) => {
+  const upload = await lumo.api.post(
+    `/api/documents?${new URLSearchParams({ name: "native-outline.pdf", pageCount: "3", format: "pdf" })}`,
+    {
+      headers: { "Content-Type": "application/pdf" },
+      data: Buffer.from(
+        fixturePdf("native", 3, [
+          { title: "Native One", page: 1 },
+          { title: "Native Two", page: 3 },
+        ]),
+      ),
+    },
+  );
+  expect(upload.ok()).toBe(true);
+  await openTranslatedPage(page, lumo.url, "native-outline.pdf");
+  const viewer = page.frameLocator("iframe.pdf-frame");
+  await expect(viewer.locator("#pageNumber")).toHaveAttribute("max", "3");
+  const sidebarLinks = viewer.locator("#outlinesView a");
+  await expect(sidebarLinks).toHaveText(["Native One", "Native Two"]);
+
+  await page.getByRole("tab", { name: "Batch translation" }).click();
+  const panel = page.locator(".batch-panel");
+  await panel.getByRole("radio", { name: "By outline" }).check();
+  await expect(panel).toContainText("Document outline");
+  // Importing starts from the PDF's own outline.
+  await panel.getByRole("button", { name: "Import outline…" }).click();
+  const text = panel.getByRole("textbox", { name: "Outline text" });
+  await expect(text).toHaveValue("# Native One  1\n# Native Two  3");
+  await text.fill("# Imported  1\n## Imported Part  2");
+  await panel.getByRole("button", { name: "Save outline" }).click();
+  await expect(panel).toContainText("Imported outline");
+  await expect(sidebarLinks).toHaveText(["Imported", "Imported Part"]);
+  // "Find current outline item" still works after the native outline was replaced.
+  await viewer.locator("#pageNumber").fill("2");
+  await viewer.locator("#pageNumber").press("Enter");
+  await openOutlineSidebar(viewer);
+  await viewer.locator("#viewsManagerCurrentOutlineButton").click();
+  await expect(viewer.locator("#outlinesView .treeItem.selected > a")).toHaveText("Imported Part");
+
+  await panel.getByRole("button", { name: "Remove imported outline" }).click();
+  await expect(panel).toContainText("Document outline");
+  await expect(sidebarLinks).toHaveText(["Native One", "Native Two"]);
+});
+
+test("An imported outline that cannot be used leaves the PDF's own outline in place and can still be removed", async ({
+  page,
+  lumo,
+}) => {
+  // The library says five pages, the file has three: an outline saved for page 5 does not fit the open PDF.
+  const upload = await lumo.api.post(
+    `/api/documents?${new URLSearchParams({ name: "unusable-outline.pdf", pageCount: "5", format: "pdf" })}`,
+    {
+      headers: { "Content-Type": "application/pdf" },
+      data: Buffer.from(fixturePdf("unusable", 3, [{ title: "Native One", page: 1 }])),
+    },
+  );
+  expect(upload.ok()).toBe(true);
+  const { id } = (await upload.json()) as { id: string };
+  const saved = await lumo.api.put(`/api/documents/${id}/outline`, {
+    data: [{ title: "Too far", level: 1, pageNumber: 5 }],
+  });
+  expect(saved.ok()).toBe(true);
+
+  // First the saved outline cannot even be read.
+  let failRead = true;
+  await page.route(`**/api/documents/${id}/outline`, async (route) => {
+    if (route.request().method() === "GET" && failRead) {
+      await route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ error: { code: "INTERNAL_ERROR", message: "injected" } }),
+      });
+      return;
+    }
+    await route.continue();
+  });
+  await openTranslatedPage(page, lumo.url, "unusable-outline.pdf");
+  const viewer = page.frameLocator("iframe.pdf-frame");
+  await expect(viewer.locator("#pageNumber")).toHaveAttribute("max", "3");
+  await page.getByRole("tab", { name: "Batch translation" }).click();
+  const panel = page.locator(".batch-panel");
+  await panel.getByRole("radio", { name: "By outline" }).check();
+  const issue = panel.getByRole("alert").filter({ hasText: "The imported outline is not in use" });
+  await expect(issue).toBeVisible();
+  await expect(panel).toContainText("Document outline");
+  await expect(panel.getByRole("button", { name: "Native One" })).toBeVisible();
+  await expect(viewer.locator("#outlinesView a")).toHaveText(["Native One"]);
+
+  // Read again, it points past the end of the PDF; the native outline stays in use.
+  failRead = false;
+  await issue.getByRole("button", { name: "Reload outline" }).click();
+  await expect(issue).toContainText("It points at pages outside this PDF.");
+  await expect(panel.getByRole("button", { name: "Native One" })).toBeVisible();
+
+  await issue.getByRole("button", { name: "Remove imported outline" }).click();
+  await expect(issue).toHaveCount(0);
+  await expect(panel).toContainText("Document outline");
+  expect((await (await lumo.api.get(`/api/documents/${id}/outline`)).json()).outline).toBeNull();
+});
+
+test("An outline draft stays with its PDF through discarded edits and a saved edited copy", async ({
+  page,
+  lumo,
+}) => {
+  await uploadPdf(lumo.api, "drafted.pdf", 3, "drafted");
+  await openTranslatedPage(page, lumo.url, "drafted.pdf");
+  await expect(noteField(page)).toHaveValue("drafted");
+  const panel = page.locator(".batch-panel");
+  const showOutline = async (): Promise<void> => {
+    await page.getByRole("tab", { name: "Batch translation" }).click();
+    await panel.getByRole("radio", { name: "By outline" }).check();
+  };
+  const text = panel.getByRole("textbox", { name: "Outline text" });
+
+  await showOutline();
+  await panel.getByRole("button", { name: "Import outline…" }).click();
+  await text.fill("# Draft  1");
+
+  // Discarding the PDF edits reloads the same document; the outline draft is not part of that.
+  await noteField(page).fill("edited");
+  await page.getByRole("button", { name: "Discard changes", exact: true }).click();
+  await page
+    .getByRole("dialog", { name: "Discard changes?" })
+    .getByRole("button", { name: "Discard changes" })
+    .click();
+  await expect(noteField(page)).toHaveValue("drafted");
+  await showOutline();
+  await expect(text).toHaveValue("# Draft  1");
+
+  // Saving an edited copy opens the copy; the draft stays with the original.
+  await noteField(page).fill("edited again");
+  await saveCopyButton(page).click();
+  await expect(page.locator(".file-name")).toHaveText("drafted (edited copy).pdf");
+  await showOutline();
+  await expect(text).toHaveCount(0);
+  await expect(panel).toContainText("This PDF has no outline.");
+
+  await openFromLibrary(page, "drafted.pdf");
+  await expect(page.locator(".file-name")).toHaveText("drafted.pdf");
+  await showOutline();
+  await expect(text).toHaveValue("# Draft  1");
 });
 
 test("A draft that could not be saved is retried without the AI, and sending it back to the model asks for the setup first", async ({

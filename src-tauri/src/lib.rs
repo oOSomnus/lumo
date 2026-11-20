@@ -4,8 +4,8 @@
 mod launcher;
 mod updater;
 
-use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State as TauriState, WindowEvent};
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -14,8 +14,9 @@ use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
 use launcher::{
-    take_run, Level, LineOutcome, Phase, Snapshot, State, StopPlan, StopPurpose, Termination,
-    SHUTDOWN_COMMAND, SHUTDOWN_TIMEOUT_SECS, STARTUP_TIMEOUT_SECS,
+    take_run, Level, LineOutcome, Moment, Phase, Snapshot, State, StopPlan, StopPurpose,
+    Termination, WatchdogCheck, SHUTDOWN_COMMAND, SHUTDOWN_TIMEOUT_SECS, STARTUP_TIMEOUT_SECS,
+    UPGRADE_DATABASE_ARG,
 };
 
 const STATE_EVENT: &str = "launcher-state";
@@ -35,6 +36,15 @@ fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis() as u64)
+}
+
+/// Now on both clocks: wall time for the activity log, monotonic time for deadlines.
+fn now() -> Moment {
+    static ORIGIN: LazyLock<Instant> = LazyLock::new(Instant::now);
+    Moment {
+        wall_ms: now_ms(),
+        monotonic_ms: ORIGIN.elapsed().as_millis() as u64,
+    }
 }
 
 /// Mutates the launcher state and publishes the new snapshot to the panel.
@@ -98,20 +108,32 @@ fn handle_terminated(app: &AppHandle, generation: u64, success: bool) {
 
 fn handle_stdout(app: &AppHandle, generation: u64, bytes: &[u8]) {
     let line = String::from_utf8_lossy(bytes);
-    if update(app, |state| state.on_line(now_ms(), generation, &line)) == LineOutcome::ProtocolViolation
+    if update(app, |state| state.on_line(now(), generation, &line)) == LineOutcome::ProtocolViolation
     {
         kill_child(app, generation);
     }
 }
 
-fn start_server(app: &AppHandle) {
-    let Some(generation) = update(app, |state| state.begin_start()) else {
+fn start_server(app: &AppHandle, upgrade: bool) {
+    let begun = update(app, |state| {
+        if upgrade {
+            state.begin_upgrade()
+        } else {
+            state.begin_start()
+        }
+    });
+    let Some(generation) = begun else {
         return;
+    };
+    let args: &[&str] = if upgrade {
+        &["--desktop", UPGRADE_DATABASE_ARG]
+    } else {
+        &["--desktop"]
     };
 
     let spawned = app.shell().sidecar("lumo-server").and_then(|command| {
         command
-            .args(["--desktop"])
+            .args(args)
             .set_process_group(true)
             .kill_on_drop(true)
             .spawn()
@@ -144,9 +166,18 @@ fn start_server(app: &AppHandle) {
 
     let watchdog = app.clone();
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(STARTUP_TIMEOUT_SECS)).await;
-        if update(&watchdog, |state| state.startup_overdue(now_ms(), generation)) {
-            kill_child(&watchdog, generation);
+        // An approved upgrade keeps asking for more time until its database is open.
+        let mut wait = Duration::from_secs(STARTUP_TIMEOUT_SECS);
+        loop {
+            tokio::time::sleep(wait).await;
+            match update(&watchdog, |state| state.startup_check(now(), generation)) {
+                WatchdogCheck::Settled => break,
+                WatchdogCheck::Overdue => {
+                    kill_child(&watchdog, generation);
+                    break;
+                }
+                WatchdogCheck::Wait(ms) => wait = Duration::from_millis(ms.max(1)),
+            }
         }
     });
 }
@@ -173,9 +204,18 @@ pub(crate) fn request_stop(app: &AppHandle, purpose: StopPurpose) {
             }
             let watchdog = app.clone();
             tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(SHUTDOWN_TIMEOUT_SECS)).await;
-                if update(&watchdog, |state| state.shutdown_overdue(now_ms(), generation)) {
-                    kill_child(&watchdog, generation);
+                // An approved upgrade keeps asking for more time until its database is open.
+                let mut wait = Duration::from_secs(SHUTDOWN_TIMEOUT_SECS);
+                loop {
+                    tokio::time::sleep(wait).await;
+                    match update(&watchdog, |state| state.shutdown_check(now(), generation)) {
+                        WatchdogCheck::Settled => break,
+                        WatchdogCheck::Overdue => {
+                            kill_child(&watchdog, generation);
+                            break;
+                        }
+                        WatchdogCheck::Wait(ms) => wait = Duration::from_millis(ms.max(1)),
+                    }
                 }
             });
         }
@@ -246,7 +286,13 @@ fn copy_webui_url(app: AppHandle) {
 #[tauri::command]
 fn retry_start(app: AppHandle) {
     // A refusal or a missing sidecar is launcher state, shown by the next snapshot.
-    start_server(&app);
+    start_server(&app, false);
+}
+
+#[tauri::command]
+fn upgrade_reader_database(app: AppHandle) {
+    // The user pressed Upgrade after the server reported the previous schema; refused otherwise.
+    start_server(&app, true);
 }
 
 #[tauri::command]
@@ -278,6 +324,7 @@ pub fn run() {
             open_webui,
             copy_webui_url,
             retry_start,
+            upgrade_reader_database,
             confirm_exit,
             updater::check_updates,
             updater::download_update,
@@ -292,7 +339,7 @@ pub fn run() {
         })
         .setup(|app| {
             // A failed start is shown in the panel with a retry button, not fatal here.
-            start_server(app.handle());
+            start_server(app.handle(), false);
             updater::initialize(app.handle());
             Ok(())
         })

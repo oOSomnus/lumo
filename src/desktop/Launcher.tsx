@@ -147,6 +147,9 @@ export function Launcher() {
         {snapshot?.failureCode && (
           <p className="launcher-failure">{t.logs[snapshot.failureCode]}</p>
         )}
+        {snapshot?.failureCode === "READER_DATABASE_UPGRADE_REQUIRED" && (
+          <p className="muted launcher-note" id="launcher-upgrade-note">{t.upgradeNote}</p>
+        )}
         {ipcFailed && <p className="launcher-failure">{t.ipcFailed}</p>}
       </section>
 
@@ -221,7 +224,17 @@ export function Launcher() {
       </section>
 
       <div className="launcher-actions">
-        {phase === "failed" ? (
+        {phase === "failed" && snapshot?.failureCode === "READER_DATABASE_UPGRADE_REQUIRED" ? (
+          <button
+            type="button"
+            className="primary"
+            disabled={!snapshot.canUpgrade}
+            onClick={() => run(launcher.upgrade)}
+            aria-describedby="launcher-upgrade-note"
+          >
+            {t.upgrade}
+          </button>
+        ) : phase === "failed" ? (
           <button
             type="button"
             className="primary"

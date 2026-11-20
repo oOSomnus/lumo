@@ -3,6 +3,7 @@ import {
   TARGET_LANGUAGE_LABELS,
   type AiSettingsSnapshot,
   type DocumentRecord,
+  type OutlineEntry,
   type TargetLanguage,
 } from "../../shared/contracts";
 import type { EpubBatchState } from "../epub-batch";
@@ -37,12 +38,11 @@ interface BatchTranslationPanelProps {
   selection: Set<number>;
   onSelectionChange: (pages: Set<number>) => void;
   outline: DocumentOutlineState;
-  outlineGenerationDisabledReason: string | null;
-  onGenerateOutline: () => void;
-  onCancelOutline: () => void;
+  outlineDraft: string | null;
+  onOutlineDraftChange: (draft: string | null) => void;
+  onImportOutline: (entries: OutlineEntry[]) => void;
+  onRemoveImportedOutline: () => void;
   onReloadOutline: () => void;
-  onRetrySaveOutline: () => void;
-  onDiscardOutline: () => void;
   onOpenOutlinePage: (pageNumber: number) => void;
   epubBatch: EpubBatchState;
   onStartEpubBatch: (options: {
@@ -74,12 +74,11 @@ export function BatchTranslationPanel({
   selection,
   onSelectionChange,
   outline,
-  outlineGenerationDisabledReason,
-  onGenerateOutline,
-  onCancelOutline,
+  outlineDraft,
+  onOutlineDraftChange,
+  onImportOutline,
+  onRemoveImportedOutline,
   onReloadOutline,
-  onRetrySaveOutline,
-  onDiscardOutline,
   onOpenOutlinePage,
   epubBatch,
   onStartEpubBatch,
@@ -244,15 +243,12 @@ export function BatchTranslationPanel({
                 ),
         }}
         outline={outline}
-        outlineGenerationDisabledReason={outlineGenerationDisabledReason}
-        onGenerateOutline={onGenerateOutline}
-        onCancelOutline={onCancelOutline}
+        outlineDraft={outlineDraft}
+        onOutlineDraftChange={onOutlineDraftChange}
+        onImportOutline={onImportOutline}
+        onRemoveImportedOutline={onRemoveImportedOutline}
         onReloadOutline={onReloadOutline}
-        onRetrySaveOutline={onRetrySaveOutline}
-        onDiscardOutline={onDiscardOutline}
         onOpenOutlinePage={onOpenOutlinePage}
-        aiStep={aiStep}
-        aiChecking={aiGate === "checking"}
       />
 
       <section className="batch-summary">

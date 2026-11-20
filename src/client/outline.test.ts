@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { OutlineEntry } from "../shared/contracts";
-import { buildOutlineRanges, buildOutlineRows } from "./outline";
+import { assertOutlineFits, buildOutlineRanges, buildOutlineRows, OutlineError } from "./outline";
 
 const outline: OutlineEntry[] = [
   { title: "A", level: 1, pageNumber: 2 },
@@ -186,5 +186,17 @@ describe("buildOutlineRows", () => {
         (row) => row.range.title,
       ),
     ).toEqual(["L1"]);
+  });
+});
+
+describe("assertOutlineFits", () => {
+  test("accepts pages inside the PDF and rejects any past its end", () => {
+    expect(() => assertOutlineFits(outline, 8)).not.toThrow();
+    expect(() => assertOutlineFits(outline, 7)).toThrow(OutlineError);
+    try {
+      assertOutlineFits(outline, 7);
+    } catch (error) {
+      expect((error as OutlineError).code).toBe("OUTLINE_OUTSIDE_DOCUMENT");
+    }
   });
 });
