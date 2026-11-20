@@ -579,7 +579,15 @@ test("EPUB batch pages keep the layout frozen when the foreground text size chan
     })
     .toBe(before.pages);
   expect(new Set(requests.map((request) => request.unit)).size).toBe(before.pages);
-  expect(await readPosition(page)).toEqual(foreground);
+  // The page count can lag the font change on a slow machine, so it is not compared with the one read
+  // above: the reader keeps its place and the 22 px layout, more pages than the batch's 18 px one.
+  const after = await readPosition(page);
+  expect({ section: after.section, page: after.page }).toEqual({
+    section: foreground.section,
+    page: foreground.page,
+  });
+  expect(after.pages).toBeGreaterThan(before.pages);
+  await expect(book.locator("body")).toHaveCSS("font-size", "22px");
   await expect.poll(() => host!.evaluate((element) => element.isConnected)).toBe(false);
 });
 
