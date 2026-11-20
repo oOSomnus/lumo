@@ -49,6 +49,18 @@ describe("parseOutlineImport", () => {
     });
   });
 
+  test("keeps inner spaces, takes several before the page and stays fast on long space runs", () => {
+    expect(parseOutlineImport("#   A  \t B \t   12  ", 12)).toEqual({
+      ok: true,
+      entries: [{ title: "A  \t B", level: 1, pageNumber: 12 }],
+    });
+    const spaces = " ".repeat(200);
+    const started = performance.now();
+    const result = parseOutlineImport(`# a${spaces}b${spaces}x`, 1);
+    expect(performance.now() - started).toBeLessThan(250);
+    expect(result).toEqual({ ok: false, errors: [{ line: 1, code: "missing_page" }] });
+  });
+
   test("accepts a full-length title on a deep heading", () => {
     // 800 # marks and a 500-character title make one line far longer than the title alone.
     const depth = 800;
@@ -153,13 +165,15 @@ describe("formatOutlineImport", () => {
     const text = formatOutlineImport([
       { title: "Part One:\r\n  The Start", level: 1, pageNumber: 1 },
       { title: "End.", level: 1, pageNumber: 2 },
+      { title: "Line\u2028 and \t\u2029\u2028paragraph", level: 1, pageNumber: 3 },
     ]);
-    expect(text).toBe("# Part One: The Start  1\n# End.  2");
-    expect(parseOutlineImport(text, 2)).toEqual({
+    expect(text).toBe("# Part One: The Start  1\n# End.  2\n# Line and paragraph  3");
+    expect(parseOutlineImport(text, 3)).toEqual({
       ok: true,
       entries: [
         { title: "Part One: The Start", level: 1, pageNumber: 1 },
         { title: "End.", level: 1, pageNumber: 2 },
+        { title: "Line and paragraph", level: 1, pageNumber: 3 },
       ],
     });
   });

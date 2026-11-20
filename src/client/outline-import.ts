@@ -36,7 +36,9 @@ export type OutlineImportResult =
 
 // `## Title  12`. Dot leaders count only as their own token before the page
 // (`Title ..... 12`), so punctuation that ends a title (`Introduction.  1`) stays in it.
-const HEADING_LINE = /^(#+)[ \t]+(.*?)(?:[ \t]+[.·…]{2,}[ \t]*|[ \t]+)(\d+)[ \t]*$/u;
+// The title starts and ends with a non-space, so the spaces around it can only match one way.
+const HEADING_LINE = /^(#+)[ \t]+(\S(?:.*?\S)?)(?:[ \t]+[.·…]{2,}[ \t]*|[ \t]+)(\d+)[ \t]*$/u;
+const HEADING_WITHOUT_TITLE = /^#+[ \t]+\d+[ \t]*$/u;
 const HEADING_WITHOUT_PAGE = /^#+[ \t]+\S/u;
 const FENCE_LINE = /^(```|~~~)/u;
 // Room for the deepest level's # marks, a full title, leaders and the page; longer lines are rejected before matching.
@@ -69,7 +71,14 @@ export function parseOutlineImport(text: string, pageCount: number): OutlineImpo
 
     const match = HEADING_LINE.exec(line);
     if (!match) {
-      report(lineNumber, HEADING_WITHOUT_PAGE.test(line) ? "missing_page" : "not_heading");
+      report(
+        lineNumber,
+        HEADING_WITHOUT_TITLE.test(line)
+          ? "title_invalid"
+          : HEADING_WITHOUT_PAGE.test(line)
+            ? "missing_page"
+            : "not_heading",
+      );
       continue;
     }
     const level = match[1]!.length;
@@ -106,13 +115,13 @@ export function parseOutlineImport(text: string, pageCount: number): OutlineImpo
 
 /**
  * Writes an outline in the import format, so an existing one can be edited and imported
- * again. A title broken over several lines (PDF bookmarks may be) is joined with spaces,
- * keeping every entry on its own line.
+ * again. A title broken over several lines (PDF bookmarks may be, also with the Unicode line
+ * and paragraph separators) is joined with spaces, keeping every entry on its own line.
  */
 export function formatOutlineImport(entries: readonly OutlineEntry[]): string {
   return entries
     .map((entry) => {
-      const title = entry.title.replace(/[ \t]*[\r\n]+[ \t]*/gu, " ");
+      const title = entry.title.replace(/[ \t]*[\r\n\u2028\u2029]+[ \t]*/gu, " ");
       return `${"#".repeat(entry.level)} ${title}  ${entry.pageNumber}`;
     })
     .join("\n");

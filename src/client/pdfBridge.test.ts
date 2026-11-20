@@ -229,18 +229,28 @@ describe("ViewerBridge.setSidebarOutline", () => {
     };
     const makeDocument = () => ({ numPages: 10, getOutline: async () => native });
     const outlineViewer = {
+      container: new EventTarget(),
       rendered: [] as (unknown[] | null)[],
       resolved: [] as boolean[],
+      toggles: 0,
       _outline: null as unknown[] | null,
-      _isPagesLoaded: true as boolean | null,
+      _currentPageNumber: 1,
+      _isPagesLoaded: null as boolean | null,
       _currentOutlineItemCapability: null as { resolve(value: boolean): void } | null,
-      render({ outline }: { outline: unknown[] | null }) {
+      render({ outline }: { outline: unknown[] | null; pdfDocument?: unknown }) {
         if (this._outline) {
           this._outline = null;
+          this._currentPageNumber = 1;
           this._isPagesLoaded = null;
         }
         this._outline = outline;
         this.rendered.push(outline);
+        // Like BaseTreeViewer._finishRendering: every nested render adds a collapse listener.
+        if ((outline as { items?: unknown[] }[] | null)?.some((node) => node.items?.length)) {
+          this.container.addEventListener("click", () => {
+            this.toggles += 1;
+          });
+        }
         this._currentOutlineItemCapability = { resolve: (value) => this.resolved.push(value) };
         eventBus.dispatch("outlineloaded", { source: this, outlineCount: outline?.length ?? 0 });
       },
@@ -315,12 +325,50 @@ describe("ViewerBridge.setSidebarOutline", () => {
   });
 
   test("keeps the current-item button working after replacing a rendered outline", async () => {
-    const { outlineViewer, viewerBridge } = sidebarApp();
-    outlineViewer.render({ outline: nativeOutline });
+    const { app, eventBus, outlineViewer, viewerBridge, makeDocument } = sidebarApp();
+    outlineViewer.render({ outline: nativeOutline, pdfDocument: app.pdfDocument });
+    eventBus.dispatch("pagesloaded", { pagesCount: 10 });
+    outlineViewer._isPagesLoaded = true;
+
+    // PDF.js renders its own outline again and forgets the pages; the bridge still knows.
+    outlineViewer.render({ outline: nativeOutline, pdfDocument: app.pdfDocument });
+    await Promise.resolve();
+    expect(outlineViewer._isPagesLoaded).toBe(true);
     outlineViewer.resolved.length = 0;
     await viewerBridge.setSidebarOutline(imported);
     expect(outlineViewer._isPagesLoaded).toBe(true);
     expect(outlineViewer.resolved).toEqual([true]);
+
+    // Another document's pages have not loaded yet.
+    app.pdfDocument = makeDocument();
+    outlineViewer.render({ outline: nativeOutline, pdfDocument: app.pdfDocument });
+    expect(outlineViewer._isPagesLoaded).toBeNull();
+
+    viewerBridge.destroy();
+    expect(eventBus.count("pagesloaded")).toBe(0);
+  });
+
+  test("points the current-item lookup at the displayed page after saving an outline", async () => {
+    const { app, outlineViewer, viewerBridge } = sidebarApp();
+    outlineViewer.render({ outline: nativeOutline });
+    app.page = 7;
+    outlineViewer._currentPageNumber = 7;
+    await viewerBridge.setSidebarOutline(imported);
+    expect(outlineViewer._currentPageNumber).toBe(7);
+  });
+
+  test("keeps one collapse listener however often a nested outline renders", async () => {
+    const nestedNative = [
+      { title: "Native", dest: [0, { name: "Fit" }], items: [{ title: "Child", dest: [1], items: [] }] },
+    ];
+    const { outlineViewer, viewerBridge } = sidebarApp(nestedNative);
+    outlineViewer.render({ outline: nestedNative });
+    await viewerBridge.setSidebarOutline(imported);
+    // Editing the imported outline saves it again.
+    await viewerBridge.setSidebarOutline([...imported, { title: "More", level: 2, pageNumber: 3 }]);
+    await Promise.resolve();
+    outlineViewer.container.dispatchEvent(new Event("click"));
+    expect(outlineViewer.toggles).toBe(1);
   });
 
   test("does nothing without an outline sidebar or an open document", async () => {
