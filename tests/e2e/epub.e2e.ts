@@ -528,7 +528,6 @@ test("EPUB batch pages keep the layout frozen when the foreground text size chan
       fontSize: 18,
       fontFamily: "serif",
       lineHeight: 1.6,
-      theme: "light",
     },
   });
   expect(seeded.ok()).toBe(true);
@@ -992,7 +991,7 @@ test("an EPUB batch still looking for its pages blocks the interface language sw
 
   const apply = async () => {
     await page.getByRole("button", { name: "Settings", exact: true }).click();
-    const settings = page.getByRole("dialog", { name: "Settings" });
+    const settings = page.getByRole("main", { name: "Settings" });
     await settings.getByRole("combobox", { name: /^Interface language/ }).selectOption("zh-CN");
     return { settings, button: settings.getByRole("button", { name: "Save language and reload" }) };
   };

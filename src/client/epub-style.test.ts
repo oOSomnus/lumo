@@ -2,11 +2,11 @@ import { describe, expect, test } from "bun:test";
 import type { EpubReaderStyle } from "../shared/epub";
 import { injectStyle, readingCss } from "./epub-style";
 
-const base: EpubReaderStyle = { fontSize: 22, fontFamily: "sans-serif", lineHeight: 1.8, theme: "light" };
+const base: EpubReaderStyle = { fontSize: 22, fontFamily: "sans-serif", lineHeight: 1.8 };
 
 describe("readingCss", () => {
   test("a reflowable book gets its font settings and keeps its own colours in the light theme", () => {
-    const css = readingCss(base, false);
+    const css = readingCss(base, false, "light");
     expect(css).toContain("font-size: 22px !important");
     expect(css).toContain("font-family: sans-serif !important");
     expect(css).toContain("line-height: 1.8 !important");
@@ -14,22 +14,24 @@ describe("readingCss", () => {
   });
 
   test("a fixed-layout book gets no font rules, only the colour theme", () => {
-    const css = readingCss({ ...base, theme: "dark" }, true);
+    const css = readingCss(base, true, "dark");
     expect(css).not.toContain("font-size");
     expect(css).not.toContain("line-height");
     expect(css).toContain("#1e1e1e");
   });
 
   test("a fixed-layout book in the light theme still yields a sheet, so an earlier theme is replaced", () => {
-    expect(readingCss(base, true).trim()).not.toBe("");
+    expect(readingCss(base, true, "light").trim()).not.toBe("");
   });
 
   test("each theme paints its own page and text colour and the sheet changes with the theme", () => {
-    const sepia = readingCss({ ...base, theme: "sepia" }, false);
-    const dark = readingCss({ ...base, theme: "dark" }, false);
+    const sepia = readingCss(base, false, "sepia");
+    const dark = readingCss(base, false, "dark");
+    const night = readingCss(base, false, "night");
     expect(sepia).toContain("#f4ecd8");
     expect(dark).toContain("#1e1e1e");
-    expect(sepia).not.toBe(dark);
+    expect(night).toContain("#13110e");
+    expect(new Set([sepia, dark, night]).size).toBe(3);
   });
 });
 

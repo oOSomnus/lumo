@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import type { ReaderView, UiLocale } from "../../shared/contracts";
+import type { ColorTheme, ReaderView, UiLocale } from "../../shared/contracts";
 import { toUiError, useI18n, type UiError } from "../i18n";
 import { watchReaderKeys, type ReaderShortcut } from "../page-keys";
 import { watchPointerActivity } from "../pointer-activity";
 import { adaptPdfToolbar } from "../pdf-toolbar";
+import { colorSchemeOf, PDF_THEME_ATTRIBUTE } from "../reading-theme";
+import { useTheme } from "../theme";
 import {
   waitForViewer,
   type PdfScrollLocation,
@@ -21,7 +23,6 @@ const VIEWER_OPTIONS = {
   ignoreDestinationZoom: true,
   scrollModeOnLoad: 3,
   spreadModeOnLoad: 0,
-  viewerCssTheme: 1,
   enableMerge: false,
   enableSplitMerge: false,
 };
@@ -70,12 +71,20 @@ function setViewerOptions(source: Window, values: Record<string, unknown>): void
 const toolbarDensity = (source: Window): number =>
   source.matchMedia("(pointer: coarse)").matches ? 2 : 0;
 
-function applyViewerOptions(source: Window, locale: UiLocale): void {
+function applyViewerOptions(source: Window, locale: UiLocale, theme: ColorTheme): void {
   setViewerOptions(source, {
     ...VIEWER_OPTIONS,
     localeProperties: { lang: locale === "en" ? "en-US" : "zh-CN" },
     toolbarDensity: toolbarDensity(source),
+    // 1 light, 2 dark: PDF.js sets color-scheme from it once it initializes.
+    viewerCssTheme: colorSchemeOf(theme) === "dark" ? 2 : 1,
   });
+}
+
+/** The viewer's interface follows color-scheme; its pages are painted by the theme rules in pdf-toolbar.ts. */
+function applyViewerTheme(document: Document, theme: ColorTheme): void {
+  document.documentElement.setAttribute(PDF_THEME_ATTRIBUTE, theme);
+  document.documentElement.style.setProperty("color-scheme", colorSchemeOf(theme));
 }
 
 export function PdfViewerFrame({
@@ -101,6 +110,9 @@ export function PdfViewerFrame({
   const loadIdRef = useRef(0);
   const localeRef = useRef(locale);
   localeRef.current = locale;
+  const { theme } = useTheme();
+  const themeRef = useRef(theme);
+  themeRef.current = theme;
   const immersiveRef = useRef(immersive);
   immersiveRef.current = immersive;
   const { t } = useI18n();
@@ -141,7 +153,7 @@ export function PdfViewerFrame({
       const iframe = iframeRef.current;
       const source = (event as CustomEvent<{ source?: Window }>).detail?.source;
       if (!iframe || !source || source !== iframe.contentWindow) return;
-      applyViewerOptions(source, localeRef.current);
+      applyViewerOptions(source, localeRef.current, themeRef.current);
     };
     document.addEventListener("webviewerloaded", onViewerLoaded);
     setListenerReady(true);
@@ -154,6 +166,11 @@ export function PdfViewerFrame({
       immersive,
     );
   }, [immersive, sessionKey, listenerReady]);
+
+  useEffect(() => {
+    const document = iframeRef.current?.contentDocument;
+    if (document) applyViewerTheme(document, theme);
+  }, [theme, sessionKey, listenerReady]);
 
   useEffect(() => {
     return () => {
@@ -172,6 +189,7 @@ export function PdfViewerFrame({
     document.documentElement.lang =
       localeRef.current === "en" ? "en-US" : "zh-CN";
     document.documentElement.classList.toggle("lumo-immersive", immersiveRef.current);
+    applyViewerTheme(document, themeRef.current);
 
     const onFileInput = (event: Event): void => {
       const target = event.target;

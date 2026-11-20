@@ -23,6 +23,7 @@ import {
   getReaderView,
   getSettings,
   getTranslation,
+  getTheme,
   getUiLocale,
   listDocuments,
   listTranslationLocations,
@@ -34,6 +35,7 @@ import {
   saveAiConfig,
   saveImportedOutline,
   saveReaderView,
+  saveTheme,
   saveTranslation,
   saveUiLocale,
   SCHEMA_VERSION,
@@ -94,8 +96,37 @@ const previousOutline: OutlineEntry[] = [
   { title: "Kept", level: 1, pageNumber: 1 },
 ];
 
-/** A data directory holding a database of the previous schema, with a document, translation and outline. */
-function previousSchemaDirectory(): string {
+/** The previous schema's EPUB view, which still carried a per-book colour theme. */
+const previousEpubView = {
+  format: "epub",
+  cfi: "epubcfi(/6/4!/4/2/2)",
+  fontSize: 20,
+  fontFamily: "sans-serif",
+  lineHeight: 1.8,
+  theme: "sepia",
+};
+
+/** Rewrites app_settings as the previous schema had it, with no theme column; `uiLocale: false` also drops the language. */
+function previousAppSettings(raw: Database, { uiLocale = true }: { uiLocale?: boolean } = {}): void {
+  const locale = uiLocale ? "uiLocale TEXT NOT NULL CHECK (uiLocale IN ('en', 'zh-CN'))," : "";
+  raw.exec(`
+    ALTER TABLE app_settings RENAME TO app_settings_current;
+    CREATE TABLE app_settings (
+      key TEXT PRIMARY KEY NOT NULL CHECK (key = 'app'),
+      ${locale}
+      aiConfig TEXT,
+      deviceId TEXT NOT NULL
+    ) STRICT;
+    INSERT INTO app_settings SELECT key, ${uiLocale ? "uiLocale, " : ""}aiConfig, deviceId FROM app_settings_current;
+    DROP TABLE app_settings_current;
+  `);
+}
+
+/**
+ * A data directory holding a database of the previous schema, with a PDF and its translation and
+ * outline, an EPUB whose view still names a theme, and the interface language set to `uiLocale`.
+ */
+function previousSchemaDirectory(uiLocale: "en" | "zh-CN" = "zh-CN"): string {
   const directory = mkdtempSync(join(tmpdir(), "lumo-storage-"));
   directories.push(directory);
   const db = openReaderDb(directory);
@@ -106,10 +137,16 @@ function previousSchemaDirectory(): string {
   );
   saveTranslation(db, { documentId: document.id, pageNumber: 1, targetLanguage: "en" }, content("= Kept"));
   saveImportedOutline(db, document.id, previousOutline);
+  const book = storeDocument(
+    db,
+    { name: "kept.epub", pageCount: 3, format: "epub" },
+    new TextEncoder().encode("PK kept epub for the upgrade"),
+  );
+  saveUiLocale(db, uiLocale);
   db.close();
-  // The previous schema differs from the current one only in this column's name.
   const raw = new Database(join(directory, DB_FILENAME));
-  raw.exec("ALTER TABLE documents RENAME COLUMN importedOutline TO generatedOutline");
+  previousAppSettings(raw);
+  raw.query("UPDATE documents SET readerView = ? WHERE id = ?").run(JSON.stringify(previousEpubView), book.id);
   raw.exec(`PRAGMA user_version = ${UPGRADABLE_SCHEMA_VERSION}`);
   raw.exec("PRAGMA journal_mode = DELETE");
   raw.close();
@@ -354,6 +391,38 @@ describe("storage", () => {
     expect(snapshot(directory)).toEqual(before);
   });
 
+  test("reports the stored interface language when it asks for an upgrade, without writing", () => {
+    for (const uiLocale of ["en", "zh-CN"] as const) {
+      const directory = previousSchemaDirectory(uiLocale);
+      const before = snapshot(directory);
+      let caught: unknown;
+      try {
+        openReaderDb(directory);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(ReaderUpgradeRequiredError);
+      expect((caught as ReaderUpgradeRequiredError).uiLocale).toBe(uiLocale);
+      expect(snapshot(directory)).toEqual(before);
+    }
+  });
+
+  test("asks for an upgrade without a language when the stored one is unreadable", () => {
+    const directory = previousSchemaDirectory();
+    const raw = new Database(join(directory, DB_FILENAME));
+    raw.exec("ALTER TABLE app_settings DROP COLUMN uiLocale");
+    raw.close();
+
+    let caught: unknown;
+    try {
+      openReaderDb(directory);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(ReaderUpgradeRequiredError);
+    expect((caught as ReaderUpgradeRequiredError).uiLocale).toBeNull();
+  });
+
   test("upgrades the previous schema after a backup, keeping every row", () => {
     const directory = previousSchemaDirectory();
     const backups: string[] = [];
@@ -364,10 +433,16 @@ describe("storage", () => {
     databases.push(db);
 
     expect(db.query("PRAGMA user_version").get()).toEqual({ user_version: SCHEMA_VERSION });
-    const [document] = listDocuments(db);
-    expect(document?.name).toBe("kept.pdf");
-    expect(getImportedOutline(db, document!.id)).toEqual(previousOutline);
-    expect(getTranslation(db, { documentId: document!.id, pageNumber: 1, targetLanguage: "en" })?.typst).toBe("= Kept");
+    const documents = listDocuments(db);
+    const pdf = documents.find((document) => document.format === "pdf")!;
+    const epub = documents.find((document) => document.format === "epub")!;
+    expect(pdf.name).toBe("kept.pdf");
+    expect(getImportedOutline(db, pdf.id)).toEqual(previousOutline);
+    expect(getTranslation(db, { documentId: pdf.id, pageNumber: 1, targetLanguage: "en" })?.typst).toBe("= Kept");
+    const { theme: _dropped, ...epubView } = previousEpubView;
+    expect(getReaderView(db, epub.id)).toEqual(epubView as ReaderView);
+    expect(getUiLocale(db)).toBe("zh-CN");
+    expect(getTheme(db)).toBe("system");
     expect(schemaOf(db)).toEqual(schemaOf(tempDb()));
 
     expect(backups).toHaveLength(1);
@@ -378,11 +453,12 @@ describe("storage", () => {
         user_version: UPGRADABLE_SCHEMA_VERSION,
       });
       expect(
-        JSON.parse(
-          (backup.query("SELECT generatedOutline FROM documents").get() as { generatedOutline: string })
-            .generatedOutline,
-        ),
-      ).toEqual(previousOutline);
+        (backup.query("PRAGMA table_info(app_settings)").all() as { name: string }[]).map((column) => column.name),
+      ).not.toContain("theme");
+      expect(
+        (backup.query("SELECT readerView FROM documents WHERE id = ?").get(epub.id) as { readerView: string })
+          .readerView,
+      ).toBe(JSON.stringify(previousEpubView));
     } finally {
       backup.close();
     }
@@ -391,45 +467,39 @@ describe("storage", () => {
     databases.splice(databases.indexOf(db), 1);
     const reopened = openReaderDb(directory);
     databases.push(reopened);
-    expect(listDocuments(reopened)).toHaveLength(1);
+    expect(listDocuments(reopened)).toHaveLength(2);
   });
 
-  test("rolls a failed upgrade back to the previous schema", () => {
-    const directory = mkdtempSync(join(tmpdir(), "lumo-storage-"));
-    directories.push(directory);
-    openReaderDb(directory).close();
-    // Claims the previous version but lacks its column, so the upgrade step fails.
-    const raw = new Database(join(directory, DB_FILENAME));
-    raw.exec(`PRAGMA user_version = ${UPGRADABLE_SCHEMA_VERSION}`);
-    raw.close();
-
-    expect(() => openReaderDb(directory, { upgrade: true })).toThrow();
-    const check = new Database(join(directory, DB_FILENAME), { readonly: true });
-    try {
-      expect(check.query("PRAGMA user_version").get()).toEqual({
-        user_version: UPGRADABLE_SCHEMA_VERSION,
-      });
-      expect(
-        (check.query("PRAGMA table_info(documents)").all() as { name: string }[]).map(
-          (column) => column.name,
-        ),
-      ).toContain("importedOutline");
-    } finally {
-      check.close();
-    }
-  });
-
-  test("rolls back an upgrade that fails after renaming the column, keeping the backup", () => {
+  test("rolls back an upgrade that fails part-way, keeping the backup and every row", () => {
     const directory = previousSchemaDirectory();
-    // An extra column survives the rename, so the table does not match this build's and the check after it fails.
+    // A language the new table's check refuses, so copying the row fails after the old table was renamed.
     const raw = new Database(join(directory, DB_FILENAME));
-    raw.exec("ALTER TABLE documents ADD COLUMN unexpected TEXT");
+    const deviceId = (raw.query("SELECT deviceId FROM app_settings").get() as { deviceId: string }).deviceId;
+    raw.exec(`
+      ALTER TABLE app_settings RENAME TO app_settings_checked;
+      CREATE TABLE app_settings (
+        key TEXT PRIMARY KEY NOT NULL CHECK (key = 'app'),
+        uiLocale TEXT NOT NULL,
+        aiConfig TEXT,
+        deviceId TEXT NOT NULL
+      ) STRICT;
+      INSERT INTO app_settings SELECT key, 'fr', aiConfig, deviceId FROM app_settings_checked;
+      DROP TABLE app_settings_checked;
+    `);
     raw.close();
+    const schemaBefore = (() => {
+      const check = new Database(join(directory, DB_FILENAME), { readonly: true });
+      try {
+        return schemaOf(check);
+      } finally {
+        check.close();
+      }
+    })();
     const backups: string[] = [];
 
     expect(() =>
       openReaderDb(directory, { upgrade: true, onUpgraded: (path) => backups.push(path) }),
-    ).toThrow("unexpected documents columns");
+    ).toThrow();
     expect(backups).toEqual([]);
 
     const check = new Database(join(directory, DB_FILENAME), { readonly: true });
@@ -437,17 +507,12 @@ describe("storage", () => {
       expect(check.query("PRAGMA user_version").get()).toEqual({
         user_version: UPGRADABLE_SCHEMA_VERSION,
       });
-      const columns = (check.query("PRAGMA table_info(documents)").all() as { name: string }[]).map(
-        (column) => column.name,
-      );
-      expect(columns).toContain("generatedOutline");
-      expect(columns).not.toContain("importedOutline");
+      expect(schemaOf(check)).toEqual(schemaBefore);
+      expect(check.query("SELECT uiLocale, deviceId FROM app_settings").get()).toEqual({ uiLocale: "fr", deviceId });
       expect(
-        JSON.parse(
-          (check.query("SELECT generatedOutline FROM documents").get() as { generatedOutline: string })
-            .generatedOutline,
-        ),
-      ).toEqual(previousOutline);
+        (check.query("SELECT readerView FROM documents WHERE format = 'epub'").get() as { readerView: string })
+          .readerView,
+      ).toBe(JSON.stringify(previousEpubView));
     } finally {
       check.close();
     }
@@ -462,6 +527,30 @@ describe("storage", () => {
       });
     } finally {
       backup.close();
+    }
+  });
+
+  test("rolls back an upgrade of a database that lacks a previous-schema column", () => {
+    const directory = mkdtempSync(join(tmpdir(), "lumo-storage-"));
+    directories.push(directory);
+    openReaderDb(directory).close();
+    // Claims the previous version but has no interface language to carry over.
+    const raw = new Database(join(directory, DB_FILENAME));
+    previousAppSettings(raw, { uiLocale: false });
+    raw.exec(`PRAGMA user_version = ${UPGRADABLE_SCHEMA_VERSION}`);
+    raw.close();
+
+    expect(() => openReaderDb(directory, { upgrade: true })).toThrow();
+    const check = new Database(join(directory, DB_FILENAME), { readonly: true });
+    try {
+      expect(check.query("PRAGMA user_version").get()).toEqual({
+        user_version: UPGRADABLE_SCHEMA_VERSION,
+      });
+      expect(
+        (check.query("PRAGMA table_info(app_settings)").all() as { name: string }[]).map((column) => column.name),
+      ).toEqual(["key", "aiConfig", "deviceId"]);
+    } finally {
+      check.close();
     }
   });
 
@@ -523,6 +612,15 @@ describe("storage", () => {
     ).toEqual({ targetLanguage: "not-a-language" });
   });
 
+  test("starts a new library at the system theme and refuses an unknown one without writing", () => {
+    const db = tempDb();
+    expect(getTheme(db)).toBe("system");
+    expect(getUiLocale(db)).toBe("en");
+    expect(() => saveTheme(db, "blue" as never)).toThrow();
+    expect(() => db.exec("UPDATE app_settings SET theme = 'blue'")).toThrow();
+    expect(getAppSettings(db).theme).toBe("system");
+  });
+
   test("serializes locale, AI config and reader writes without losing fields", () => {
     const db = tempDb();
     const config: AiConfig = {
@@ -531,9 +629,11 @@ describe("storage", () => {
       reasoningEffort: "high",
     };
     saveUiLocale(db, "zh-CN");
+    saveTheme(db, "night");
     saveAiConfig(db, config);
     updateReaderSettings(db, { documentId: null, pageNumber: 1, targetLanguage: "ja" });
     expect(getUiLocale(db)).toBe("zh-CN");
+    expect(getTheme(db)).toBe("night");
     expect(getSettings(db).targetLanguage).toBe("ja");
 
     const settings = getAppSettings(db);
@@ -647,7 +747,6 @@ describe("storage", () => {
         fontSize: 18,
         fontFamily: "serif",
         lineHeight: 1.6,
-        theme: "light",
       }),
     ).toThrow(ReaderViewFormatError);
     db.exec("PRAGMA query_only = ON");

@@ -241,7 +241,7 @@ test("Immersive reading hides the app chrome, keeps the pane layout and leaves b
   await layout.getByRole("button", { name: "Left wider", exact: true }).click();
   await page.locator(".fullscreen-button").click();
   await expect(page.locator(".workspace")).toHaveClass(/immersive/);
-  await expect(page.locator(".app-bar")).toBeHidden();
+  await expect(page.locator(".reader-header")).toBeHidden();
   await expect(page.locator(".immersive-exit")).toBeVisible();
   // The split has no separator in immersive reading, but both panes keep their share.
   const immersiveSide = (await page.locator(".side-pane").boundingBox())!;
@@ -267,7 +267,7 @@ test("Immersive reading hides the app chrome, keeps the pane layout and leaves b
   await expect(layout.locator('button[aria-pressed="true"]')).toHaveText("Right wider");
   await page.locator(".immersive-exit").click();
   await expect(page.locator(".workspace")).not.toHaveClass(/immersive/);
-  await expect(page.locator(".app-bar")).toBeVisible();
+  await expect(page.locator(".reader-header")).toBeVisible();
 
   // F enters and leaves immersive reading from the page, and a field keeps the letter.
   await page.keyboard.press("f");
@@ -539,11 +539,11 @@ test("The arrow keys keep their own meaning in fields, on the splitter, in dialo
   await expect(splitter).toHaveAttribute("aria-valuenow", "51");
   await still();
 
-  // A modal dialog owns the keyboard.
+  // Settings owns the keyboard while it is shown.
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const settings = page.getByRole("dialog", { name: "Settings" });
+  const settings = page.getByRole("main", { name: "Settings" });
   await expect(settings).toBeVisible();
-  await settings.getByRole("heading", { level: 2 }).focus();
+  await settings.getByRole("heading", { level: 1 }).focus();
   await page.keyboard.press("ArrowRight");
   await page.keyboard.press("ArrowLeft");
   await still();
@@ -1047,7 +1047,7 @@ test("A draft that could not be saved is retried without the AI, and sending it 
     });
   });
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const settings = page.getByRole("dialog", { name: "Settings" });
+  const settings = page.getByRole("main", { name: "Settings" });
   await expect(settings.getByText("AI is not set up yet. Choose a provider and a vision model.")).toBeVisible();
   await settings.getByRole("button", { name: "Close", exact: true }).click();
   await expect(settings).toBeHidden();

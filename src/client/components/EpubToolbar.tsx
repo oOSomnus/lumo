@@ -4,10 +4,10 @@ import {
   EPUB_FONT_SIZE_MIN,
   EPUB_FONT_SIZE_STEP,
   EPUB_LINE_HEIGHTS,
-  EPUB_THEMES,
 } from "../../shared/contracts";
 import type { EpubReaderStyle } from "../../shared/epub";
 import { useI18n } from "../i18n";
+import { ChevronLeftIcon, ChevronRightIcon, ListIcon, TextSizeIcon } from "../icons";
 
 interface EpubToolbarProps {
   /** True until the first page is shown. */
@@ -62,13 +62,28 @@ export function EpubToolbar({
         disabled={disabled}
         onClick={onToggleToc}
       >
+        <ListIcon size={16} />
         {t.epub.contents}
       </button>
-      <button type="button" disabled={disabled || atStart} onClick={onPrevious}>
-        {t.page.previousPage}
+      <button
+        type="button"
+        className="icon-button ghost"
+        aria-label={t.page.previousPage}
+        title={t.page.previousPage}
+        disabled={disabled || atStart}
+        onClick={onPrevious}
+      >
+        <ChevronLeftIcon />
       </button>
-      <button type="button" disabled={disabled || atEnd} onClick={onNext}>
-        {t.page.nextPage}
+      <button
+        type="button"
+        className="icon-button ghost"
+        aria-label={t.page.nextPage}
+        title={t.page.nextPage}
+        disabled={disabled || atEnd}
+        onClick={onNext}
+      >
+        <ChevronRightIcon />
       </button>
       <span className="epub-position" aria-live="polite">
         {position
@@ -89,7 +104,10 @@ export function EpubToolbar({
           event.currentTarget.querySelector("summary")?.focus();
         }}
       >
-        <summary>{t.epub.settings}</summary>
+        <summary>
+          <TextSizeIcon size={16} />
+          {t.epub.settings}
+        </summary>
         <div className="epub-settings-panel">
           <div className="epub-setting">
             <span id={`${ids}-size`}>{t.epub.fontSize}</span>
@@ -156,24 +174,6 @@ export function EpubToolbar({
               {EPUB_LINE_HEIGHTS.map((value) => (
                 <option key={value} value={value}>
                   {value}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="epub-setting">
-            {t.epub.theme}
-            <select
-              value={style.theme}
-              disabled={disabled}
-              onChange={(event) =>
-                onStyleChange({
-                  theme: event.target.value as EpubReaderStyle["theme"],
-                })
-              }
-            >
-              {EPUB_THEMES.map((value) => (
-                <option key={value} value={value}>
-                  {t.epub[value]}
                 </option>
               ))}
             </select>

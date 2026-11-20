@@ -1,17 +1,11 @@
-#root {
-  padding: 12px;
-}
-
 .launcher {
   height: 100%;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 16px 20px 20px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--paper);
+  gap: var(--space-4);
+  padding: var(--space-5) var(--space-6) var(--space-4);
+  background: var(--surface);
 }
 
 .launcher h1,
@@ -21,110 +15,199 @@
   margin: 0;
 }
 
-.launcher h1 {
-  font-size: 20px;
-  line-height: 1.2;
-}
-
 .launcher h2 {
-  margin-bottom: 4px;
+  margin-bottom: 6px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-xs);
   font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .launcher h3 {
   margin: 12px 0 6px;
-  font-size: 13px;
+  font-size: var(--text-sm);
 }
 
 .launcher-header {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 12px;
 }
 
-.launcher-header img {
-  flex: none;
-  border-radius: 10px;
+.launcher-header .brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
-.launcher-state {
-  font-size: 16px;
+.launcher-header .brand-name {
+  font-size: var(--text-xl);
+}
+
+.launcher-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--paper);
+  box-shadow: var(--shadow-sm);
+}
+
+/* The service state: a pill whose dot carries the phase colour. */
+.status-pill {
+  display: inline-flex;
+  align-self: flex-start;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px 4px 10px;
+  border-radius: 999px;
+  background: var(--surface);
+  font-size: var(--text-md);
   font-weight: 600;
 }
 
-.launcher-failure {
-  margin-top: 6px;
-  padding: 8px 10px;
-  border-left: 3px solid var(--error);
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.status-pill[data-phase="running"] {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.status-pill[data-phase="running"] .status-dot {
+  background: var(--success);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 25%, transparent);
+}
+
+.status-pill[data-phase="starting"] {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.status-pill[data-phase="starting"] .status-dot {
+  background: var(--accent);
+  animation: pulse 1.2s var(--ease) infinite;
+}
+
+.status-pill[data-phase="failed"] {
   background: var(--error-soft);
   color: var(--error);
 }
 
-.launcher-update {
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--chrome);
+.status-pill[data-phase="failed"] .status-dot {
+  background: var(--error);
 }
 
-.launcher-update p {
-  font-size: 13px;
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-pill[data-phase="starting"] .status-dot {
+    animation: none;
+  }
+}
+
+.launcher-failure {
+  flex-wrap: nowrap;
+  align-items: flex-start;
+}
+
+.launcher-address code {
+  display: block;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--chrome);
+  font-family: var(--mono);
+  font-size: var(--text-md);
+  overflow-wrap: anywhere;
+}
+
+.launcher-address > span {
+  display: block;
+  padding: 10px 0;
+}
+
+.launcher-note {
+  margin-top: 6px !important;
+  font-size: var(--text-xs);
+}
+
+.launcher-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.launcher-actions .primary {
+  min-width: 150px;
+}
+
+.launcher-update {
+  flex-wrap: nowrap;
+  align-items: flex-start;
+}
+
+.launcher-update h2 {
+  margin-bottom: 2px;
+  color: inherit;
+}
+
+.launcher-update-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .launcher-update-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-top: 8px;
-}
-
-.launcher-address code {
-  display: block;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--chrome);
-  font-size: 15px;
-  overflow-wrap: anywhere;
-}
-
-.launcher-address span {
-  display: block;
-  padding: 8px 0;
-}
-
-.launcher-note {
-  margin-top: 4px;
-  font-size: 12px;
-}
-
-.launcher-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.launcher-actions .primary {
-  min-width: 140px;
-}
-
-.launcher-actions .danger {
-  margin-left: auto;
+  margin-top: 6px;
 }
 
 .launcher-log {
   margin: 0;
   padding: 0;
   list-style: none;
+  font-size: var(--text-sm);
 }
 
 .launcher-log li {
   display: grid;
-  grid-template-columns: auto 1fr;
+  grid-template-columns: 8px auto 1fr;
+  align-items: baseline;
   gap: 10px;
-  padding: 3px 0;
+  padding: 4px 0;
+}
+
+.launcher-log li::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--border-strong);
+  transform: translateY(-1px);
+}
+
+.launcher-log li[data-level="warn"]::before {
+  background: var(--warning);
+}
+
+.launcher-log li[data-level="error"]::before {
+  background: var(--error);
 }
 
 .launcher-log time {
@@ -141,12 +224,20 @@
   color: var(--error);
 }
 
+.launcher-details {
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+
 .launcher-details summary {
+  color: var(--muted);
+  font-size: var(--text-sm);
   cursor: pointer;
 }
 
 .launcher-details dl {
   margin: 8px 0 0;
+  font-size: var(--text-sm);
 }
 
 .launcher-details dt {
@@ -161,7 +252,13 @@
 .launcher-log-scroll {
   max-height: 160px;
   overflow: auto;
-  padding: 4px 8px;
+  padding: 4px 10px;
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-md);
+}
+
+.launcher-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: auto;
 }

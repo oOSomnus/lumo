@@ -27,7 +27,7 @@ describe("isOpenTask", () => {
 const layout: EpubLayoutSnapshot = {
   width: 700,
   height: 900,
-  style: { fontSize: 18, fontFamily: "serif", lineHeight: 1.6, theme: "light" },
+  style: { fontSize: 18, fontFamily: "serif", lineHeight: 1.6 },
 };
 
 function location(sectionIndex: number, page: number, total: number): EpubPageLocation {

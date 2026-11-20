@@ -9,7 +9,7 @@ const CFI = "epubcfi(/6/4!/4/2,/1:0,/1:9)";
 const layout: EpubLayoutSnapshot = {
   width: 600,
   height: 800,
-  style: { fontSize: 18, fontFamily: "serif", lineHeight: 1.6, theme: "light" },
+  style: { fontSize: 18, fontFamily: "serif", lineHeight: 1.6 },
 };
 const info: EpubReadyInfo = { sectionCount: 3, toc: [], fixedLayout: false };
 const prepared: EpubPreparedUnit = { xhtml: "<p>x</p>", images: [] };

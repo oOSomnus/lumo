@@ -4,12 +4,43 @@
 //
 // The viewer page forbids inline <style> (style-src 'self'), so the sheet is adopted, not injected as a node.
 
+import { PDF_THEME_CSS } from "./reading-theme";
+
 const ICON =
   "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E" +
   "%3Cpath d='M2 4.3h4v1.4H2zM10 4.3h4v1.4h-4zM2 10.3h7v1.4H2zM13 10.3h1v1.4h-1z'/%3E" +
   "%3Ccircle cx='8' cy='5' r='1.8'/%3E%3Ccircle cx='11' cy='11' r='1.8'/%3E%3C/svg%3E\")";
 
 const STYLE = `
+${PDF_THEME_CSS}
+/* The viewer's chrome in the app's own colours, so the embedded toolbar matches the reader header. */
+html[data-lumo-theme="light"] {
+  --toolbar-bg-color: #ffffff; --toolbar-border-color: #dde1e6;
+  --sidebar-toolbar-bg-color: #fafafb; --field-border-color: #dde1e6;
+}
+html[data-lumo-theme="dark"] {
+  --toolbar-bg-color: #1b1e22; --toolbar-border-color: #30353c;
+  --sidebar-toolbar-bg-color: #17191d; --field-bg-color: #131518; --field-border-color: #30353c;
+}
+html[data-lumo-theme="sepia"] {
+  --toolbar-bg-color: #f9f3e3; --toolbar-border-color: #ddcfae;
+  --sidebar-toolbar-bg-color: #f4ead4; --field-bg-color: #fffaf0; --field-border-color: #ddcfae;
+  --main-color: #3b2f1e; --toolbar-icon-bg-color: #3b2f1e;
+}
+/* Menus, the outline and thumbnail sidebar and their text: PDF.js reads these hooks before its own white or grey. */
+html[data-lumo-theme="sepia"] { --background-color-box: #f9f3e3; --text-color: #3b2f1e; --focus-outline-color: #8a4b08; }
+html[data-lumo-theme="dark"] { --background-color-box: #1b1e22; --text-color: #e4e7eb; --focus-outline-color: #7ea7c8; }
+html[data-lumo-theme="night"] { --background-color-box: #141210; --text-color: #d6c4a5; --focus-outline-color: #d4a05a; }
+html[data-lumo-theme="sepia"] #viewsManager {
+  --sidebar-bg-color: rgb(249 243 227 / 0.94); --header-bg: #f4ead4; --image-page-number-bg: #ede3cb;
+}
+html[data-lumo-theme="dark"] #viewsManager {
+  --sidebar-bg-color: rgb(27 30 34 / 0.94); --header-bg: #17191d; --image-page-number-bg: #131518;
+}
+html[data-lumo-theme="night"] #viewsManager {
+  --sidebar-bg-color: rgb(20 18 16 / 0.94); --header-bg: #100e0c; --image-page-number-bg: #0b0a09;
+}
+.toolbarField { border-radius: 6px; }
 @media (max-width: 690px) {
   #mainContainer { min-width: 0; }
 }

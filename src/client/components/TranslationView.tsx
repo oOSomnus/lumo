@@ -6,7 +6,9 @@ import { stripPlaceholderControls } from "../../shared/typst";
 import { watchReaderKeys, type ReaderShortcut } from "../page-keys";
 import { watchPointerActivity } from "../pointer-activity";
 import { translationPreviewWidth, type Size } from "../translation-zoom";
-import type { TranslationZoom } from "../../shared/contracts";
+import type { ColorTheme, TranslationZoom } from "../../shared/contracts";
+import { previewThemeCss } from "../reading-theme";
+import { useTheme } from "../theme";
 import { TypstSource } from "./TypstSource";
 
 type LoadAssets = (signal: AbortSignal) => Promise<readonly TypstAsset[]>;
@@ -30,8 +32,8 @@ DOMPurify.addHook("afterSanitizeAttributes", (node) => {
   }
 });
 
-function sanitizedDocument(svg: string): string {
-  const sanitized = DOMPurify.sanitize(svg, {
+function sanitizedSvg(svg: string): string {
+  return DOMPurify.sanitize(svg, {
     USE_PROFILES: { svg: true, svgFilters: true },
     FORBID_TAGS: [
       "foreignObject",
@@ -45,9 +47,13 @@ function sanitizedDocument(svg: string): string {
     ADD_TAGS: ["use"],
     ADD_ATTR: ["style"],
   });
+}
+
+/** The preview document of an already sanitized page, painted with the colour theme. */
+function previewDocument(sanitized: string, theme: ColorTheme): string {
   const csp =
     "default-src 'none'; script-src 'none'; connect-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'";
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>html,body{margin:0;padding:0;background:transparent}svg{max-width:100%;height:auto;display:block}body>svg{width:100%}</style></head><body>${sanitized}</body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>html,body{margin:0;padding:0;background:transparent}svg{max-width:100%;height:auto;display:block}body>svg{width:100%}${previewThemeCss(theme)}</style></head><body>${sanitized}</body></html>`;
 }
 
 /** The rendered page's size in Typst points, from the SVG's viewBox. */
@@ -99,7 +105,8 @@ type PreviewState =
       status: "ready";
       typst: string;
       loadAssets: LoadAssets;
-      html: string;
+      /** The sanitized SVG page. */
+      svg: string;
       pageSize: Size | null;
     }
   | { status: "failed"; message: string };
@@ -206,7 +213,7 @@ export const TranslationView = memo(function TranslationView({
             status: "ready",
             typst: previewSource,
             loadAssets,
-            html: sanitizedDocument(svg),
+            svg: sanitizedSvg(svg),
             pageSize: svgPageSize(svg),
           });
         },
@@ -240,9 +247,10 @@ export const TranslationView = memo(function TranslationView({
     const id = requestAnimationFrame(() => renderedRef.current?.());
     return () => cancelAnimationFrame(id);
   }, [immersive, preview.status, streaming, wantPreview, visibleSource, mode, editing]);
+  const { theme } = useTheme();
   const previewHtml = useMemo(
-    () => (preview.status === "ready" ? preview.html : ""),
-    [preview],
+    () => (preview.status === "ready" ? previewDocument(preview.svg, theme) : ""),
+    [preview, theme],
   );
   const zoomedWidth =
     zoom && preview.status === "ready" && preview.pageSize
@@ -253,7 +261,7 @@ export const TranslationView = memo(function TranslationView({
     <div className={streaming ? "translation-body streaming" : "translation-body"}>
       {!streaming && !immersive && (
         <div className="typst-toolbar">
-          <div className="typst-view-toggle" role="group">
+          <div className="segmented" role="group">
             <button
               type="button"
               aria-pressed={mode === "preview"}

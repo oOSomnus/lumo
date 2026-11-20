@@ -166,6 +166,14 @@ function vendoredEntries(): NoticeEntry[] {
     source: "https://github.com/mozilla/pdf.js",
     texts: [{ file: "LICENSE", text: readFileSync(pdfjs, "utf8").trim() }],
   });
+  entries.push({
+    ecosystem: "bundled",
+    name: "Lucide icons",
+    version: "icon paths in src/client/icons.tsx",
+    license: "ISC",
+    source: "https://github.com/lucide-icons/lucide",
+    texts: [{ file: "LICENSE", text: readFileSync(join(root, "src", "client", "icons.LICENSE"), "utf8").trim() }],
+  });
   const typstLicenses = join(root, "vendor", "typst", "licenses");
   if (!existsSync(typstLicenses)) throw new Error("vendor/typst/licenses is missing; run `bun run prepare:typst`");
   for (const name of readdirSync(typstLicenses).sort()) {

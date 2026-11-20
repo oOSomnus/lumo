@@ -11,6 +11,7 @@ import { stripPlaceholderControls } from "../../shared/typst";
 import { apiJson, triggerDownload } from "../api";
 import { collectPageSources, documentBaseName } from "../export-sources";
 import { errorText, toUiError, useI18n, type UiError } from "../i18n";
+import { CloseIcon } from "../icons";
 import type { DocumentOutlineState } from "../outline";
 import { openExportOriginal } from "../pdf";
 import {
@@ -281,8 +282,14 @@ export function PdfExportDialog({
     <ModalDialog open={open} onClose={close} label={t.pdfExport.title} className="pdf-export-dialog">
       <div className="dialog-heading">
         <h2>{t.pdfExport.title}</h2>
-        <button type="button" onClick={close}>
-          {t.common.close}
+        <button
+          type="button"
+          className="icon-button ghost"
+          aria-label={t.common.close}
+          title={t.common.close}
+          onClick={close}
+        >
+          <CloseIcon />
         </button>
       </div>
       <p className="muted">{t.pdfExport.language(TARGET_LANGUAGE_LABELS[language])}</p>

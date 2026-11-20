@@ -34,7 +34,7 @@ test("R6 clearing the provider keeps the provider options", async ({ page, lumo 
 
   await openApp(page, lumo.url);
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const settings = page.getByRole("dialog", { name: "Settings" });
+  const settings = page.getByRole("main", { name: "Settings" });
   const provider = settings.getByRole("combobox", { name: /^Provider/ });
   await expect(provider.locator('option[value="openai"]')).toBeAttached();
   const initialOptions = await provider
@@ -136,9 +136,9 @@ test("Translate asks to set up the AI first, sends nothing, and Settings returns
 
   await expect(page.getByText("AI translation is not set up yet.")).toBeVisible();
   await page.getByRole("button", { name: "Configure AI to translate" }).click();
-  const settings = page.getByRole("dialog", { name: "Settings" });
-  // The AI comes first; the interface language and the data follow.
-  await expect(settings.getByRole("heading", { level: 3 }).first()).toHaveText("AI provider and model");
+  const settings = page.getByRole("main", { name: "Settings" });
+  // The AI comes first; the appearance, the interface language and the data follow.
+  await expect(settings.getByRole("heading", { level: 2 }).first()).toHaveText("AI provider and model");
   const summary = settings.locator(".ai-summary");
   await expect(summary).toContainText("AI is not set up yet.");
   const done = settings.getByRole("button", { name: "Done", exact: true });
@@ -214,7 +214,7 @@ test("A settings read that finishes after the save never turns a ready AI back i
   await openTranslatedPage(page, lumo.url, "stale.pdf");
 
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const settings = page.getByRole("dialog", { name: "Settings" });
+  const settings = page.getByRole("main", { name: "Settings" });
   await saveCustomEndpoint(settings);
   await settings.getByRole("button", { name: "Done", exact: true }).click();
   const translate = page.getByRole("button", { name: "Translate this page" });
@@ -228,7 +228,7 @@ test("A settings read that finishes after the save never turns a ready AI back i
 
 test("The advanced settings stay folded until a saved value uses them", async ({ page, lumo }) => {
   await openApp(page, lumo.url);
-  const settings = page.getByRole("dialog", { name: "Settings" });
+  const settings = page.getByRole("main", { name: "Settings" });
   const advanced = settings.locator("details.settings-advanced");
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await expect(advanced).toHaveJSProperty("open", false);
@@ -264,7 +264,7 @@ test("The batch panel leads to the AI setup, keeps its range and starts nothing 
 
   await expect(panel.getByRole("button", { name: /^Start translation/ })).toHaveCount(0);
   await panel.getByRole("button", { name: "Configure AI to translate" }).click();
-  const settings = page.getByRole("dialog", { name: "Settings" });
+  const settings = page.getByRole("main", { name: "Settings" });
   await saveCustomEndpoint(settings);
   await settings.getByRole("button", { name: "Done", exact: true }).click();
 

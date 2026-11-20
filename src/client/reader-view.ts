@@ -39,8 +39,7 @@ export function sameReaderView(a: ReaderView, b: ReaderView): boolean {
       a.cfi === b.cfi &&
       a.fontSize === b.fontSize &&
       a.fontFamily === b.fontFamily &&
-      a.lineHeight === b.lineHeight &&
-      a.theme === b.theme
+      a.lineHeight === b.lineHeight
     );
   }
   if (a.format === "pdf" && b.format === "pdf") {

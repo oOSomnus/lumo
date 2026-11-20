@@ -1,4 +1,4 @@
-import type { EpubReaderView } from "../shared/contracts";
+import type { ColorTheme, EpubReaderView } from "../shared/contracts";
 import { epubStyleOf } from "../shared/epub";
 import type { EpubLayoutSnapshot } from "../shared/epub";
 import type { BookLike, RenditionLike, SectionLike } from "./epub-js";
@@ -122,8 +122,8 @@ export class EpubRenditions {
     return this.styles.run(this.foregroundCss, () => this.foreground.prev());
   }
 
-  async setView(view: EpubReaderView): Promise<void> {
-    const css = readingCss(epubStyleOf(view), this.fixedLayout);
+  async setView(view: EpubReaderView, theme: ColorTheme): Promise<void> {
+    const css = readingCss(epubStyleOf(view), this.fixedLayout, theme);
     if (css === this.foregroundCss) return;
     this.foregroundCss = css;
     // Read before the new sheet changes the layout; with nothing shown yet, the next section is written with it.
@@ -224,7 +224,8 @@ export class EpubRenditions {
       spread: "none",
       allowScriptedContent: false,
     });
-    return { host, rendition, css: readingCss(layout.style, this.fixedLayout) };
+    // Hidden renditions are only measured, never seen, and colour does not change the layout.
+    return { host, rendition, css: readingCss(layout.style, this.fixedLayout, "light") };
   }
 
   private destroyHidden(hidden: Hidden): void {

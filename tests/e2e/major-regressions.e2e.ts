@@ -126,7 +126,7 @@ test("R2 language reload unblocks after saving a copy", async ({ page, lumo }) =
   await expect(viewer.locator("#scaleSelect")).toHaveValue("1.5");
 
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const settings = page.getByRole("dialog", { name: "Settings" });
+  const settings = page.getByRole("main", { name: "Settings" });
   await settings.getByRole("combobox", { name: /^Interface language/ }).selectOption("zh-CN");
   const apply = settings.getByRole("button", { name: "Save language and reload" });
   await expect(apply).toBeEnabled();
@@ -143,7 +143,7 @@ test("R2 language reload unblocks after saving a copy", async ({ page, lumo }) =
 
   await noteField(page).fill("r2-late");
   await page.getByRole("button", { name: "设置", exact: true }).click();
-  const blockedSettings = page.getByRole("dialog", { name: "设置" });
+  const blockedSettings = page.getByRole("main", { name: "设置" });
   await blockedSettings
     .getByRole("combobox", { name: /^界面语言/ })
     .selectOption("en");
@@ -158,7 +158,7 @@ test("R2 language reload unblocks after saving a copy", async ({ page, lumo }) =
   await expect(noteField(page)).toHaveValue("r2-edit");
 
   await page.getByRole("button", { name: "设置", exact: true }).click();
-  const unblockedSettings = page.getByRole("dialog", { name: "设置" });
+  const unblockedSettings = page.getByRole("main", { name: "设置" });
   await unblockedSettings
     .getByRole("combobox", { name: /^界面语言/ })
     .selectOption("en");
@@ -178,13 +178,38 @@ test("R2 completed preview import unblocks the language reload", async ({ page, 
   await expect(noteField(page)).toHaveValue("imported");
 
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const settings = page.getByRole("dialog", { name: "Settings" });
+  const settings = page.getByRole("main", { name: "Settings" });
   await settings
     .getByRole("combobox", { name: /^Interface language/ })
     .selectOption("zh-CN");
   await expect(
     settings.getByRole("button", { name: "Save language and reload" }),
   ).toBeEnabled();
+});
+
+test("R2 a language reload waits for a theme save still in flight", async ({ page, lumo }) => {
+  await openApp(page, lumo.url);
+  // Hold the theme save so the language save and reload overtake it.
+  let releaseTheme: () => void = () => {};
+  const themeHeld = new Promise<void>((resolve) => (releaseTheme = resolve));
+  await page.route("**/api/settings", async (route) => {
+    const request = route.request();
+    if (request.method() === "PATCH" && "theme" in (request.postDataJSON() ?? {})) await themeHeld;
+    await route.continue();
+  });
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const settings = page.getByRole("main", { name: "Settings" });
+  await settings.getByText("Sepia: warm paper").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "sepia");
+  await settings.getByRole("combobox", { name: /^Interface language/ }).selectOption("zh-CN");
+  await settings.getByRole("button", { name: "Save language and reload" }).click();
+  await expect(settings.getByRole("radio", { name: "Light", exact: true })).toBeDisabled();
+  await page.waitForTimeout(500);
+  releaseTheme();
+
+  await expect(page.getByRole("main", { name: "书库" })).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "sepia");
 });
 
 type SaveGate = {
@@ -1279,7 +1304,7 @@ test("The interface language waits while a Typst draft is kept, then applies and
 
   const chooseChinese = async () => {
     await page.getByRole("button", { name: "Settings", exact: true }).click();
-    const settings = page.getByRole("dialog", { name: "Settings" });
+    const settings = page.getByRole("main", { name: "Settings" });
     await settings.getByRole("combobox", { name: /^Interface language/ }).selectOption("zh-CN");
     return settings;
   };

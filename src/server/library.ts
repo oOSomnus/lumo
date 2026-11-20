@@ -34,6 +34,7 @@ import {
   getReaderView,
   getSettings,
   getTranslation,
+  getTheme,
   getUiLocale,
   listDocuments,
   listTranslationLocations,
@@ -186,6 +187,7 @@ export async function handleLibrary(
       settings: getSettings(ctx.db),
       dataDirectory: ctx.dataDirectory,
       uiLocale: getUiLocale(ctx.db),
+      theme: getTheme(ctx.db),
     };
     return jsonResponse(snapshot);
   }

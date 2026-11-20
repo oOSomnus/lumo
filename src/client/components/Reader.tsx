@@ -26,6 +26,7 @@ import {
   type TranslationRecord,
   type TranslationZoom,
   type UiLocale,
+  type UiTheme,
 } from "../../shared/contracts";
 import {
   apiFetch,
@@ -36,9 +37,11 @@ import {
   jsonInit,
   requestTranslation,
   saveTranslationRecord,
+  saveTheme,
   saveUiLocale,
   triggerDownload,
 } from "../api";
+import { setThemePreference, useTheme } from "../theme";
 import {
   errorText,
   formatDateTime,
@@ -114,8 +117,21 @@ import { EpubTocPanel } from "./EpubTocPanel";
 import { EpubToolbar } from "./EpubToolbar";
 import { EpubViewerFrame } from "./EpubViewerFrame";
 import { ImmersivePageNav } from "./ImmersivePageNav";
+import {
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  CloseIcon,
+  MaximizeIcon,
+  SaveIcon,
+  SparklesIcon,
+  UndoIcon,
+  UploadIcon,
+} from "../icons";
+import { loadSidebarCollapsed, saveSidebarCollapsed } from "../library-view";
 import { PdfViewerFrame } from "./PdfViewerFrame";
-import { SettingsDialog } from "./SettingsDialog";
+import { SettingsPage } from "./SettingsPage";
+import { AppSidebar, type AppScreen } from "./AppSidebar";
+import { LumoMark } from "./Brand";
 import { TranslationView, type TranslationZoomFrame } from "./TranslationView";
 
 type PendingLoad =
@@ -250,7 +266,7 @@ function LocaleSwitch() {
   const { locale, t } = useI18n();
   return (
     <div
-      className="locale-switch"
+      className="locale-switch segmented"
       role="group"
       aria-label={t.settings.languageSection}
     >
@@ -288,8 +304,15 @@ export function Reader() {
   const [library, setLibrary] = useState<LibrarySnapshot | null>(null);
   const [libraryLoading, setLibraryLoading] = useState(Boolean(token));
   const [libraryError, setLibraryError] = useState<UiError | null>(null);
-  const [screen, setScreen] = useState<"library" | "reader">("library");
-  const screenRef = useRef<"library" | "reader">("library");
+  const [screen, setScreen] = useState<AppScreen>("library");
+  const screenRef = useRef<AppScreen>("library");
+  /** Where Settings returns to when closed. */
+  const settingsReturnRef = useRef<Exclude<AppScreen, "settings">>("library");
+  const openSettingsRef = useRef<() => void>(() => {});
+  const [sidebarCompact, setSidebarCompact] = useState(() => loadSidebarCollapsed() ?? false);
+  /** A file is being dragged over the window: the drop overlay shows. */
+  const [dragging, setDragging] = useState(false);
+  const dragDepthRef = useRef(0);
 
   const [currentDocument, setCurrentDocument] = useState<DocumentRecord | null>(null);
   const currentDocumentRef = useRef<DocumentRecord | null>(null);
@@ -319,6 +342,11 @@ export function Reader() {
     epubStyleOf(DEFAULT_EPUB_READER_VIEW),
   );
   const epubStyleRef = useRef<EpubReaderStyle>(epubStyle);
+  const { preference: themePreference, theme: colorTheme } = useTheme();
+  const colorThemeRef = useRef(colorTheme);
+  colorThemeRef.current = colorTheme;
+  // The theme the open book was last styled with; a different one is sent once the book is ready.
+  const epubThemeRef = useRef(colorTheme);
   const epubStyleTimerRef = useRef<number | null>(null);
   const epubStyleInflightRef = useRef(0);
   const [epubStyleBusy, setEpubStyleBusy] = useState(false);
@@ -374,7 +402,6 @@ export function Reader() {
   const [paneMode, setPaneMode] = useState<PaneMode>("both");
   const [libraryActionError, setLibraryActionError] = useState<UiError | null>(null);
   const libraryRefreshRef = useRef<AbortController | null>(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [immersive, setImmersive] = useState(false);
   const immersiveRef = useRef(false);
   const fullscreenPendingRef = useRef(false);
@@ -516,7 +543,7 @@ export function Reader() {
   // Opens the settings when the AI still needs setting up; true only when a model request may go out now.
   const requireAi = useCallback((): boolean => {
     const gate = aiGateRef.current;
-    if (gate === "unconfigured") void exitImmersive().then(() => setSettingsOpen(true));
+    if (gate === "unconfigured") openSettingsRef.current();
     else if (gate === "failed") void refreshAiStatus(true);
     return gate === "ready";
   }, [exitImmersive, refreshAiStatus]);
@@ -711,7 +738,8 @@ export function Reader() {
       epubStyleRef.current = style;
       setEpubStyle(style);
       try {
-        await bridge.setView(view);
+        epubThemeRef.current = colorThemeRef.current;
+        await bridge.setView(view, epubThemeRef.current);
         if (view.cfi) await bridge.display(view.cfi);
       } catch {
         if (
@@ -746,11 +774,11 @@ export function Reader() {
         epubStyleInflightRef.current += 1;
         epubInternalNavRef.current += 1;
         try {
-          await bridge.setView({
-            format: "epub",
-            cfi: null,
-            ...epubStyleRef.current,
-          });
+          epubThemeRef.current = colorThemeRef.current;
+          await bridge.setView(
+            { format: "epub", cfi: null, ...epubStyleRef.current },
+            epubThemeRef.current,
+          );
           if (live()) setEpubActionError(null);
         } catch (error) {
           const failure = toUiError(error);
@@ -779,6 +807,12 @@ export function Reader() {
     () => changeEpubStyle(epubStyleOf(DEFAULT_EPUB_READER_VIEW)),
     [changeEpubStyle],
   );
+
+  // A theme picked while a book is open restyles it through the same pass as a settings change.
+  useEffect(() => {
+    if (!viewerReady || currentDocumentRef.current?.format !== "epub") return;
+    if (epubThemeRef.current !== colorTheme) changeEpubStyle({});
+  }, [changeEpubStyle, colorTheme, viewerReady]);
 
   const workspaceRef = useRef<HTMLElement | null>(null);
   const pageBodyRef = useRef<HTMLDivElement | null>(null);
@@ -1350,7 +1384,7 @@ export function Reader() {
     if (screenRef.current === "library") return;
     void exitImmersive();
     const document = currentDocumentRef.current;
-    if (document) captureCurrentView(document.id);
+    if (document && screenRef.current === "reader") captureCurrentView(document.id);
     screenRef.current = "library";
     setScreen("library");
     libraryRefreshRef.current?.abort();
@@ -1391,6 +1425,41 @@ export function Reader() {
       }
     })();
   }, [captureCurrentView, exitImmersive, viewStore]);
+
+  // Settings is a screen of its own; the reader behind it keeps its book, view and work.
+  const openSettings = useCallback(() => {
+    if (screenRef.current === "settings") return;
+    void exitImmersive();
+    const document = currentDocumentRef.current;
+    if (document && screenRef.current === "reader") captureCurrentView(document.id);
+    settingsReturnRef.current = screenRef.current;
+    // Like the Library, Settings stops a book still being opened from pulling the user away: an
+    // import still joins the list, and reader work and a login carry on.
+    openAttemptRef.current += 1;
+    screenRef.current = "settings";
+    setScreen("settings");
+  }, [captureCurrentView, exitImmersive]);
+  openSettingsRef.current = openSettings;
+
+  const closeSettings = useCallback(() => {
+    if (screenRef.current !== "settings") return;
+    if (settingsReturnRef.current === "reader") showReader();
+    else openLibrary();
+  }, [openLibrary, showReader]);
+
+  // Leaving Settings, by any route, rereads whether the AI is ready.
+  const previousScreenRef = useRef(screen);
+  useEffect(() => {
+    if (previousScreenRef.current === "settings" && screen !== "settings") void refreshAiStatus(false);
+    previousScreenRef.current = screen;
+  }, [screen, refreshAiStatus]);
+
+  const toggleSidebar = useCallback(() => {
+    setSidebarCompact((compact) => {
+      saveSidebarCollapsed(!compact);
+      return !compact;
+    });
+  }, []);
 
   const drainProgress = useCallback((): Promise<void> => {
     if (progressDrainRef.current) return progressDrainRef.current;
@@ -1442,6 +1511,8 @@ export function Reader() {
         const snapshot = await apiJson<LibrarySnapshot>("/api/library");
         if (cancelled) return;
         setUiLocale(snapshot.uiLocale);
+        setThemePreference(snapshot.theme);
+        savedThemeRef.current = snapshot.theme;
         setLibrary(snapshot);
         setLibraryError(null);
         setLanguage(snapshot.settings.targetLanguage);
@@ -2242,7 +2313,8 @@ export function Reader() {
       lastViewRef.current = stored;
       try {
         // The settings go in before the first layout, so the book is paginated once.
-        await bridge.setView(stored);
+        epubThemeRef.current = colorThemeRef.current;
+        await bridge.setView(stored, epubThemeRef.current);
         await showEpubPosition(bridge, stored.cfi, section);
       } catch (error) {
         if (stillOpen()) handleViewerError(toUiError(error));
@@ -3532,6 +3604,33 @@ export function Reader() {
     return null;
   })();
 
+  // A theme shows at once and is saved behind it. Saves run one at a time in the order picked, so
+  // the stored theme ends as the last pick that saved. Only the newest pick reports a failure,
+  // which falls back to that stored theme. While a language change is reloading the page, new picks
+  // are refused so that the reload cannot cut off a save queued after it.
+  const savedThemeRef = useRef<UiTheme>("system");
+  const localeReloadingRef = useRef(false);
+  const themeAttemptRef = useRef(0);
+  const themeSaveChainRef = useRef<Promise<void>>(Promise.resolve());
+  const applyTheme = useCallback(async (next: UiTheme): Promise<void> => {
+    if (localeReloadingRef.current) return;
+    const attempt = ++themeAttemptRef.current;
+    setThemePreference(next);
+    const save = themeSaveChainRef.current.then(() => saveTheme(next));
+    themeSaveChainRef.current = save.then(
+      () => undefined,
+      () => undefined,
+    );
+    try {
+      await save;
+      savedThemeRef.current = next;
+    } catch (error) {
+      if (attempt !== themeAttemptRef.current) return;
+      setThemePreference(savedThemeRef.current);
+      throw error;
+    }
+  }, []);
+
   const applyUiLocale = useCallback(
     async (next: UiLocale): Promise<void> => {
       const blocked =
@@ -3547,27 +3646,34 @@ export function Reader() {
         previewUploadCount > 0 ||
         Boolean(bridgeRef.current?.hasEdits);
       if (blocked) throw { code: "LANGUAGE_RELOAD_BLOCKED" };
-      await saveChainRef.current;
-      if (!(await commitCurrentView())) throw { code: "VIEW_SAVE_FAILED" };
-      const document = currentDocumentRef.current;
-      await apiJson(
-        "/api/reader",
-        jsonInit(
-          "PATCH",
-          document
-            ? {
-                documentId: document.id,
-                pageNumber: pageRef.current,
-                targetLanguage: languageRef.current,
-              }
-            : {
-                documentId: null,
-                pageNumber: null,
-                targetLanguage: languageRef.current,
-              },
-        ),
-      );
-      await saveUiLocale(next);
+      localeReloadingRef.current = true;
+      try {
+        await saveChainRef.current;
+        if (!(await commitCurrentView())) throw { code: "VIEW_SAVE_FAILED" };
+        const document = currentDocumentRef.current;
+        await apiJson(
+          "/api/reader",
+          jsonInit(
+            "PATCH",
+            document
+              ? {
+                  documentId: document.id,
+                  pageNumber: pageRef.current,
+                  targetLanguage: languageRef.current,
+                }
+              : {
+                  documentId: null,
+                  pageNumber: null,
+                  targetLanguage: languageRef.current,
+                },
+          ),
+        );
+        await saveUiLocale(next);
+        await themeSaveChainRef.current;
+      } catch (error) {
+        localeReloadingRef.current = false;
+        throw error;
+      }
       location.reload();
     },
     [commitCurrentView, hasOutlineDraft, modified, outline.stage, previewOnly, previewUploadCount, savingCopy, tasks],
@@ -3576,10 +3682,11 @@ export function Reader() {
   if (!token) {
     return (
       <div className="access-gate">
+        <LumoMark size={40} />
         <h1>{t.gates.accessTitle}</h1>
-        <LocaleSwitch />
         <p>{t.gates.missingToken}</p>
         <p className="muted">{t.gates.tokenRotates}</p>
+        <LocaleSwitch />
       </div>
     );
   }
@@ -3587,9 +3694,10 @@ export function Reader() {
   if (libraryLoading) {
     return (
       <div className="access-gate">
+        <LumoMark size={40} />
         <h1>{t.gates.accessTitle}</h1>
-        <LocaleSwitch />
         <p>{t.gates.opening}</p>
+        <LocaleSwitch />
       </div>
     );
   }
@@ -3597,16 +3705,17 @@ export function Reader() {
   if (libraryError || !library) {
     return (
       <div className="access-gate">
+        <LumoMark size={40} />
         <h1>{t.gates.libraryFailedTitle}</h1>
-        <LocaleSwitch />
         <p role="alert">
           {libraryError
             ? errorText(libraryError, locale)
             : t.gates.libraryUnavailable}
         </p>
-        <button type="button" onClick={() => location.reload()}>
+        <button type="button" className="primary" onClick={() => location.reload()}>
           {t.gates.retry}
         </button>
+        <LocaleSwitch />
       </div>
     );
   }
@@ -3637,93 +3746,106 @@ export function Reader() {
       };
 
   return (
-    <div className={immersive ? "app-shell immersive" : "app-shell"}>
-      <header className="app-bar">
-        <span className="brand">{t.gates.accessTitle}</span>
-        <button
-          type="button"
-          className="app-button"
-          aria-current={screen === "library" ? "page" : undefined}
-          onClick={openLibrary}
-        >
-          {t.appBar.library}
-        </button>
-        <button
-          type="button"
-          className="app-button"
-          onClick={() => fileInputRef.current?.click()}
-        >
-          {t.appBar.openPdf}
-        </button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="application/pdf,.pdf,application/epub+zip,.epub"
-          hidden
-          onChange={(event) => {
-            const file = event.target.files?.[0];
-            event.target.value = "";
-            if (file) openFile(file);
-          }}
-        />
-        {screen === "reader" && (
-          <span
-            className="file-name"
-            title={currentDocument?.name ?? t.appBar.noPdf}
-          >
-            {currentDocument?.name ??
-              (previewOnly && pendingRef.current?.kind === "preview"
-                ? pendingRef.current.file.name
-                : t.appBar.noPdf)}
-          </span>
-        )}
-        <span className="app-bar-spacer" />
-        {screen === "reader" && modified && (
-          <button
-            type="button"
-            className="app-button warning"
-            onClick={() => void saveModifiedCopy()}
-            disabled={savingCopy}
-          >
-            {savingCopy
-              ? t.appBar.savingCopy
-              : t.appBar.saveModifiedCopy}
-          </button>
-        )}
-        {screen === "reader" && modified && (
-          <button
-            type="button"
-            className="app-button"
-            disabled={savingCopy}
-            onClick={() => void discardModifications()}
-          >
-            {t.appBar.discardChanges}
-          </button>
-        )}
-        {screen === "library" && (currentDocument || previewOnly) && (
-          <button type="button" className="app-button" onClick={showReader}>
-            {t.library.returnToReader}
-          </button>
-        )}
-        {screen === "reader" && (
-          <button
-            type="button"
-            className="app-button fullscreen-button"
-            aria-pressed={immersive}
-            aria-keyshortcuts="F"
-            onClick={toggleImmersive}
-          >
-            {t.appBar.immersive}
-          </button>
-        )}
-        <button
-          type="button"
-          className="app-button settings-button"
-          onClick={() => setSettingsOpen(true)}
-        >
-          {t.appBar.settings}
-        </button>
-      </header>
+    <div
+      className={immersive ? "app-shell immersive" : "app-shell"}
+      onDragEnter={(event) => {
+        if (!event.dataTransfer.types.includes("Files")) return;
+        dragDepthRef.current += 1;
+        setDragging(true);
+      }}
+      onDragLeave={() => {
+        dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+        if (dragDepthRef.current === 0) setDragging(false);
+      }}
+      onDragOver={(event) => {
+        if (event.dataTransfer.types.includes("Files")) event.preventDefault();
+      }}
+      onDrop={(event) => {
+        event.preventDefault();
+        dragDepthRef.current = 0;
+        setDragging(false);
+        const file = event.dataTransfer.files?.[0];
+        if (file) openFile(file);
+      }}
+    >
+      <AppSidebar
+        screen={screen}
+        readingTitle={
+          currentDocument?.name ??
+          (previewOnly && pendingRef.current?.kind === "preview" ? pendingRef.current.file.name : null)
+        }
+        compact={sidebarCompact || screen === "reader"}
+        collapsible={screen !== "reader"}
+        onToggleCompact={toggleSidebar}
+        onLibrary={openLibrary}
+        onReading={showReader}
+        onSettings={openSettings}
+        onOpenFile={() => fileInputRef.current?.click()}
+      />
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="application/pdf,.pdf,application/epub+zip,.epub"
+        hidden
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          event.target.value = "";
+          if (file) openFile(file);
+        }}
+      />
+      <div className="app-main">
+      {screen === "reader" && (
+        <header className="reader-header">
+          <div className="reader-title">
+            <span className="file-name" title={currentDocument?.name ?? t.appBar.noPdf}>
+              {currentDocument?.name ??
+                (previewOnly && pendingRef.current?.kind === "preview"
+                  ? pendingRef.current.file.name
+                  : t.appBar.noPdf)}
+            </span>
+            {currentDocument && (
+              <span className="badge format">{currentDocument.format}</span>
+            )}
+          </div>
+          <div className="reader-actions">
+            {modified && (
+              <>
+                <button
+                  type="button"
+                  className="warning"
+                  onClick={() => void saveModifiedCopy()}
+                  disabled={savingCopy}
+                >
+                  <SaveIcon size={16} />
+                  {savingCopy ? t.appBar.savingCopy : t.appBar.saveModifiedCopy}
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={savingCopy}
+                  onClick={() => void discardModifications()}
+                >
+                  <UndoIcon size={16} />
+                  {t.appBar.discardChanges}
+                </button>
+                <span className="header-divider" aria-hidden="true" />
+              </>
+            )}
+            {!narrow && <LayoutSwitch mode={paneMode} ratio={splitRatio} onChange={changeLayout} />}
+            <button
+              type="button"
+              className="icon-button ghost fullscreen-button"
+              aria-pressed={immersive}
+              aria-keyshortcuts="F"
+              title={`${t.appBar.immersive} (F)`}
+              onClick={toggleImmersive}
+            >
+              <MaximizeIcon />
+              <span className="sr-only">{t.appBar.immersive}</span>
+            </button>
+          </div>
+        </header>
+      )}
 
       {progressWarning && (
         <div className="app-banner warning" role="status">
@@ -3769,25 +3891,20 @@ export function Reader() {
           currentDocumentId={currentDocument?.id ?? null}
           currentPage={page}
           error={libraryActionError}
+          canReturn={Boolean(currentDocument || previewOnly)}
+          onReturn={showReader}
           onOpen={(document) => openDocument(document, document.currentPage)}
           onDownload={(document) => void downloadDocument(document)}
           onDelete={(document) => void deleteDocument(document)}
           onOpenPdf={() => fileInputRef.current?.click()}
-          onDropPdf={(file) => openFile(file)}
         />
         {session > 0 && (
           <main
             ref={workspaceRef}
-            className={`workspace${narrow ? " narrow" : ""}${immersive ? " immersive" : ""}${screen === "library" ? " is-hidden" : ""}`}
+            className={`workspace${narrow ? " narrow" : ""}${immersive ? " immersive" : ""}${screen !== "reader" ? " is-hidden" : ""}`}
             tabIndex={-1}
-            inert={screen === "library"}
-            aria-hidden={screen === "library"}
-            onDragOver={(event) => event.preventDefault()}
-            onDrop={(event) => {
-              event.preventDefault();
-              const file = event.dataTransfer.files?.[0];
-              if (file) openFile(file);
-            }}
+            inert={screen !== "reader"}
+            aria-hidden={screen !== "reader"}
           >
             {immersive && (
               <button
@@ -3840,8 +3957,6 @@ export function Reader() {
             </button>
           </nav>
         )}
-
-        {!narrow && <LayoutSwitch mode={paneMode} ratio={splitRatio} onChange={changeLayout} />}
 
         <div className={`workspace-panes${singlePane ? " single" : ""}`} style={panesStyle}>
 
@@ -4034,7 +4149,7 @@ export function Reader() {
                   onStopAll={stopAllTranslation}
                   aiStatus={ai.state === "ready" ? ai.snapshot.status : null}
                   aiStatusError={ai.state === "error" ? ai.error : null}
-                  onConfigureAi={() => setSettingsOpen(true)}
+                  onConfigureAi={openSettings}
                   onRetryAiStatus={() => void refreshAiStatus(true)}
                 />
               ) : (
@@ -4058,7 +4173,7 @@ export function Reader() {
                     disabled={pageNavDisabled || atFirstPage}
                     onClick={() => turnPage("prev")}
                   >
-                    ‹
+                    <ChevronLeftIcon />
                   </button>
                   <strong>
                     {isEpubDocument
@@ -4081,7 +4196,7 @@ export function Reader() {
                     disabled={pageNavDisabled || atLastPage}
                     onClick={() => turnPage("next")}
                   >
-                    ›
+                    <ChevronRightIcon />
                   </button>
                   <span className="muted">
                     {isEpubDocument && epubChapter ? epubChapter : null}
@@ -4141,10 +4256,12 @@ export function Reader() {
                     title={canRegenerate ? t.page.regenerateHint : undefined}
                     onClick={() => void translateCurrent(canRegenerate)}
                   >
+                    <SparklesIcon size={16} />
                     {translateLabel}
                   </button>
                   <button
                     type="button"
+                    className="ghost"
                     onClick={() => {
                       setExportError(null);
                       setExportOpen(true);
@@ -4155,6 +4272,7 @@ export function Reader() {
                   </button>
                   <button
                     type="button"
+                    className="ghost"
                     onClick={() => setDetailsOpen(true)}
                     disabled={!hasDetails}
                   >
@@ -4313,7 +4431,7 @@ export function Reader() {
                           )}
                           <div className="inline-actions">
                             {currentTask.error && AI_SETTINGS_CODES[currentTask.error.code] === true && (
-                              <button type="button" onClick={() => setSettingsOpen(true)}>
+                              <button type="button" onClick={openSettings}>
                                 {t.ai.openSettings}
                               </button>
                             )}
@@ -4465,7 +4583,27 @@ export function Reader() {
         </div>
       </main>
         )}
+        <SettingsPage
+          active={screen === "settings"}
+          onClose={closeSettings}
+          onSnapshotChange={showAiSnapshot}
+          uiLocale={locale}
+          onApplyUiLocale={applyUiLocale}
+          themePreference={themePreference}
+          onApplyTheme={applyTheme}
+          localeApplyBlockedReason={localeApplyBlockedReason}
+          dataDirectory={library.dataDirectory}
+        />
       </div>
+      </div>
+
+      {dragging && (
+        <div className="drop-overlay" aria-hidden="true">
+          <UploadIcon size={36} />
+          <span>{t.appBar.dropToOpen}</span>
+          <span className="muted">{t.appBar.dropHint}</span>
+        </div>
+      )}
 
       <ModalDialog
         open={exportOpen}
@@ -4528,7 +4666,11 @@ export function Reader() {
           onOpenOutlinePage={openOutlinePage}
           aiStatus={ai.state === "ready" ? ai.snapshot.status : null}
           aiStatusError={ai.state === "error" ? ai.error : null}
-          onConfigureAi={() => setSettingsOpen(true)}
+          onConfigureAi={() => {
+            // The modal would leave Settings inert behind it.
+            setPdfExportOpen(false);
+            openSettings();
+          }}
           onRetryAiStatus={() => void refreshAiStatus(true)}
         />
       )}
@@ -4541,8 +4683,14 @@ export function Reader() {
       >
         <div className="dialog-heading">
           <h2>{t.page.details}</h2>
-          <button type="button" onClick={() => setDetailsOpen(false)}>
-            {t.common.close}
+          <button
+            type="button"
+            className="icon-button ghost"
+            aria-label={t.common.close}
+            title={t.common.close}
+            onClick={() => setDetailsOpen(false)}
+          >
+            <CloseIcon />
           </button>
         </div>
         {savedRecord && (
@@ -4560,18 +4708,6 @@ export function Reader() {
         {detailsTask && <TypstRepairPanel task={detailsTask} />}
       </ModalDialog>
 
-      <SettingsDialog
-        open={settingsOpen}
-        onClose={() => {
-          setSettingsOpen(false);
-          void refreshAiStatus(false);
-        }}
-        onSnapshotChange={showAiSnapshot}
-        uiLocale={locale}
-        onApplyUiLocale={applyUiLocale}
-        localeApplyBlockedReason={localeApplyBlockedReason}
-        dataDirectory={library.dataDirectory}
-      />
 
       <ConfirmDialog options={askState} onSettle={settleAsk} />
     </div>

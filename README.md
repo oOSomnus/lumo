@@ -1,12 +1,14 @@
 <h1 align="center"><img src="docs/assets/lumo-readme.png" alt="Lumo" width="640"></h1>
 
-A local PDF and EPUB reader that translates pages with a vision model. Each translated page becomes a standalone Typst document, saved and rendered in the app; one that does not compile locally goes back to the model until it does. Translations of a PDF can be exported as one PDF, alone or after each original page. Reading runs on your computer and opens in your browser. [How translation works](docs/manual.md#overview)
+A local PDF and EPUB reader that translates pages with a vision model. Each translated page becomes a standalone Typst document, saved and rendered in the app; one that does not compile locally goes back to the model until it does. Translations of a PDF can be exported as one PDF, alone or after each original page. Reading runs on your computer and opens in your browser, with a searchable library and a light, dark, sepia or night theme. [How translation works](docs/manual.md#overview)
 
 English · [简体中文](README.zh-CN.md)
 
-![Lumo translating a textbook page from English to Simplified Chinese: Typst source streams in, then the saved preview appears beside the original page](docs/assets/page-generation-demo.gif)
+![Lumo in the Sepia (warm paper) theme: a textbook page is opened from the library and translated from English to Simplified Chinese; Typst source streams in, then the saved preview appears beside the original page and is read on its own at 150% and in immersive reading](docs/assets/page-generation-demo.gif)
 
-Demo page: p. 248 of [*Introductory Statistics*](https://openstax.org/details/books/introductory-statistics) (OpenStax, CC BY 4.0). Recording and translation notes are in the [manual](docs/manual.md#overview).
+The translation shown is the one GPT-6.1 Sol produced for this page. For the recording, a local stand-in server replays it, so no AI service was called and the generation is sped up; the animation shows no real latency.
+
+The page is p. 248 of [*Introductory Statistics*](https://openstax.org/details/books/introductory-statistics) by Barbara Illowsky and Susan Dean (OpenStax, © 2018 Rice University), licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) and not covered by this project's MIT license: a [single-page excerpt](docs/assets/page-generation-demo.pdf) with an added attribution footer. The translation is not endorsed by the authors or OpenStax.
 
 ## Install
 
@@ -19,7 +21,7 @@ Download the file for your system from the [latest release](https://github.com/o
 | macOS Intel / Apple silicon | `lumo-v<version>-macos-x64.dmg` / `lumo-v<version>-macos-arm64.dmg` | macOS 13 or newer |
 | Linux x64 / ARM64 | `lumo-v<version>-linux-<arch>.deb`, `.rpm` or `.AppImage` | A desktop session, a default web browser and WebKitGTK 4.1 (Ubuntu 22.04, Debian 12 or newer) |
 
-Per-system steps and what to do when the system warns about an unsigned build: [docs/manual.md#install](docs/manual.md#install). Windows, macOS and AppImage builds check the signed release feed at startup and daily; a download starts only when you choose **Download update**, and installation only after **Restart and install**. deb and rpm builds open the release download page. [docs/manual.md#desktop-app-and-standalone-server](docs/manual.md#desktop-app-and-standalone-server)
+Per-system steps, updates, and what to do when the system warns about an unsigned build: [docs/manual.md#install](docs/manual.md#install).
 
 ## Run from source
 
@@ -31,9 +33,7 @@ bun run dev          # builds the server and opens the desktop window
 bun run dev:server   # server only; no Rust needed
 ```
 
-`bun run dev:server` prints a URL containing an access code, for example `http://127.0.0.1:12345/?token=...`. The server listens on `127.0.0.1` only, so open that URL in a browser on the same machine. In **Settings** (the first **Translate** press opens it for you), pick a model that accepts image input, then add an API key or sign in with OAuth. First-run downloads and other build details: [docs/manual.md#build-from-source](docs/manual.md#build-from-source).
-
-A library from the previous version must be upgraded once before it opens: press **Upgrade library** in the desktop window, or start the server with `bun run dev:server -- --upgrade-database`. A full copy of the old database is kept next to it; see [data and security](docs/manual.md#data-and-security).
+`bun run dev:server` prints a URL containing an access code, for example `http://127.0.0.1:12345/?token=...`. The server listens on `127.0.0.1` only, so open that URL in a browser on the same machine. In **Settings** (the first **Translate** press opens it for you), pick a model that accepts image input, then add an API key or sign in with OAuth. What the first run downloads: [docs/manual.md#build-from-source](docs/manual.md#build-from-source). A library from the previous version of Lumo has to be upgraded once: [docs/manual.md#data-and-security](docs/manual.md#data-and-security).
 
 ## Documentation
 
@@ -49,11 +49,12 @@ bun test
 bun run build                                   # installer for this machine, in src-tauri/target/<triple>/release/bundle/
 cargo test --locked --manifest-path src-tauri/Cargo.toml   # after a build
 bun scripts/smoke-desktop.ts                    # runs the built server the way the window does
+bun run test:e2e -- --project=source            # Playwright end-to-end tests
 ```
 
-`bun run build --target <triple>` builds another architecture of the same OS; `bun run build:server` builds only the standalone server in `dist/sidecar/`. Pull requests and pushes to `main` run the typecheck, unit tests and the standalone server's smoke and end-to-end tests on Linux. A `v*` tag builds all six targets (Windows, macOS, Linux × x64, ARM64) on native runners and drafts a release; the Desktop builds workflow can also be run by hand for an unsigned build of all six. See `.github/workflows/`.
+`bun run build --target <triple>` builds another architecture of the same OS; `bun run build:server` builds only the standalone server in `dist/sidecar/`. The end-to-end tests need Node and `bunx playwright install chromium`; `--project=standalone` runs them against the server from `bun run build:server`. Pull requests and pushes to `main` run, on Linux, the typecheck, the unit tests, the standalone server's smoke test, and the library and EPUB end-to-end tests in both projects. A `v*` tag builds all six targets (Windows, macOS, Linux × x64, ARM64) on native runners and drafts a release; the Desktop builds workflow can also be run by hand for an unsigned build of all six. See `.github/workflows/`.
 
-A release build with in-app updates needs `LUMO_UPDATER_PUBLIC_KEY`, `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` in its environment. A partial set fails the build. The private key and password are build secrets; never commit them or expose them to the launcher panel.
+A release build with in-app updates needs `LUMO_UPDATER_PUBLIC_KEY`, `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` in its environment. Windows and macOS code signing take their own sets, listed in `scripts/signing.ts`. A partial set fails the build. Private keys, certificates and passwords are build secrets; never commit them or expose them to the launcher panel.
 
 Source layout and invariants: [AGENTS.md](AGENTS.md).
 

@@ -338,7 +338,6 @@ describe("readerViewSchema", () => {
     fontSize: 18,
     fontFamily: "serif" as const,
     lineHeight: 1.6 as const,
-    theme: "light" as const,
   };
 
   test("keeps EPUB CFI views separate from PDF views", () => {
@@ -385,13 +384,14 @@ describe("readerViewSchema", () => {
       { fontSize: 18.5 },
       { fontFamily: "monospace" },
       { lineHeight: 1.5 },
-      { theme: "blue" },
+      // The colour theme is the app's, never stored with a book.
+      { theme: "dark" },
     ]) {
       expect(() => readerViewSchema.parse({ ...epubView, ...bad })).toThrow();
     }
     expect(
-      readerViewSchema.parse({ ...epubView, fontSize: 36, fontFamily: "sans-serif", lineHeight: 2, theme: "dark" }),
-    ).toMatchObject({ fontSize: 36, theme: "dark" });
+      readerViewSchema.parse({ ...epubView, fontSize: 36, fontFamily: "sans-serif", lineHeight: 2 }),
+    ).toMatchObject({ fontSize: 36, lineHeight: 2 });
   });
 });
 

@@ -1,4 +1,5 @@
 import { useI18n } from "../i18n";
+import { ChevronLeftIcon, ChevronRightIcon } from "../icons";
 import type { PageStep } from "../page-keys";
 
 interface ImmersivePageNavProps {
@@ -43,7 +44,7 @@ export function ImmersivePageNav({
         onPointerEnter={() => onHold(true)}
         onPointerLeave={() => onHold(false)}
       >
-        {direction === "next" ? "›" : "‹"}
+        {direction === "next" ? <ChevronRightIcon size={24} /> : <ChevronLeftIcon size={24} />}
       </button>
     );
   };

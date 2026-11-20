@@ -270,7 +270,7 @@ test("an unreadable PDF shows a placeholder and can be deleted", async ({
     .click();
 
   await expect(
-    library.getByText("The library is empty. Open a PDF or EPUB to start."),
+    library.getByRole("heading", { name: "Your library is empty" }),
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Return to reading", exact: true }),

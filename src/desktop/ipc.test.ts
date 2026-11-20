@@ -10,6 +10,7 @@ function snapshot(overrides: Partial<LauncherSnapshot>): LauncherSnapshot {
     webUiUrl: null,
     dataDirectory: null,
     uiLocale: null,
+    theme: null,
     failureCode: null,
     canRetry: false,
     canUpgrade: false,
