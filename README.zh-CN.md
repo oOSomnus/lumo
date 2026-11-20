@@ -4,7 +4,7 @@
 
 [English](README.md) · 简体中文
 
-![Lumo 把教材中的一页从英文翻译为简体中文：Typst 源码流式生成，随后在原页旁显示已保存的预览](docs/assets/page-generation-demo.gif)
+![Lumo 使用护眼（暖色纸张）主题：从书库打开教材，把其中一页从英文翻译为简体中文；Typst 源码流式生成，随后在原页旁显示已保存的预览，再以 150% 单独查看译文并进入沉浸阅读](docs/assets/page-generation-demo.gif)
 
 示例页为 [*Introductory Statistics*](https://openstax.org/details/books/introductory-statistics) 第 248 页（OpenStax，CC BY 4.0）。录制与译文说明见[手册](docs/manual.zh-CN.md#概述)。
 

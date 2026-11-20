@@ -4,7 +4,7 @@ A local PDF and EPUB reader that translates pages with a vision model. Each tran
 
 English · [简体中文](README.zh-CN.md)
 
-![Lumo translating a textbook page from English to Simplified Chinese: Typst source streams in, then the saved preview appears beside the original page](docs/assets/page-generation-demo.gif)
+![Lumo in the Sepia (warm paper) theme: a textbook page is opened from the library and translated from English to Simplified Chinese; Typst source streams in, then the saved preview appears beside the original page and is read on its own at 150% and in immersive reading](docs/assets/page-generation-demo.gif)
 
 Demo page: p. 248 of [*Introductory Statistics*](https://openstax.org/details/books/introductory-statistics) (OpenStax, CC BY 4.0). Recording and translation notes are in the [manual](docs/manual.md#overview).
 
