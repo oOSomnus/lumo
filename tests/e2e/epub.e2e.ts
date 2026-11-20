@@ -1059,24 +1059,20 @@ test("EPUB 'Untranslated sections' counts the pages of the current layout, not t
   await larger.click();
   await larger.click();
   await expect(page.locator(".epub-settings output")).toHaveText("22 px");
-  // Each click reflows the book, so wait until the count is past the old one and holds still: a count
-  // read between the two reflows would undercount the pages the batch will see.
-  await expect
-    .poll(async () => {
-      const first = (await readPosition(page)).pages;
-      await page.waitForTimeout(500);
-      return first > before.pages && first === (await readPosition(page)).pages;
-    })
-    .toBe(true);
-  const after = await readPosition(page);
+  await expect.poll(async () => (await readPosition(page)).pages).toBeGreaterThan(before.pages);
 
   await page.getByRole("button", { name: "Untranslated sections", exact: true }).click();
   const start = page.getByRole("button", { name: /^Start translation/ });
   await expect(start).toHaveText("Start translation (1 section)", { timeout: 30_000 });
   await start.click();
 
+  // Each click reflows the book, and nothing marks the last reflow done, so the page count is read only
+  // once the batch has finished: a count read between the two reflows would be too small.
+  await expect.poll(() => requests.length, { timeout: 90_000 }).toBeGreaterThan(before.pages + 1);
+  await expect(page.getByRole("button", { name: "Stop all", exact: true })).toBeHidden({ timeout: 90_000 });
+  const after = await readPosition(page);
   const total = before.pages + 1 + after.pages;
-  await expect.poll(() => requests.length, { timeout: 90_000 }).toBe(total);
+  expect(requests.length).toBe(total);
   await expect
     .poll(async () => (await savedLocations(lumo.api, document.id)).length, { timeout: 90_000 })
     .toBe(total);
