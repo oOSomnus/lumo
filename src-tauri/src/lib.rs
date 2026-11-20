@@ -15,7 +15,7 @@ use tauri_plugin_shell::ShellExt;
 
 use launcher::{
     take_run, Level, LineOutcome, Phase, Snapshot, State, StopPlan, StopPurpose, Termination,
-    SHUTDOWN_COMMAND, SHUTDOWN_TIMEOUT_SECS, STARTUP_TIMEOUT_SECS,
+    SHUTDOWN_COMMAND, SHUTDOWN_TIMEOUT_SECS, STARTUP_TIMEOUT_SECS, UPGRADE_DATABASE_ARG,
 };
 
 const STATE_EVENT: &str = "launcher-state";
@@ -104,14 +104,26 @@ fn handle_stdout(app: &AppHandle, generation: u64, bytes: &[u8]) {
     }
 }
 
-fn start_server(app: &AppHandle) {
-    let Some(generation) = update(app, |state| state.begin_start()) else {
+fn start_server(app: &AppHandle, upgrade: bool) {
+    let begun = update(app, |state| {
+        if upgrade {
+            state.begin_upgrade()
+        } else {
+            state.begin_start()
+        }
+    });
+    let Some(generation) = begun else {
         return;
+    };
+    let args: &[&str] = if upgrade {
+        &["--desktop", UPGRADE_DATABASE_ARG]
+    } else {
+        &["--desktop"]
     };
 
     let spawned = app.shell().sidecar("lumo-server").and_then(|command| {
         command
-            .args(["--desktop"])
+            .args(args)
             .set_process_group(true)
             .kill_on_drop(true)
             .spawn()
@@ -246,7 +258,13 @@ fn copy_webui_url(app: AppHandle) {
 #[tauri::command]
 fn retry_start(app: AppHandle) {
     // A refusal or a missing sidecar is launcher state, shown by the next snapshot.
-    start_server(&app);
+    start_server(&app, false);
+}
+
+#[tauri::command]
+fn upgrade_reader_database(app: AppHandle) {
+    // The user pressed Upgrade after the server reported the previous schema; refused otherwise.
+    start_server(&app, true);
 }
 
 #[tauri::command]
@@ -278,6 +296,7 @@ pub fn run() {
             open_webui,
             copy_webui_url,
             retry_start,
+            upgrade_reader_database,
             confirm_exit,
             updater::check_updates,
             updater::download_update,
@@ -292,7 +311,7 @@ pub fn run() {
         })
         .setup(|app| {
             // A failed start is shown in the panel with a retry button, not fatal here.
-            start_server(app.handle());
+            start_server(app.handle(), false);
             updater::initialize(app.handle());
             Ok(())
         })

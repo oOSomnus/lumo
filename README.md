@@ -33,6 +33,8 @@ bun run dev:server   # server only; no Rust needed
 
 `bun run dev:server` prints a URL containing an access code, for example `http://127.0.0.1:12345/?token=...`. The server listens on `127.0.0.1` only, so open that URL in a browser on the same machine. In **Settings** (the first **Translate** press opens it for you), pick a model that accepts image input, then add an API key or sign in with OAuth. First-run downloads and other build details: [docs/manual.md#build-from-source](docs/manual.md#build-from-source).
 
+A library from the previous version must be upgraded once before it opens: press **Upgrade library** in the desktop window, or start the server with `bun run dev:server -- --upgrade-database`. A full copy of the old database is kept next to it; see [data and security](docs/manual.md#data-and-security).
+
 ## Documentation
 
 [docs/manual.md](docs/manual.md) covers [install](docs/manual.md#install), [settings and credentials](docs/manual.md#settings), [reading and translation](docs/manual.md#reading-and-translation), the [desktop app and standalone server](docs/manual.md#desktop-app-and-standalone-server), [building from source](docs/manual.md#build-from-source) and [data and security](docs/manual.md#data-and-security).

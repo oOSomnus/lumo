@@ -33,6 +33,8 @@ bun run dev:server   # 仅运行服务，不需要 Rust
 
 `bun run dev:server` 会打印带访问码的地址，例如 `http://127.0.0.1:12345/?token=...`。服务只监听 `127.0.0.1`，请在同一台机器的浏览器中打开该地址。在“设置”中（第一次点击“翻译”时会自动为你打开）选择支持图像输入的模型，再配置 API key 或 OAuth 登录。首次运行的下载与其他构建细节：[docs/manual.zh-CN.md#从源码构建](docs/manual.zh-CN.md#从源码构建)。
 
+上一版本的书库需要先升级一次才能打开：在桌面窗口点击“升级书库”，或用 `bun run dev:server -- --upgrade-database` 启动服务。旧数据库的完整副本会保留在它旁边；详见[数据与安全](docs/manual.zh-CN.md#数据与安全)。
+
 ## 文档
 
 [docs/manual.zh-CN.md](docs/manual.zh-CN.md) 涵盖[安装](docs/manual.zh-CN.md#安装)、[设置与凭证](docs/manual.zh-CN.md#设置)、[阅读与翻译](docs/manual.zh-CN.md#阅读与翻译)、[桌面应用与独立服务](docs/manual.zh-CN.md#桌面应用与独立服务)、[从源码构建](docs/manual.zh-CN.md#从源码构建)和[数据与安全](docs/manual.zh-CN.md#数据与安全)。

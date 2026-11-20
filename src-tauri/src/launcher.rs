@@ -19,6 +19,7 @@ const ACCESS_LINE_PREFIX: &str = "Open in your browser: ";
 
 const SERVER_LOG_CODES: &[&str] = &[
     "starting",
+    "reader_upgraded",
     "reader_ready",
     "assets_ready",
     "credentials_ready",
@@ -27,12 +28,17 @@ const SERVER_LOG_CODES: &[&str] = &[
 const SERVER_FAILURE_CODES: &[&str] = &[
     "DATA_DIRECTORY_INVALID",
     "READER_DATABASE_FAILED",
+    UPGRADE_REQUIRED_CODE,
     "PDFJS_ASSETS_FAILED",
     "TYPST_ASSETS_FAILED",
     "CREDENTIALS_DATABASE_FAILED",
     "SERVER_LISTEN_FAILED",
     "CONTROL_PROTOCOL_INVALID",
 ];
+/// The reader database uses the previous schema; only the user may agree to upgrade it.
+const UPGRADE_REQUIRED_CODE: &str = "READER_DATABASE_UPGRADE_REQUIRED";
+/// The server argument that carries that agreement.
+pub const UPGRADE_DATABASE_ARG: &str = "--upgrade-database";
 const UI_LOCALES: &[&str] = &["en", "zh-CN"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -223,6 +229,7 @@ pub struct Snapshot {
     pub ui_locale: Option<&'static str>,
     pub failure_code: Option<&'static str>,
     pub can_retry: bool,
+    pub can_upgrade: bool,
     pub update: LauncherUpdateState,
     pub logs: Vec<LogEntry>,
 }
@@ -394,6 +401,7 @@ impl State {
             ui_locale: self.ui_locale,
             failure_code: self.failure_code,
             can_retry: self.can_retry(),
+            can_upgrade: self.can_upgrade(),
             update: self.update.snapshot(self.version),
             logs: self.logs.iter().cloned().collect(),
         }
@@ -405,6 +413,10 @@ impl State {
 
     fn can_retry(&self) -> bool {
         self.phase == Phase::Failed && !self.process_alive
+    }
+
+    fn can_upgrade(&self) -> bool {
+        self.can_retry() && self.failure_code == Some(UPGRADE_REQUIRED_CODE)
     }
 
     /// The full link, only while the server is running.
@@ -446,6 +458,15 @@ impl State {
         self.stop_confirmed = false;
         self.revision += 1;
         Some(self.generation)
+    }
+
+    /// Starts a run that upgrades the reader database, only after the server asked for that
+    /// agreement and its process has ended.
+    pub fn begin_upgrade(&mut self) -> Option<u64> {
+        if !self.can_upgrade() {
+            return None;
+        }
+        self.begin_start()
     }
 
     /// The process could not be spawned at all.
@@ -934,6 +955,37 @@ mod tests {
         assert_eq!(state.phase(), Phase::Starting);
         assert!(state.snapshot().failure_code.is_none());
         assert!(state.begin_start().is_none(), "second retry while the new run is alive");
+    }
+
+    #[test]
+    fn an_upgrade_is_offered_only_after_the_server_asked_for_it_and_ended() {
+        let (mut state, generation) = started();
+        assert!(state.begin_upgrade().is_none(), "nothing to upgrade while starting");
+        state.on_line(1, generation, r#"{"type":"log","code":"reader_upgraded"}"#);
+        assert_eq!(state.phase(), Phase::Starting);
+
+        state.on_line(
+            2,
+            generation,
+            r#"{"type":"failed","code":"READER_DATABASE_UPGRADE_REQUIRED"}"#,
+        );
+        assert_eq!(state.snapshot().failure_code, Some("READER_DATABASE_UPGRADE_REQUIRED"));
+        assert!(!state.snapshot().can_upgrade, "process may still be exiting");
+        assert!(state.begin_upgrade().is_none());
+
+        state.on_terminated(3, generation, false);
+        assert!(state.snapshot().can_upgrade);
+        let upgrade = state.begin_upgrade().expect("upgrade after the process ended");
+        assert_eq!(upgrade, generation + 1);
+        assert!(!state.snapshot().can_upgrade);
+        assert!(state.begin_upgrade().is_none(), "no second run while the upgrade runs");
+
+        let (mut state, generation) = started();
+        state.on_line(1, generation, r#"{"type":"failed","code":"READER_DATABASE_FAILED"}"#);
+        state.on_terminated(2, generation, false);
+        assert!(state.snapshot().can_retry);
+        assert!(!state.snapshot().can_upgrade, "other failures are never upgraded");
+        assert!(state.begin_upgrade().is_none());
     }
 
     #[test]

@@ -227,8 +227,6 @@ export const translationSaveInputSchema = translationContentSchema.extend({
 export type TranslationSaveInput = z.infer<typeof translationSaveInputSchema>;
 
 export const MAX_OUTLINE_ENTRIES = 10_000;
-export const MAX_OUTLINE_HEADINGS_PER_PAGE = 128;
-export const MAX_OUTLINE_PREVIOUS_HEADINGS = 32;
 export const MAX_OUTLINE_TITLE_CHARS = 500;
 export const MAX_OUTLINE_LEVEL = 10_000;
 
@@ -246,14 +244,9 @@ const outlineLevelSchema = z
   .min(1)
   .max(MAX_OUTLINE_LEVEL);
 
-export const outlineHeadingSchema = z.strictObject({
+export const outlineEntrySchema = z.strictObject({
   title: outlineTitleSchema,
   level: outlineLevelSchema,
-});
-
-export type OutlineHeading = z.infer<typeof outlineHeadingSchema>;
-
-export const outlineEntrySchema = outlineHeadingSchema.extend({
   pageNumber: pageNumberSchema,
 });
 
@@ -291,35 +284,6 @@ export const outlineEntriesSchema = z
       }
     }
   });
-
-const outlinePageContentSchema = translatePdfPageInputSchema.pick({
-  text: true,
-  imageBase64: true,
-});
-
-export const outlinePageInputSchema = outlinePageContentSchema
-  .extend({
-    documentId: documentIdSchema,
-    pageNumber: pageNumberSchema,
-    previousHeadings: z
-      .array(outlineEntrySchema)
-      .max(MAX_OUTLINE_PREVIOUS_HEADINGS),
-  })
-  .refine(
-    (value) =>
-      value.previousHeadings.every(
-        (heading) => heading.pageNumber <= value.pageNumber,
-      ),
-    "previous headings must not be after the current page",
-  );
-
-export type OutlinePageInput = z.infer<typeof outlinePageInputSchema>;
-
-export const outlinePageResultSchema = z.strictObject({
-  headings: z.array(outlineHeadingSchema).max(MAX_OUTLINE_HEADINGS_PER_PAGE),
-});
-
-export type OutlinePageResult = z.infer<typeof outlinePageResultSchema>;
 
 export const readerUpdateSchema = z
   .strictObject({

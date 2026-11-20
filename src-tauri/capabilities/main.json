@@ -8,6 +8,7 @@
     "allow-open-webui",
     "allow-copy-webui-url",
     "allow-retry-start",
+    "allow-upgrade-reader-database",
     "allow-confirm-exit",
     "allow-check-updates",
     "allow-download-update",

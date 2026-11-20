@@ -18,17 +18,17 @@ export interface OutlineRow {
 
 export interface DocumentOutlineState {
   entries: OutlineEntry[];
-  source: "native" | "generated" | null;
+  /** An imported outline replaces the PDF's own one until it is removed. */
+  source: "native" | "imported" | null;
   loadStatus: "loading" | "ready" | "error";
-  stage: "idle" | "generating" | "saving" | "unsaved";
-  processedPages: number;
+  stage: "idle" | "saving";
   skipped: number;
   error: UiError | null;
 }
 
 export class OutlineError extends Error {
   constructor(
-    readonly code: "OUTLINE_INVALID" | "OUTLINE_EMPTY",
+    readonly code: "OUTLINE_INVALID",
     message: string,
     readonly params?: Record<string, string | number>,
   ) {
@@ -43,7 +43,6 @@ export function emptyOutlineState(): DocumentOutlineState {
     source: null,
     loadStatus: "loading",
     stage: "idle",
-    processedPages: 0,
     skipped: 0,
     error: null,
   };

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-upgrade-reader-database"
+description = "Enables the upgrade_reader_database command without any pre-configured scope."
+commands.allow = ["upgrade_reader_database"]
+
+[[permission]]
+identifier = "deny-upgrade-reader-database"
+description = "Denies the upgrade_reader_database command without any pre-configured scope."
+commands.deny = ["upgrade_reader_database"]

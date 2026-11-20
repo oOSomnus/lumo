@@ -25,6 +25,7 @@ export const launcher = {
   open: () => invoke<void>("open_webui"),
   copy: () => invoke<void>("copy_webui_url"),
   retry: () => invoke<void>("retry_start"),
+  upgrade: () => invoke<void>("upgrade_reader_database"),
   quit: () => invoke<void>("confirm_exit"),
   checkUpdates: () => invoke<void>("check_updates"),
   downloadUpdate: () => invoke<void>("download_update"),

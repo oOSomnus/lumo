@@ -6,6 +6,7 @@ fn main() {
         "open_webui",
         "copy_webui_url",
         "retry_start",
+        "upgrade_reader_database",
         "confirm_exit",
         "check_updates",
         "download_update",

@@ -1117,6 +1117,36 @@ input:not([type]) {
   color: var(--muted);
 }
 
+.outline-meta .inline-actions {
+  margin-top: 0;
+}
+
+.outline-import h4 {
+  margin: 0 0 4px;
+  font-size: 13px;
+}
+
+.outline-import p {
+  margin: 4px 0;
+  font-size: 12px;
+}
+
+.outline-import ul {
+  margin: 4px 0;
+  padding-inline-start: 18px;
+  font-size: 12px;
+}
+
+.outline-import-text {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 8px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  white-space: pre;
+}
+
 .outline-note {
   margin: 8px 0 0;
   color: var(--muted);

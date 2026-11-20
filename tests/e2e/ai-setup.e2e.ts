@@ -11,7 +11,7 @@ function watchModelCalls(page: Page): string[] {
   const calls: string[] = [];
   page.on("request", (request) => {
     const path = new URL(request.url()).pathname;
-    if (path === "/api/translate" || path === "/api/outline-page") calls.push(path);
+    if (path === "/api/translate") calls.push(path);
   });
   return calls;
 }

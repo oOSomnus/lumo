@@ -784,6 +784,59 @@ test("The PDF batch summary counts selected, skipped and to-translate pages, and
   await expect(panel.getByRole("button", { name: "Stop all", exact: true })).toHaveCount(0);
 });
 
+test("An imported outline is checked line by line, saved, used for selection, kept across reloads and removed", async ({
+  page,
+  lumo,
+}) => {
+  const stored = await uploadPdf(lumo.api, "imported-outline.pdf", 4, "outline");
+  await openTranslatedPage(page, lumo.url, "imported-outline.pdf");
+  await expect(page.frameLocator("iframe.pdf-frame").locator("#pageNumber")).toHaveAttribute("max", "4");
+  await page.getByRole("tab", { name: "Batch translation" }).click();
+  const panel = page.locator(".batch-panel");
+  await panel.getByRole("radio", { name: "By outline" }).check();
+  await expect(panel).toContainText("This PDF has no outline.");
+  await panel.getByRole("button", { name: "Import outline…" }).click();
+
+  const text = panel.getByRole("textbox", { name: "Outline text" });
+  const save = panel.getByRole("button", { name: "Save outline" });
+  await text.fill("# Part One  1\nnot a heading\n## Chapter  9");
+  await expect(panel).toContainText("Line 2: not a heading; start the line with #.");
+  await expect(panel).toContainText("Line 3: the page is outside this PDF.");
+  await expect(save).toBeDisabled();
+
+  await text.fill("```\n# Part One  1\n## Chapter A ..... 2\n# Part Two  3\n```");
+  await expect(panel).toContainText("3 headings · pages 1–3");
+  await save.click();
+  await expect(panel).toContainText("Imported outline");
+  await expect(panel.getByRole("button", { name: "Chapter A" })).toBeVisible();
+  const savedOutline = await (await lumo.api.get(`/api/documents/${stored.id}/outline`)).json();
+  expect(savedOutline.outline).toEqual([
+    { title: "Part One", level: 1, pageNumber: 1 },
+    { title: "Chapter A", level: 2, pageNumber: 2 },
+    { title: "Part Two", level: 1, pageNumber: 3 },
+  ]);
+
+  // Ticking a part selects its whole page range.
+  await panel.getByRole("checkbox", { name: "Select pages 3–4" }).check();
+  await panel.getByRole("radio", { name: "By page numbers" }).check();
+  await expect(panel).toContainText("2 selected");
+
+  await page.reload();
+  await openFromLibrary(page, "imported-outline.pdf");
+  await page.getByRole("tab", { name: "Batch translation" }).click();
+  await panel.getByRole("radio", { name: "By outline" }).check();
+  await expect(panel).toContainText("Imported outline");
+
+  // Editing starts from the saved outline.
+  await panel.getByRole("button", { name: "Edit outline…" }).click();
+  await expect(text).toHaveValue("# Part One  1\n## Chapter A  2\n# Part Two  3");
+  await panel.getByRole("button", { name: "Cancel", exact: true }).click();
+
+  await panel.getByRole("button", { name: "Remove imported outline" }).click();
+  await expect(panel).toContainText("This PDF has no outline.");
+  expect((await (await lumo.api.get(`/api/documents/${stored.id}/outline`)).json()).outline).toBeNull();
+});
+
 test("A draft that could not be saved is retried without the AI, and sending it back to the model asks for the setup first", async ({
   page,
   lumo,

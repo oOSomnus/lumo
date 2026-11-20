@@ -112,6 +112,9 @@ describe("handleLibrary", () => {
     };
     expect(document.format).toBe("epub");
     expect(document.pageCount).toBe(1);
+    await expect(
+      call(ctx, `/api/documents/${document.id}/outline`),
+    ).rejects.toMatchObject({ status: 400, code: "INVALID_REQUEST" });
 
     const file = await call(ctx, `/api/documents/${document.id}/file`);
     expect(file.headers.get("content-type")).toBe("application/epub+zip");
@@ -526,7 +529,7 @@ describe("handleLibrary", () => {
   });
 });
 
-describe("generated outline route", () => {
+describe("imported outline route", () => {
   const outline = [
     { title: "A", level: 1, pageNumber: 1 },
     { title: "A.1", level: 2, pageNumber: 2 },
@@ -576,11 +579,22 @@ describe("generated outline route", () => {
     ).toEqual({ outline });
 
     await expect(
-      call(ctx, `/api/documents/${document.id}/outline`, { method: "DELETE" }),
+      call(ctx, `/api/documents/${document.id}/outline`, { method: "POST" }),
     ).rejects.toMatchObject({ status: 405, code: "METHOD_NOT_ALLOWED" });
     await expect(
       call(ctx, `/api/documents/${"c".repeat(64)}/outline`),
     ).rejects.toMatchObject({ status: 404, code: "DOCUMENT_NOT_FOUND" });
+    await expect(
+      call(ctx, `/api/documents/${"c".repeat(64)}/outline`, { method: "DELETE" }),
+    ).rejects.toMatchObject({ status: 404, code: "DOCUMENT_NOT_FOUND" });
+
+    const cleared = await call(ctx, `/api/documents/${document.id}/outline`, {
+      method: "DELETE",
+    });
+    expect(await cleared.json()).toEqual({ outline: null });
+    expect(
+      await (await call(ctx, `/api/documents/${document.id}/outline`)).json(),
+    ).toEqual({ outline: null });
 
     await call(ctx, `/api/documents/${document.id}`, { method: "DELETE" });
     await expect(

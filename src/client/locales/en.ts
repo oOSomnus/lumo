@@ -171,8 +171,6 @@ export const en = {
       noPdf: "Open a document first.",
       loading: "The document is still loading.",
       modified: "The PDF has unsaved edits. Save an edited copy or discard them before generating new translations.",
-      outlineBusy:
-        "An outline is being generated or saved. Wait for it to finish before translating.",
       unsavedDraft: "Repair, save or discard the current draft first.",
       locating: "The visible page is still being located.",
       noContent: "This page has no text or image the reader can translate.",
@@ -319,8 +317,6 @@ export const en = {
       "The images of this page are too large to use together.",
     OUTLINE_INVALID: () =>
       "The PDF outline could not be used. Select pages manually.",
-    OUTLINE_EMPTY: () =>
-      "No headings were identified. Select pages manually.",
     UNKNOWN: () => "Something went wrong.",
   } satisfies Record<string, ErrorMessage>,
   confirm: {
@@ -333,8 +329,8 @@ export const en = {
       } not saved`,
     switchModified: "the PDF has unsaved edits",
     switchPreview: "the current PDF is not in the library",
-    switchOutlineActive: "an outline is being generated or saved",
-    switchOutlineUnsaved: "a generated outline is not saved",
+    switchOutlineActive: "an outline is being saved",
+    switchOutlineDraft: "an outline being imported is not saved",
     switchBody: (reasons: string) =>
       `${reasons}. Continuing stops tasks and discards unsaved new text; saved translations are kept.`,
     switchConfirm: "Switch anyway",
@@ -528,7 +524,7 @@ export const en = {
     loadFailed: (detail: string) => `Could not read the outline: ${detail}`,
     reload: "Reload outline",
     sourceNative: "Document outline",
-    sourceGenerated: "AI-generated outline",
+    sourceImported: "Imported outline",
     skipped: (count: number) =>
       `${count} outline item${count === 1 ? "" : "s"} without a page ${
         count === 1 ? "was" : "were"
@@ -536,23 +532,49 @@ export const en = {
     note: "Translation uses whole PDF pages; sections that start on the same page may overlap.",
     noteEpub:
       "Selecting a heading selects its whole sections; headings that point at the same section overlap.",
-    generate: "Generate outline with AI",
-    retryGenerate: "Try again",
-    generateTitle: "Generate an outline with AI?",
-    generateBody: (pages: number) =>
-      `This sends the text and image of each of the ${pages} pages to the configured vision model, one page at a time. It can take a while and may incur charges. Review the generated headings before translating.`,
-    generateConfirm: "Generate outline",
-    disabledActive:
-      "Finish or cancel running translation tasks before generating an outline.",
-    generating: (processed: number, total: number) =>
-      `Identifying headings: page ${processed} / ${total}`,
-    cancelGeneration: "Cancel generation",
+    empty:
+      "This PDF has no outline. Import one, written by hand or by an external AI, to select chapters and sections.",
+    import: "Import outline…",
+    edit: "Edit outline…",
+    remove: "Remove imported outline",
     saving: "Saving the outline…",
-    unsavedTitle: "Outline not saved",
-    unsavedBody:
-      "The generated outline is still in memory and can be used for selection. Retry saving it or discard it.",
-    retrySave: "Retry saving outline",
-    discard: "Discard outline",
+    editor: {
+      title: "Import outline",
+      intro:
+        "One heading per line: # marks the level (## is one level deeper), then the title, then the PDF page where it begins. Page 1 is the first page of the file, not the number printed on it.",
+      replaceNote:
+        "An imported outline replaces the PDF's own outline for selection until you remove it.",
+      copyPrompt: "Copy prompt for an AI",
+      promptCopied:
+        "Prompt copied. Give it to an AI together with this PDF, then paste the reply here.",
+      promptCopyFailed: "Could not copy the prompt.",
+      openFile: "Open file…",
+      fileFailed: "Could not read the file.",
+      textLabel: "Outline text",
+      placeholder: "# Chapter 1  Introduction  5\n## 1.1 Background  7\n# Chapter 2  Methods  21",
+      summary: (count: number, first: number, last: number) =>
+        `${count} heading${count === 1 ? "" : "s"} · ${
+          first === last ? `page ${first}` : `pages ${first}–${last}`
+        }`,
+      problems: "Fix these lines first:",
+      errorAt: (line: number, message: string) =>
+        line === 0 ? message : `Line ${line}: ${message}`,
+      errors: {
+        too_large: "The text is longer than 8 MB.",
+        empty: "There are no headings yet.",
+        not_heading: "not a heading; start the line with #.",
+        missing_page: "the PDF page number is missing at the end.",
+        title_invalid: "the title is empty or longer than 500 characters.",
+        level_too_deep: "too many # marks.",
+        page_out_of_range: "the page is outside this PDF.",
+        page_decreases: "the page is before the previous heading's page.",
+        first_not_level_1: "the first heading must use a single #.",
+        level_skips: "the heading is more than one level deeper than the one before.",
+        too_many: "an outline can have at most 10000 headings.",
+      },
+      save: "Save outline",
+      cancel: "Cancel",
+    },
     pageRange: (start: number, end: number) =>
       start === end ? `Page ${start}` : `Pages ${start}–${end}`,
     toggle: (title: string) => `Expand or collapse ${title}`,
@@ -625,10 +647,8 @@ export const en = {
     languageBlockedModified: "Save an edited copy, export, or discard the PDF edits.",
     languageBlockedPreview: "Add the current PDF to the library first.",
     languageBlockedSaving: "Wait for the edited copy to finish saving.",
-    languageBlockedOutline:
-      "Finish or cancel the outline generation and save or discard the outline first.",
-    languageBlockedOutlineUnsaved:
-      "Retry saving the outline or discard it first.",
+    languageBlockedOutline: "Wait for the outline to finish saving.",
+    languageBlockedOutlineDraft: "Save or cancel the outline import first.",
     languageBlockedAuth: "Finish or cancel the AI sign-in first.",
     languageBlockedDirty: "Save or discard the AI form changes first.",
     aiSection: "AI provider and model",
@@ -744,6 +764,9 @@ export const en = {
     copyNote:
       "The copied link includes this run's access code. Paste it only into a browser on this computer and do not share it.",
     retry: "Retry start",
+    upgrade: "Upgrade library",
+    upgradeNote:
+      "Upgrading changes the library database for this version of Lumo; older versions cannot open it afterwards. A full copy is saved in the data directory first.",
     quit: "Quit Lumo",
     recent: "Recent activity",
     noActivity: "Nothing yet.",
@@ -784,6 +807,7 @@ export const en = {
     },
     logs: {
       starting: "Starting Lumo…",
+      reader_upgraded: "Library database upgraded; the previous copy is kept in the data directory.",
       reader_ready: "Library database opened.",
       assets_ready: "Reader and Typst components are ready.",
       credentials_ready: "Credential store opened.",
@@ -806,6 +830,8 @@ export const en = {
         "The data directory setting is invalid. LUMO_DATA_DIR must be an absolute path.",
       READER_DATABASE_FAILED:
         "Could not open the library database. Check that the data directory is writable and the database is from a supported version.",
+      READER_DATABASE_UPGRADE_REQUIRED:
+        "The library was created by an earlier version of Lumo and must be upgraded before it opens.",
       PDFJS_ASSETS_FAILED:
         "The PDF viewer files are missing or damaged. Reinstall Lumo.",
       TYPST_ASSETS_FAILED:

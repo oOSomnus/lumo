@@ -26,7 +26,9 @@ import {
 } from "../shared/contracts";
 
 export const DB_FILENAME = "reader.sqlite";
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
+/** The one older schema this build can upgrade, and only when the user agrees to it. */
+export const UPGRADABLE_SCHEMA_VERSION = 7;
 
 const BUSINESS_TABLES = [
   "documents",
@@ -78,20 +80,45 @@ function unsupportedVersion(dbPath: string, version: number): Error {
   );
 }
 
+/** The database uses the previous schema; it opens only after the user agrees to upgrade it. */
+export class ReaderUpgradeRequiredError extends Error {
+  constructor(
+    readonly dbPath: string,
+    readonly version: number,
+  ) {
+    super(
+      `database ${dbPath} uses schema version ${version}; this build uses ${SCHEMA_VERSION} and must upgrade it first`,
+    );
+    this.name = "ReaderUpgradeRequiredError";
+  }
+}
+
+export interface OpenReaderDbOptions {
+  /** The user agreed to upgrade a database of the previous schema. */
+  upgrade?: boolean;
+  /** Called once an upgrade committed, with the backup taken before it. */
+  onUpgraded?: (backupPath: string) => void;
+}
+
+function checkVersion(dbPath: string, version: number, upgrade: boolean): void {
+  if (version === 0 || version === SCHEMA_VERSION) return;
+  if (version !== UPGRADABLE_SCHEMA_VERSION) throw unsupportedVersion(dbPath, version);
+  if (!upgrade) throw new ReaderUpgradeRequiredError(dbPath, version);
+}
+
 /**
  * A read/write open that ends in an error still checkpoints waiting WAL frames into the
  * file and deletes the WAL on close, which would rewrite a database this build refuses.
  * With frames waiting, the version is therefore read through a read-only connection first.
  * A WAL without its database file is left to SQLite, which discards it.
  */
-function rejectUnsupportedVersionInWal(dbPath: string): void {
+function rejectUnsupportedVersionInWal(dbPath: string, upgrade: boolean): void {
   const wal = `${dbPath}-wal`;
   if (!existsSync(dbPath) || !existsSync(wal) || statSync(wal).size === 0) return;
   const db = new Database(dbPath, { readonly: true });
   try {
     db.exec("PRAGMA busy_timeout = 10000");
-    const version = readUserVersion(db);
-    if (version !== 0 && version !== SCHEMA_VERSION) throw unsupportedVersion(dbPath, version);
+    checkVersion(dbPath, readUserVersion(db), upgrade);
   } finally {
     db.close();
   }
@@ -123,7 +150,7 @@ CREATE TABLE documents (
   lastOpenedAt INTEGER NOT NULL,
   format TEXT NOT NULL CHECK (format IN ('pdf', 'epub')),
   readerView TEXT,
-  generatedOutline TEXT
+  importedOutline TEXT
 ) STRICT;
 CREATE INDEX documents_last_opened_at ON documents(lastOpenedAt);
 
@@ -162,10 +189,47 @@ CREATE TABLE app_settings (
 PRAGMA user_version = ${SCHEMA_VERSION};
 `;
 
-export function openReaderDb(dataDirectory: string): Database {
+function backupPathFor(dbPath: string, version: number): string {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return `${dbPath}.v${version}-${stamp}.bak`;
+}
+
+function documentColumns(db: Database): string[] {
+  return (db.query("PRAGMA table_info(documents)").all() as { name: string }[]).map(
+    (column) => column.name,
+  );
+}
+
+/**
+ * Upgrades the previous schema in place: a full copy is written next to the database
+ * first, then every change and the new version commit in one immediate transaction.
+ */
+function upgradeReaderDb(db: Database, dbPath: string): string {
+  const backupPath = backupPathFor(dbPath, UPGRADABLE_SCHEMA_VERSION);
+  db.query("VACUUM INTO ?").run(backupPath);
+
+  const upgrade = db.transaction(() => {
+    const version = readUserVersion(db);
+    if (version !== UPGRADABLE_SCHEMA_VERSION) throw unsupportedVersion(dbPath, version);
+    db.exec("ALTER TABLE documents RENAME COLUMN generatedOutline TO importedOutline");
+    const columns = documentColumns(db);
+    if (!columns.includes("importedOutline") || columns.includes("generatedOutline")) {
+      throw new Error(`database ${dbPath} could not be upgraded: unexpected documents columns`);
+    }
+    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+  });
+  upgrade.immediate();
+  return backupPath;
+}
+
+export function openReaderDb(
+  dataDirectory: string,
+  options: OpenReaderDbOptions = {},
+): Database {
+  const upgrade = options.upgrade ?? false;
   mkdirSync(dataDirectory, { recursive: true, mode: 0o700 });
   const dbPath = join(dataDirectory, DB_FILENAME);
-  rejectUnsupportedVersionInWal(dbPath);
+  rejectUnsupportedVersionInWal(dbPath, upgrade);
   const db = new Database(dbPath, { create: true, readwrite: true, strict: true });
 
   try {
@@ -173,7 +237,7 @@ export function openReaderDb(dataDirectory: string): Database {
     db.exec("PRAGMA foreign_keys = ON");
     db.exec("PRAGMA synchronous = FULL");
 
-    const initialize = db.transaction(() => {
+    const initialize = db.transaction((): "ready" | "upgrade" => {
       const version = readUserVersion(db);
       const tables = existingBusinessTables(db);
 
@@ -185,10 +249,10 @@ export function openReaderDb(dataDirectory: string): Database {
         }
         db.exec(SCHEMA_SQL);
         insertAppSettingsRow(db);
-        return;
+        return "ready";
       }
 
-      if (version !== SCHEMA_VERSION) throw unsupportedVersion(dbPath, version);
+      checkVersion(dbPath, version, upgrade);
 
       const missing = BUSINESS_TABLES.filter((name) => !tables.includes(name));
       if (missing.length > 0) {
@@ -196,8 +260,12 @@ export function openReaderDb(dataDirectory: string): Database {
           `database ${dbPath} is missing tables: ${missing.join(", ")}`,
         );
       }
+      return version === SCHEMA_VERSION ? "ready" : "upgrade";
     });
-    initialize.immediate();
+    if (initialize.immediate() === "upgrade") {
+      const backupPath = upgradeReaderDb(db, dbPath);
+      options.onUpgraded?.(backupPath);
+    }
 
     const journal = db.query("PRAGMA journal_mode = WAL").get() as {
       journal_mode?: string;
@@ -270,36 +338,36 @@ export function saveReaderView(
   return parsed;
 }
 
-export function getGeneratedOutline(
+export function getImportedOutline(
   db: Database,
   documentId: string,
 ): OutlineEntry[] | null {
   const row = db
-    .query("SELECT pageCount, generatedOutline FROM documents WHERE id = ?")
+    .query("SELECT pageCount, importedOutline FROM documents WHERE id = ?")
     .get(documentId) as {
     pageCount: number;
-    generatedOutline: string | null;
+    importedOutline: string | null;
   } | null;
   if (!row) throw new DocumentNotFoundError(documentId);
-  if (row.generatedOutline === null) return null;
+  if (row.importedOutline === null) return null;
 
   let value: unknown;
   try {
-    value = JSON.parse(row.generatedOutline);
+    value = JSON.parse(row.importedOutline);
   } catch {
-    throw new Error("stored generated outline is invalid");
+    throw new Error("stored imported outline is invalid");
   }
   const parsed = outlineEntriesSchema.safeParse(value);
   if (
     !parsed.success ||
     parsed.data.some((entry) => entry.pageNumber > row.pageCount)
   ) {
-    throw new Error("stored generated outline is invalid");
+    throw new Error("stored imported outline is invalid");
   }
   return parsed.data;
 }
 
-export function saveGeneratedOutline(
+export function saveImportedOutline(
   db: Database,
   documentId: string,
   entries: OutlineEntry[],
@@ -314,13 +382,20 @@ export function saveGeneratedOutline(
     if (outside) {
       throw new PageOutOfRangeError(outside.pageNumber, document.pageCount);
     }
-    db.query("UPDATE documents SET generatedOutline = ? WHERE id = ?").run(
+    db.query("UPDATE documents SET importedOutline = ? WHERE id = ?").run(
       JSON.stringify(parsed),
       documentId,
     );
     return parsed;
   });
   return write.immediate();
+}
+
+export function clearImportedOutline(db: Database, documentId: string): void {
+  const result = db
+    .query("UPDATE documents SET importedOutline = NULL WHERE id = ?")
+    .run(documentId);
+  if (result.changes === 0) throw new DocumentNotFoundError(documentId);
 }
 
 export function getDocumentFile(

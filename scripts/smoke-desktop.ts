@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
 import { DESKTOP_FAILURE_CODES, DESKTOP_LOG_CODES, DESKTOP_SHUTDOWN_COMMAND, type DesktopEvent } from "../src/shared/desktop";
-import { DB_FILENAME, SCHEMA_VERSION } from "../src/server/storage";
+import { DB_FILENAME, openReaderDb, SCHEMA_VERSION, UPGRADABLE_SCHEMA_VERSION } from "../src/server/storage";
 import { FIXTURE_JPEG, fixturePdf } from "../tests/e2e/fixtures";
 import { getBuildTarget } from "./targets";
 
@@ -41,8 +41,8 @@ class Sidecar {
   exitCode: number | null = null;
   link: URL | null = null;
 
-  constructor(binary: string, cwd: string, dataDirectory: string) {
-    this.#child = Bun.spawn([binary, "--desktop"], {
+  constructor(binary: string, cwd: string, dataDirectory: string, args: string[] = []) {
+    this.#child = Bun.spawn([binary, "--desktop", ...args], {
       cwd,
       env: { ...process.env, NODE_ENV: "production", LUMO_DATA_DIR: dataDirectory },
       stdin: "pipe",
@@ -188,8 +188,8 @@ async function main(): Promise<void> {
   const cwd = join(work, "cwd");
   mkdirSync(cwd);
   const running: Sidecar[] = [];
-  const start = (dataDirectory: string): Sidecar => {
-    const sidecar = new Sidecar(binary, cwd, dataDirectory);
+  const start = (dataDirectory: string, args: string[] = []): Sidecar => {
+    const sidecar = new Sidecar(binary, cwd, dataDirectory, args);
     running.push(sidecar);
     return sidecar;
   };
@@ -370,6 +370,38 @@ async function main(): Promise<void> {
     const before = directoryDigest(old);
     await failure("an old-schema database is rejected", old, "READER_DATABASE_FAILED");
     expect(directoryDigest(old) === before, "the rejected database was modified");
+
+    // The previous schema is left untouched until the user agrees, then upgraded after a backup.
+    const previous = join(work, "previous");
+    openReaderDb(previous).close();
+    const downgrade = new Database(join(previous, DB_FILENAME));
+    downgrade.exec("ALTER TABLE documents RENAME COLUMN importedOutline TO generatedOutline");
+    downgrade.exec(`PRAGMA user_version = ${UPGRADABLE_SCHEMA_VERSION}`);
+    downgrade.exec("PRAGMA journal_mode = DELETE");
+    downgrade.close();
+    const previousBefore = directoryDigest(previous);
+    await failure("a previous-schema database asks for an upgrade", previous, "READER_DATABASE_UPGRADE_REQUIRED");
+    expect(directoryDigest(previous) === previousBefore, "the database was modified before the user agreed");
+    await step("--upgrade-database upgrades the previous schema after a backup", async () => {
+      const sidecar = start(previous, ["--upgrade-database"]);
+      await sidecar.ready();
+      expect(
+        sidecar.events.some((event) => event.type === "log" && event.code === "reader_upgraded"),
+        `no reader_upgraded event\n${sidecar.transcript()}`,
+      );
+      sidecar.send(`${DESKTOP_SHUTDOWN_COMMAND}\n`);
+      expect((await sidecar.exited()) === 0, `shutdown exited with ${sidecar.exitCode}`);
+      const db = new Database(join(previous, DB_FILENAME), { readonly: true });
+      try {
+        expect(JSON.stringify(db.query("PRAGMA user_version").get()) === `{"user_version":${SCHEMA_VERSION}}`, "the database was not upgraded");
+      } finally {
+        db.close();
+      }
+      expect(
+        readdirSync(previous).some((name) => name.startsWith(`${DB_FILENAME}.v${UPGRADABLE_SCHEMA_VERSION}-`) && name.endsWith(".bak")),
+        "no backup was written",
+      );
+    });
 
     await failure("a malformed launcher command is CONTROL_PROTOCOL_INVALID", join(work, "control"), "CONTROL_PROTOCOL_INVALID", "not json\n");
   } finally {
