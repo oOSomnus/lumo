@@ -1,4 +1,4 @@
-import type { EpubReaderView } from "../shared/contracts";
+import type { ColorTheme, EpubReaderView } from "../shared/contracts";
 import type { EpubLayoutSnapshot } from "../shared/epub";
 import {
   EpubBridgeError,
@@ -56,7 +56,7 @@ const notReady = (): EpubBridgeError =>
 
 const layoutKey = (layout: EpubLayoutSnapshot | null): string =>
   layout
-    ? `${layout.width}x${layout.height}|${layout.style.fontSize}|${layout.style.fontFamily}|${layout.style.lineHeight}|${layout.style.theme}`
+    ? `${layout.width}x${layout.height}|${layout.style.fontSize}|${layout.style.fontFamily}|${layout.style.lineHeight}`
     : "-";
 
 /**
@@ -190,8 +190,8 @@ export class EpubBridgeClient implements EpubBridge {
     await this.send({ op: "prev" }).promise;
   }
 
-  async setView(view: EpubReaderView): Promise<void> {
-    await this.send({ op: "setView", view }).promise;
+  async setView(view: EpubReaderView, theme: ColorTheme): Promise<void> {
+    await this.send({ op: "setView", view, theme }).promise;
   }
 
   clearSelection(): void {

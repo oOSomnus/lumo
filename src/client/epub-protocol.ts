@@ -1,4 +1,4 @@
-import type { EpubReaderView } from "../shared/contracts";
+import type { ColorTheme, EpubReaderView } from "../shared/contracts";
 import type { EpubLayoutSnapshot } from "../shared/epub";
 import type {
   EpubBridgeError,
@@ -32,7 +32,8 @@ export type EpubRequest =
   | { op: "display"; target: string | number }
   | { op: "next" }
   | { op: "prev" }
-  | { op: "setView"; view: EpubReaderView };
+  /** The reading settings of `view` and the app's colour theme; the position is shown separately. */
+  | { op: "setView"; view: EpubReaderView; theme: ColorTheme };
 
 /** What a request's `reply` carries; `pages` has no reply, it streams `page` messages and ends with `done`. */
 export interface EpubReplies {

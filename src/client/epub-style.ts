@@ -1,9 +1,6 @@
+import type { ColorTheme } from "../shared/contracts";
 import type { EpubReaderStyle } from "../shared/epub";
-
-const COLORS = {
-  sepia: { text: "#3b2f1e", page: "#f4ecd8", link: "#8a4b08" },
-  dark: { text: "#d8d8d8", page: "#1e1e1e", link: "#8ab4f8" },
-} as const;
+import { PAGE_COLORS } from "./reading-theme";
 
 const TEXT_ELEMENTS =
   "p, div, span, li, ul, ol, dl, dt, dd, blockquote, section, article, aside, header, footer, figure, figcaption, " +
@@ -18,10 +15,14 @@ const STYLE_ID = `epubjs-inserted-css-${STYLE_KEY}`;
 
 /**
  * The stylesheet injected into every section. A reflowable book gets the font
- * settings; every book gets the colour theme. `light` leaves the book's own
+ * settings; every book gets the app's colour theme. `light` leaves the book's own
  * colours alone. Replaced as a whole on every change, so rules never stack.
  */
-export function readingCss(style: EpubReaderStyle, fixedLayout: boolean): string {
+export function readingCss(
+  style: EpubReaderStyle,
+  fixedLayout: boolean,
+  theme: ColorTheme,
+): string {
   const rules = [SHEET_MARK];
   if (!fixedLayout) {
     const family = style.fontFamily;
@@ -32,8 +33,8 @@ export function readingCss(style: EpubReaderStyle, fixedLayout: boolean): string
       `body :where(p, div, li, dt, dd, blockquote, td, th) { line-height: ${style.lineHeight} !important; }`,
     );
   }
-  if (style.theme !== "light") {
-    const colors = COLORS[style.theme];
+  if (theme !== "light") {
+    const colors = PAGE_COLORS[theme];
     rules.push(
       `html, body { background: ${colors.page} !important; color: ${colors.text} !important; }`,
       `body :where(${TEXT_ELEMENTS}, pre, code) { color: ${colors.text} !important; background-color: transparent !important; }`,

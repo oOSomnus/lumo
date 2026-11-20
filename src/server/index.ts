@@ -25,6 +25,7 @@ import {
 import { handleLibrary } from "./library";
 import { handleSettings } from "./settings";
 import {
+  getTheme,
   getUiLocale,
   openReaderDb,
   ReaderUpgradeRequiredError,
@@ -89,6 +90,8 @@ async function start(): Promise<void> {
     });
   } catch (error) {
     if (error instanceof ReaderUpgradeRequiredError) {
+      // The upgrade starts the theme at `system`, so that is what the panel shows meanwhile.
+      if (error.uiLocale) emit({ type: "preferences", uiLocale: error.uiLocale, theme: "system" });
       throw new StartupError(
         "READER_DATABASE_UPGRADE_REQUIRED",
         `${error.message}. Start Lumo again with --upgrade-database to upgrade it; a backup copy is kept next to it.`,
@@ -100,11 +103,12 @@ async function start(): Promise<void> {
     );
   }
   db = reader;
-  const uiLocale = step(
+  const preferences = step(
     "READER_DATABASE_FAILED",
     `Cannot read reader database in ${dataDirectory}`,
-    () => getUiLocale(reader),
+    () => ({ uiLocale: getUiLocale(reader), theme: getTheme(reader) }),
   );
+  emit({ type: "preferences", ...preferences });
   emit({ type: "log", code: "reader_ready" });
 
   const assets = step("PDFJS_ASSETS_FAILED", "Cannot load PDF.js assets", loadPdfjsAssets);
@@ -203,7 +207,7 @@ async function start(): Promise<void> {
   console.log(`Typst assets: ${resolveTypstDirectory()}`);
   console.log("AI translation: configure a provider, model and credentials in Settings.");
   console.log(`Open in your browser: ${server.url.href}?token=${token}`);
-  emit({ type: "ready", dataDirectory, uiLocale });
+  emit({ type: "ready", dataDirectory });
 }
 
 async function closeResources(): Promise<void> {

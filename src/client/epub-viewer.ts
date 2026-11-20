@@ -346,7 +346,7 @@ function serve(session: Session, id: number, request: EpubRequest): void {
         await move(session, () => session.renditions.prev());
         break;
       case "setView":
-        await move(session, () => session.renditions.setView(request.view));
+        await move(session, () => session.renditions.setView(request.view, request.theme));
         break;
     }
     reply(session, id, signal, undefined);

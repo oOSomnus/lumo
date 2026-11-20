@@ -4,12 +4,15 @@
 //
 // The viewer page forbids inline <style> (style-src 'self'), so the sheet is adopted, not injected as a node.
 
+import { PDF_THEME_CSS } from "./reading-theme";
+
 const ICON =
   "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E" +
   "%3Cpath d='M2 4.3h4v1.4H2zM10 4.3h4v1.4h-4zM2 10.3h7v1.4H2zM13 10.3h1v1.4h-1z'/%3E" +
   "%3Ccircle cx='8' cy='5' r='1.8'/%3E%3Ccircle cx='11' cy='11' r='1.8'/%3E%3C/svg%3E\")";
 
 const STYLE = `
+${PDF_THEME_CSS}
 @media (max-width: 690px) {
   #mainContainer { min-width: 0; }
 }

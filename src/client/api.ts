@@ -12,6 +12,7 @@ import {
   type TranslationRecord,
   type TypstRepairProgress,
   type UiLocale,
+  type UiTheme,
 } from "../shared/contracts";
 
 const MAX_STREAM_LINE_BYTES = 2 * 1024 * 1024;
@@ -330,6 +331,10 @@ export function refreshAiCatalog(
 
 export function saveUiLocale(locale: UiLocale): Promise<{ uiLocale: UiLocale }> {
   return apiJson("/api/settings", jsonInit("PATCH", { uiLocale: locale }));
+}
+
+export function saveTheme(theme: UiTheme): Promise<{ theme: UiTheme }> {
+  return apiJson("/api/settings", jsonInit("PATCH", { theme }));
 }
 
 export function triggerDownload(blob: Blob, filename: string): void {

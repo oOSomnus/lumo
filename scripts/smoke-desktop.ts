@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
+import { UI_LOCALES, UI_THEMES } from "../src/shared/contracts";
 import { DESKTOP_FAILURE_CODES, DESKTOP_LOG_CODES, DESKTOP_SHUTDOWN_COMMAND, type DesktopEvent } from "../src/shared/desktop";
 import { DB_FILENAME, openReaderDb, SCHEMA_VERSION, UPGRADABLE_SCHEMA_VERSION } from "../src/server/storage";
 import { FIXTURE_JPEG, fixturePdf } from "../tests/e2e/fixtures";
@@ -16,7 +17,8 @@ import { getBuildTarget } from "./targets";
 
 const eventSchema = z.discriminatedUnion("type", [
   z.strictObject({ type: z.literal("log"), code: z.enum(DESKTOP_LOG_CODES) }),
-  z.strictObject({ type: z.literal("ready"), dataDirectory: z.string(), uiLocale: z.enum(["en", "zh-CN"]) }),
+  z.strictObject({ type: z.literal("preferences"), uiLocale: z.enum(UI_LOCALES), theme: z.enum(UI_THEMES) }),
+  z.strictObject({ type: z.literal("ready"), dataDirectory: z.string() }),
   z.strictObject({ type: z.literal("failed"), code: z.enum(DESKTOP_FAILURE_CODES) }),
   z.strictObject({ type: z.literal("stopped") }),
 ]);
@@ -330,8 +332,12 @@ async function main(): Promise<void> {
       const second = start(data);
       await step("restarts on the same data and exits 0 when the launcher disappears (end of input)", async () => {
         await second.ready();
-        const ready = second.events.at(-1);
-        expect(ready?.type === "ready" && ready.uiLocale === "zh-CN", `the saved locale was lost\n${second.transcript()}`);
+        expect(second.events.at(-1)?.type === "ready", `restart did not reach ready\n${second.transcript()}`);
+        const preferences = second.events.find((event) => event.type === "preferences");
+        expect(
+          preferences?.type === "preferences" && preferences.uiLocale === "zh-CN" && preferences.theme === "system",
+          `the saved locale was lost\n${second.transcript()}`,
+        );
         const library = libraryResponseSchema.parse(await (await second.authed("/api/library")).json());
         expect(library.documents.length === 1, "the saved document is gone");
         second.closeInput();
@@ -375,13 +381,34 @@ async function main(): Promise<void> {
     const previous = join(work, "previous");
     openReaderDb(previous).close();
     const downgrade = new Database(join(previous, DB_FILENAME));
-    downgrade.exec("ALTER TABLE documents RENAME COLUMN importedOutline TO generatedOutline");
+    // The previous schema's app_settings has no theme column.
+    downgrade.exec(`
+      ALTER TABLE app_settings RENAME TO app_settings_current;
+      CREATE TABLE app_settings (
+        key TEXT PRIMARY KEY NOT NULL CHECK (key = 'app'),
+        uiLocale TEXT NOT NULL CHECK (uiLocale IN ('en', 'zh-CN')),
+        aiConfig TEXT,
+        deviceId TEXT NOT NULL
+      ) STRICT;
+      INSERT INTO app_settings SELECT key, 'zh-CN', aiConfig, deviceId FROM app_settings_current;
+      DROP TABLE app_settings_current;
+    `);
     downgrade.exec(`PRAGMA user_version = ${UPGRADABLE_SCHEMA_VERSION}`);
     downgrade.exec("PRAGMA journal_mode = DELETE");
     downgrade.close();
     const previousBefore = directoryDigest(previous);
     await failure("a previous-schema database asks for an upgrade", previous, "READER_DATABASE_UPGRADE_REQUIRED");
     expect(directoryDigest(previous) === previousBefore, "the database was modified before the user agreed");
+    await step("the upgrade prompt carries the library's language", async () => {
+      const sidecar = start(previous);
+      await sidecar.exited();
+      const preferences = sidecar.events.find((event) => event.type === "preferences");
+      expect(
+        preferences?.type === "preferences" && preferences.uiLocale === "zh-CN" && preferences.theme === "system",
+        `no preferences before the upgrade prompt\n${sidecar.transcript()}`,
+      );
+      expect(directoryDigest(previous) === previousBefore, "reading the language modified the database");
+    });
     await step("--upgrade-database upgrades the previous schema after a backup", async () => {
       const sidecar = start(previous, ["--upgrade-database"]);
       await sidecar.ready();

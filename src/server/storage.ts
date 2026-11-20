@@ -3,6 +3,8 @@ import { existsSync, mkdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import {
+  UI_LOCALES,
+  UI_THEMES,
   aiConfigSchema,
   documentFormatSchema,
   documentNameSchema,
@@ -12,6 +14,7 @@ import {
   targetLanguageSchema,
   translationUnitSchema,
   uiLocaleSchema,
+  uiThemeSchema,
   type AiConfig,
   type DocumentFormat,
   type DocumentRecord,
@@ -23,12 +26,13 @@ import {
   type TranslationLocationSummary,
   type TranslationRecord,
   type UiLocale,
+  type UiTheme,
 } from "../shared/contracts";
 
 export const DB_FILENAME = "reader.sqlite";
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 /** The one older schema this build can upgrade, and only when the user agrees to it. */
-export const UPGRADABLE_SCHEMA_VERSION = 7;
+export const UPGRADABLE_SCHEMA_VERSION = 8;
 
 const BUSINESS_TABLES = [
   "documents",
@@ -80,11 +84,16 @@ function unsupportedVersion(dbPath: string, version: number): Error {
   );
 }
 
-/** The database uses the previous schema; it opens only after the user agrees to upgrade it. */
+/**
+ * The database uses the previous schema; it opens only after the user agrees to upgrade it.
+ * `uiLocale` is the interface language the previous schema stores, read without writing,
+ * so the launcher can ask in that language; null when it cannot be read.
+ */
 export class ReaderUpgradeRequiredError extends Error {
   constructor(
     readonly dbPath: string,
     readonly version: number,
+    readonly uiLocale: UiLocale | null,
   ) {
     super(
       `database ${dbPath} uses schema version ${version}; this build uses ${SCHEMA_VERSION} and must upgrade it first`,
@@ -100,10 +109,23 @@ export interface OpenReaderDbOptions {
   onUpgraded?: (backupPath: string) => void;
 }
 
-function checkVersion(dbPath: string, version: number, upgrade: boolean): void {
+/** The stored interface language, or null when the row or its value is unusable. Only reads. */
+function storedUiLocale(db: Database): UiLocale | null {
+  try {
+    const row = db.query("SELECT uiLocale FROM app_settings WHERE key = 'app'").get() as {
+      uiLocale: unknown;
+    } | null;
+    const parsed = uiLocaleSchema.safeParse(row?.uiLocale);
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+function checkVersion(db: Database, dbPath: string, version: number, upgrade: boolean): void {
   if (version === 0 || version === SCHEMA_VERSION) return;
   if (version !== UPGRADABLE_SCHEMA_VERSION) throw unsupportedVersion(dbPath, version);
-  if (!upgrade) throw new ReaderUpgradeRequiredError(dbPath, version);
+  if (!upgrade) throw new ReaderUpgradeRequiredError(dbPath, version, storedUiLocale(db));
 }
 
 /**
@@ -118,7 +140,7 @@ function rejectUnsupportedVersionInWal(dbPath: string, upgrade: boolean): void {
   const db = new Database(dbPath, { readonly: true });
   try {
     db.exec("PRAGMA busy_timeout = 10000");
-    checkVersion(dbPath, readUserVersion(db), upgrade);
+    checkVersion(db, dbPath, readUserVersion(db), upgrade);
   } finally {
     db.close();
   }
@@ -135,9 +157,19 @@ function existingBusinessTables(db: Database): string[] {
 
 function insertAppSettingsRow(db: Database): void {
   db.query(
-    "INSERT INTO app_settings (key, uiLocale, aiConfig, deviceId) VALUES ('app', 'en', NULL, ?)",
+    "INSERT INTO app_settings (key, uiLocale, theme, aiConfig, deviceId) VALUES ('app', 'en', 'system', NULL, ?)",
   ).run(crypto.randomUUID());
 }
+
+const APP_SETTINGS_SQL = `
+CREATE TABLE app_settings (
+  key TEXT PRIMARY KEY NOT NULL CHECK (key = 'app'),
+  uiLocale TEXT NOT NULL CHECK (uiLocale IN (${UI_LOCALES.map((locale) => `'${locale}'`).join(", ")})),
+  theme TEXT NOT NULL CHECK (theme IN (${UI_THEMES.map((theme) => `'${theme}'`).join(", ")})),
+  aiConfig TEXT,
+  deviceId TEXT NOT NULL
+) STRICT;
+`;
 
 const SCHEMA_SQL = `
 CREATE TABLE documents (
@@ -179,13 +211,7 @@ CREATE TABLE settings (
   targetLanguage TEXT NOT NULL
 ) STRICT;
 INSERT INTO settings (key, lastDocumentId, targetLanguage) VALUES ('reader', NULL, 'zh-CN');
-
-CREATE TABLE app_settings (
-  key TEXT PRIMARY KEY NOT NULL CHECK (key = 'app'),
-  uiLocale TEXT NOT NULL CHECK (uiLocale IN ('en', 'zh-CN')),
-  aiConfig TEXT,
-  deviceId TEXT NOT NULL
-) STRICT;
+${APP_SETTINGS_SQL}
 PRAGMA user_version = ${SCHEMA_VERSION};
 `;
 
@@ -194,31 +220,12 @@ function backupPathFor(dbPath: string, version: number): string {
   return `${dbPath}.v${version}-${stamp}.bak`;
 }
 
-/** The documents table's columns as SQLite describes them: name, type, nullability, default and key. */
-function documentColumns(db: Database): string {
-  return JSON.stringify(db.query("PRAGMA table_info(documents)").all());
-}
-
-let currentDocumentColumns: string | undefined;
-
-/** The documents columns of a database created by this build. */
-function expectedDocumentColumns(): string {
-  if (currentDocumentColumns === undefined) {
-    const fresh = new Database(":memory:");
-    try {
-      fresh.exec(SCHEMA_SQL);
-      currentDocumentColumns = documentColumns(fresh);
-    } finally {
-      fresh.close();
-    }
-  }
-  return currentDocumentColumns;
-}
-
 /**
  * Upgrades the previous schema in place: a full copy is written next to the database
  * first, then every change and the new version commit in one immediate transaction.
- * A documents table that does not end up exactly as this build creates it rolls back.
+ * app_settings is rebuilt as this build creates it, keeping its row and starting the
+ * colour theme at `system`; EPUB views drop their per-book theme, which the app theme
+ * replaced. A row the new table refuses rolls everything back.
  */
 function upgradeReaderDb(db: Database, dbPath: string): string {
   const backupPath = backupPathFor(dbPath, UPGRADABLE_SCHEMA_VERSION);
@@ -227,10 +234,15 @@ function upgradeReaderDb(db: Database, dbPath: string): string {
   const upgrade = db.transaction(() => {
     const version = readUserVersion(db);
     if (version !== UPGRADABLE_SCHEMA_VERSION) throw unsupportedVersion(dbPath, version);
-    db.exec("ALTER TABLE documents RENAME COLUMN generatedOutline TO importedOutline");
-    if (documentColumns(db) !== expectedDocumentColumns()) {
-      throw new Error(`database ${dbPath} could not be upgraded: unexpected documents columns`);
-    }
+    db.exec("ALTER TABLE app_settings RENAME TO app_settings_previous");
+    db.exec(APP_SETTINGS_SQL);
+    db.exec(
+      "INSERT INTO app_settings (key, uiLocale, theme, aiConfig, deviceId) SELECT key, uiLocale, 'system', aiConfig, deviceId FROM app_settings_previous",
+    );
+    db.exec("DROP TABLE app_settings_previous");
+    db.exec(
+      "UPDATE documents SET readerView = json_remove(readerView, '$.theme') WHERE json_valid(readerView) AND json_extract(readerView, '$.format') = 'epub'",
+    );
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   });
   upgrade.immediate();
@@ -267,7 +279,7 @@ export function openReaderDb(
         return "ready";
       }
 
-      checkVersion(dbPath, version, upgrade);
+      checkVersion(db, dbPath, version, upgrade);
 
       const missing = BUSINESS_TABLES.filter((name) => !tables.includes(name));
       if (missing.length > 0) {
@@ -448,18 +460,21 @@ export function getSettings(db: Database): ReaderSettings {
 
 export interface AppSettings {
   uiLocale: UiLocale;
+  theme: UiTheme;
   aiConfig: AiConfig | null;
   deviceId: string;
 }
 
 export function getAppSettings(db: Database): AppSettings {
   const row = db
-    .query("SELECT uiLocale, aiConfig, deviceId FROM app_settings WHERE key = 'app'")
-    .get() as { uiLocale: string; aiConfig: string | null; deviceId: string } | null;
+    .query("SELECT uiLocale, theme, aiConfig, deviceId FROM app_settings WHERE key = 'app'")
+    .get() as { uiLocale: string; theme: string; aiConfig: string | null; deviceId: string } | null;
   if (!row) throw new Error("app settings row is missing");
 
   const locale = uiLocaleSchema.safeParse(row.uiLocale);
   if (!locale.success) throw new Error("stored UI locale is invalid");
+  const theme = uiThemeSchema.safeParse(row.theme);
+  if (!theme.success) throw new Error("stored theme is invalid");
   if (typeof row.deviceId !== "string" || row.deviceId.length === 0) {
     throw new Error("stored device id is invalid");
   }
@@ -477,7 +492,7 @@ export function getAppSettings(db: Database): AppSettings {
     aiConfig = parsed.data;
   }
 
-  return { uiLocale: locale.data, aiConfig, deviceId: row.deviceId };
+  return { uiLocale: locale.data, theme: theme.data, aiConfig, deviceId: row.deviceId };
 }
 
 export function getUiLocale(db: Database): UiLocale {
@@ -492,6 +507,23 @@ export function saveUiLocale(db: Database, locale: UiLocale): UiLocale {
   const parsed = uiLocaleSchema.parse(locale);
   const result = db
     .query("UPDATE app_settings SET uiLocale = ? WHERE key = 'app'")
+    .run(parsed);
+  if (result.changes === 0) throw new Error("app settings row is missing");
+  return parsed;
+}
+
+export function getTheme(db: Database): UiTheme {
+  const row = db
+    .query("SELECT theme FROM app_settings WHERE key = 'app'")
+    .get() as { theme: string } | null;
+  if (!row) throw new Error("app settings row is missing");
+  return uiThemeSchema.parse(row.theme);
+}
+
+export function saveTheme(db: Database, theme: UiTheme): UiTheme {
+  const parsed = uiThemeSchema.parse(theme);
+  const result = db
+    .query("UPDATE app_settings SET theme = ? WHERE key = 'app'")
     .run(parsed);
   if (result.changes === 0) throw new Error("app settings row is missing");
   return parsed;

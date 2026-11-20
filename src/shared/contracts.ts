@@ -37,6 +37,18 @@ export type UiLocale = (typeof UI_LOCALES)[number];
 
 export const uiLocaleSchema = z.enum(UI_LOCALES);
 
+/** The colour themes the app paints with: its own interface, the PDF and EPUB pages and the translation preview. */
+export const COLOR_THEMES = ["light", "dark", "sepia", "night"] as const;
+
+export type ColorTheme = (typeof COLOR_THEMES)[number];
+
+/** The stored theme choice; `system` follows the operating system's light or dark preference. */
+export const UI_THEMES = ["system", ...COLOR_THEMES] as const;
+
+export type UiTheme = (typeof UI_THEMES)[number];
+
+export const uiThemeSchema = z.enum(UI_THEMES);
+
 export const documentIdSchema = z
   .string()
   .regex(/^[a-f0-9]{64}$/, "documentId must be a lowercase SHA-256 hex digest");
@@ -400,7 +412,6 @@ export const EPUB_FONT_SIZE_MAX = 36;
 export const EPUB_FONT_SIZE_STEP = 2;
 export const EPUB_FONT_FAMILIES = ["serif", "sans-serif"] as const;
 export const EPUB_LINE_HEIGHTS = [1.4, 1.6, 1.8, 2] as const;
-export const EPUB_THEMES = ["light", "sepia", "dark"] as const;
 
 export const epubReaderViewSchema = z.strictObject({
   format: z.literal("epub"),
@@ -415,7 +426,6 @@ export const epubReaderViewSchema = z.strictObject({
     z.literal(1.8),
     z.literal(2),
   ]),
-  theme: z.enum(EPUB_THEMES),
 });
 
 export type EpubReaderView = z.infer<typeof epubReaderViewSchema>;
@@ -441,7 +451,6 @@ export const DEFAULT_EPUB_READER_VIEW: EpubReaderView = {
   fontSize: 18,
   fontFamily: "serif",
   lineHeight: 1.6,
-  theme: "light",
 };
 
 export interface DocumentRecord {
@@ -485,6 +494,7 @@ export interface LibrarySnapshot {
   settings: ReaderSettings;
   dataDirectory: string;
   uiLocale: UiLocale;
+  theme: UiTheme;
 }
 
 export const MAX_AI_PROVIDER_CHARS = 1024;

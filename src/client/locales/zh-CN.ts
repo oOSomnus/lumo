@@ -545,12 +545,8 @@ export const zhCN: Messages = {
     serif: "衬线",
     sansSerif: "无衬线",
     lineHeight: "行距",
-    theme: "主题",
-    light: "浅色",
-    sepia: "护眼",
-    dark: "深色",
     resetSettings: "恢复默认",
-    fixedLayout: "这本书是固定版式：字号、字体和行距不适用，主题仍然有效。",
+    fixedLayout: "这本书是固定版式：字号、字体和行距不适用，配色主题仍然有效。",
     actionFailed: (detail) => `无法更新书籍视图：${detail}`,
   },
   settings: {
@@ -571,6 +567,18 @@ export const zhCN: Messages = {
     loading: "正在读取设置…",
     loadFailed: (detail) => `无法读取设置：${detail}`,
     retry: "重试",
+    themeSection: "外观",
+    themeDescription:
+      "Lumo 界面和阅读页面的配色主题。深色主题会反转 PDF 页面和译文预览的颜色；护眼主题会给它们染上暖色。",
+    themeLabel: "主题",
+    themes: {
+      system: "跟随系统（浅色或深色）",
+      light: "浅色",
+      dark: "深色",
+      sepia: "护眼：暖色纸张",
+      night: "夜间：暗而暖",
+    },
+    themeFailed: (detail) => `无法保存主题：${detail}`,
     languageSection: "界面语言",
     languageDescription:
       "界面语言与翻译目标语言相互独立。切换界面语言会重新加载页面。",

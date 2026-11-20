@@ -5,6 +5,7 @@ import { en } from "../client/locales/en";
 import { zhCN } from "../client/locales/zh-CN";
 import type { UiLocale } from "../shared/contracts";
 import type { LauncherLogCode, LauncherLogEntry, LauncherSnapshot } from "../shared/desktop";
+import { setThemePreference } from "../client/theme";
 import { launcher, newerSnapshot, panelLocale } from "./ipc";
 
 const catalogs = { en, "zh-CN": zhCN } satisfies Record<UiLocale, typeof en>;
@@ -56,6 +57,10 @@ export function Launcher() {
     document.documentElement.lang = locale;
     document.title = "Lumo";
   }, [locale]);
+
+  // The library's theme once the server reported it; before that, the system's light or dark.
+  const theme = snapshot?.theme ?? "system";
+  useEffect(() => setThemePreference(theme), [theme]);
 
   useEffect(() => {
     let active = true;

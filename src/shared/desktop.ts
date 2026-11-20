@@ -1,4 +1,4 @@
-import type { UiLocale } from "./contracts";
+import type { UiLocale, UiTheme } from "./contracts";
 
 /**
  * Line protocol between the desktop launcher and the `--desktop` server, over the
@@ -30,7 +30,12 @@ export type DesktopFailureCode = (typeof DESKTOP_FAILURE_CODES)[number];
 
 export type DesktopEvent =
   | { type: "log"; code: DesktopLogCode }
-  | { type: "ready"; dataDirectory: string; uiLocale: UiLocale }
+  /**
+   * The library's interface language and theme, sent once the reader database is read; also
+   * sent before `READER_DATABASE_UPGRADE_REQUIRED`, so the launcher asks in the library's language.
+   */
+  | { type: "preferences"; uiLocale: UiLocale; theme: UiTheme }
+  | { type: "ready"; dataDirectory: string }
   | { type: "failed"; code: DesktopFailureCode }
   | { type: "stopped" };
 
@@ -104,7 +109,9 @@ export interface LauncherSnapshot {
   /** The local address without the access code. */
   webUiUrl: string | null;
   dataDirectory: string | null;
+  /** The library's language and theme as last reported; kept across restarts of the server. */
   uiLocale: UiLocale | null;
+  theme: UiTheme | null;
   failureCode: LauncherLogCode | null;
   canRetry: boolean;
   /** The reader database uses the previous schema and the user may agree to upgrade it. */

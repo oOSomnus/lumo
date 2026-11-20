@@ -120,7 +120,7 @@ function bookLike(fake: FakeBook): BookLike {
 const layout = (width = 600, fontSize = 18): EpubLayoutSnapshot => ({
   width,
   height: 800,
-  style: { fontSize, fontFamily: "serif", lineHeight: 1.6, theme: "light" },
+  style: { fontSize, fontFamily: "serif", lineHeight: 1.6 },
 });
 
 const section = (output: string): SectionLike => ({

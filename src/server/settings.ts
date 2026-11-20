@@ -4,19 +4,23 @@ import {
   aiConfigSchema,
   MAX_AI_PROVIDER_CHARS,
   uiLocaleSchema,
+  uiThemeSchema,
   type AiCatalog,
   type AiSettingsSnapshot,
-  type UiLocale,
 } from "../shared/contracts";
 import type { AiManager } from "./ai-settings";
 import { HttpError, jsonResponse, readJson } from "./http";
-import { saveUiLocale } from "./storage";
+import { saveTheme, saveUiLocale } from "./storage";
 
-const MAX_LOCALE_BYTES = 1024;
+const MAX_APP_SETTINGS_BYTES = 1024;
 const MAX_AI_SETTINGS_BYTES = 16 * 1024;
 const MAX_CATALOG_REFRESH_BYTES = 16 * 1024;
 
-const localeBodySchema = z.strictObject({ uiLocale: uiLocaleSchema });
+/** One app setting per request: the interface language or the colour theme. */
+const appSettingsBodySchema = z.union([
+  z.strictObject({ uiLocale: uiLocaleSchema }),
+  z.strictObject({ theme: uiThemeSchema }),
+]);
 const providerBodySchema = z.strictObject({
   provider: z.string().min(1).max(MAX_AI_PROVIDER_CHARS),
 });
@@ -53,12 +57,11 @@ export async function handleSettings(
 
   if (url.pathname === "/api/settings") {
     if (method !== "PATCH") methodNotAllowed();
-    const body: { uiLocale: UiLocale } = await readJson(
-      request,
-      MAX_LOCALE_BYTES,
-      localeBodySchema,
-    );
-    return jsonResponse({ uiLocale: saveUiLocale(ctx.db, body.uiLocale) });
+    const body = await readJson(request, MAX_APP_SETTINGS_BYTES, appSettingsBodySchema);
+    if ("uiLocale" in body) {
+      return jsonResponse({ uiLocale: saveUiLocale(ctx.db, body.uiLocale) });
+    }
+    return jsonResponse({ theme: saveTheme(ctx.db, body.theme) });
   }
 
   if (url.pathname === "/api/ai/settings") {

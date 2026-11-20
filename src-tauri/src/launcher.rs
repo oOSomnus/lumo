@@ -42,6 +42,7 @@ const UPGRADE_REQUIRED_CODE: &str = "READER_DATABASE_UPGRADE_REQUIRED";
 /// The server argument that carries that agreement.
 pub const UPGRADE_DATABASE_ARG: &str = "--upgrade-database";
 const UI_LOCALES: &[&str] = &["en", "zh-CN"];
+const UI_THEMES: &[&str] = &["system", "light", "dark", "sepia", "night"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -159,9 +160,12 @@ impl AccessLink {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Event {
     Log(&'static str),
+    Preferences {
+        ui_locale: &'static str,
+        theme: &'static str,
+    },
     Ready {
         data_directory: String,
-        ui_locale: &'static str,
     },
     Failed(&'static str),
     Stopped,
@@ -183,11 +187,14 @@ enum WireEvent {
     Log {
         code: String,
     },
+    Preferences {
+        #[serde(rename = "uiLocale")]
+        ui_locale: String,
+        theme: String,
+    },
     Ready {
         #[serde(rename = "dataDirectory")]
         data_directory: String,
-        #[serde(rename = "uiLocale")]
-        ui_locale: String,
     },
     Failed {
         code: String,
@@ -214,15 +221,11 @@ pub fn parse_line(line: &str) -> Parsed {
         WireEvent::Log { code } => known(SERVER_LOG_CODES, &code).map(Event::Log),
         WireEvent::Failed { code } => known(SERVER_FAILURE_CODES, &code).map(Event::Failed),
         WireEvent::Stopped => Some(Event::Stopped),
-        WireEvent::Ready {
-            data_directory,
-            ui_locale,
-        } => known(UI_LOCALES, &ui_locale)
-            .filter(|_| !data_directory.is_empty())
-            .map(|ui_locale| Event::Ready {
-                data_directory,
-                ui_locale,
-            }),
+        WireEvent::Preferences { ui_locale, theme } => known(UI_LOCALES, &ui_locale)
+            .zip(known(UI_THEMES, &theme))
+            .map(|(ui_locale, theme)| Event::Preferences { ui_locale, theme }),
+        WireEvent::Ready { data_directory } => (!data_directory.is_empty())
+            .then_some(Event::Ready { data_directory }),
     };
     event.map_or(Parsed::Invalid, Parsed::Event)
 }
@@ -237,6 +240,7 @@ pub struct Snapshot {
     pub web_ui_url: Option<String>,
     pub data_directory: Option<String>,
     pub ui_locale: Option<&'static str>,
+    pub theme: Option<&'static str>,
     pub failure_code: Option<&'static str>,
     pub can_retry: bool,
     pub can_upgrade: bool,
@@ -372,7 +376,9 @@ pub struct State {
     process_alive: bool,
     link: Option<AccessLink>,
     data_directory: Option<String>,
+    /// The library's language and theme as last reported; kept across runs.
     ui_locale: Option<&'static str>,
+    theme: Option<&'static str>,
     failure_code: Option<&'static str>,
     update: UpdateLifecycle,
     exit_allowed: bool,
@@ -397,6 +403,7 @@ impl State {
             link: None,
             data_directory: None,
             ui_locale: None,
+            theme: None,
             failure_code: None,
             update: UpdateLifecycle {
                 enabled,
@@ -427,6 +434,7 @@ impl State {
             web_ui_url: self.link.as_ref().map(|link| link.base.clone()),
             data_directory: self.data_directory.clone(),
             ui_locale: self.ui_locale,
+            theme: self.theme,
             failure_code: self.failure_code,
             can_retry: self.can_retry(),
             can_upgrade: self.can_upgrade(),
@@ -554,12 +562,18 @@ impl State {
                 self.push(at.wall_ms, Level::Info, code);
                 LineOutcome::Changed
             }
-            (Phase::Starting, Parsed::Event(Event::Ready { data_directory, ui_locale }))
+            (Phase::Starting, Parsed::Event(Event::Preferences { ui_locale, theme })) => {
+                self.ui_locale = Some(ui_locale);
+                self.theme = Some(theme);
+                self.revision += 1;
+                LineOutcome::Changed
+            }
+            (_, Parsed::Event(Event::Preferences { .. })) => self.violation(at.wall_ms),
+            (Phase::Starting, Parsed::Event(Event::Ready { data_directory }))
                 if self.link.is_some() =>
             {
                 self.phase = Phase::Running;
                 self.data_directory = Some(data_directory);
-                self.ui_locale = Some(ui_locale);
                 self.push(at.wall_ms, Level::Info, "ready");
                 LineOutcome::Changed
             }
@@ -872,7 +886,8 @@ mod tests {
 
     const LINK: &str = "Open in your browser: http://127.0.0.1:43210/?token=11111111-2222-3333-4444-555555555555";
     const TOKEN: &str = "11111111-2222-3333-4444-555555555555";
-    const READY: &str = r#"{"type":"ready","dataDirectory":"/data/lumo","uiLocale":"zh-CN"}"#;
+    const PREFERENCES: &str = r#"{"type":"preferences","uiLocale":"zh-CN","theme":"night"}"#;
+    const READY: &str = r#"{"type":"ready","dataDirectory":"/data/lumo"}"#;
 
     /// A moment whose wall clock and monotonic clock agree.
     fn at(ms: u64) -> Moment {
@@ -890,6 +905,7 @@ mod tests {
 
     fn running() -> (State, u64) {
         let (mut state, generation) = started();
+        assert_eq!(state.on_line(at(1), generation, PREFERENCES), LineOutcome::Changed);
         assert_eq!(state.on_line(at(1), generation, LINK), LineOutcome::Changed);
         assert_eq!(state.on_line(at(2), generation, READY), LineOutcome::Changed);
         assert_eq!(state.phase(), Phase::Running);
@@ -946,15 +962,24 @@ mod tests {
             parse_line(READY),
             Parsed::Event(Event::Ready {
                 data_directory: "/data/lumo".into(),
-                ui_locale: "zh-CN"
+            })
+        );
+        assert_eq!(
+            parse_line(PREFERENCES),
+            Parsed::Event(Event::Preferences {
+                ui_locale: "zh-CN",
+                theme: "night"
             })
         );
         for bad in [
             r#"{"type":"log","code":"made_up"}"#,
             r#"{"type":"failed","code":"made_up"}"#,
             r#"{"type":"log","code":"starting","extra":1}"#,
-            r#"{"type":"ready","dataDirectory":"","uiLocale":"en"}"#,
-            r#"{"type":"ready","dataDirectory":"/d","uiLocale":"fr"}"#,
+            r#"{"type":"ready","dataDirectory":""}"#,
+            r#"{"type":"ready","dataDirectory":"/d","uiLocale":"en"}"#,
+            r#"{"type":"preferences","uiLocale":"fr","theme":"dark"}"#,
+            r#"{"type":"preferences","uiLocale":"en","theme":"blue"}"#,
+            r#"{"type":"preferences","uiLocale":"en"}"#,
             r#"{"type":"explode"}"#,
             r#"{"code":"starting"}"#,
             r#"{broken"#,
@@ -978,6 +1003,7 @@ mod tests {
         assert_eq!(snapshot.phase, Phase::Running);
         assert_eq!(snapshot.web_ui_url.as_deref(), Some("http://127.0.0.1:43210/"));
         assert_eq!(snapshot.ui_locale, Some("zh-CN"));
+        assert_eq!(snapshot.theme, Some("night"));
         assert_eq!(snapshot.data_directory.as_deref(), Some("/data/lumo"));
 
         let wire = serde_json::to_string(&snapshot).unwrap();
@@ -1063,6 +1089,34 @@ mod tests {
         assert!(state.snapshot().can_retry);
         assert!(!state.snapshot().can_upgrade, "other failures are never upgraded");
         assert!(state.begin_upgrade().is_none());
+    }
+
+    #[test]
+    fn the_upgrade_prompt_keeps_the_language_reported_before_the_failure() {
+        let (mut state, generation) = started();
+        assert_eq!(
+            state.on_line(at(1), generation, r#"{"type":"preferences","uiLocale":"en","theme":"system"}"#),
+            LineOutcome::Changed
+        );
+        state.on_line(at(2),
+            generation,
+            r#"{"type":"failed","code":"READER_DATABASE_UPGRADE_REQUIRED"}"#,
+        );
+        state.on_terminated(3, generation, false);
+        let snapshot = state.snapshot();
+        assert!(snapshot.can_upgrade);
+        assert_eq!(snapshot.ui_locale, Some("en"));
+        assert_eq!(snapshot.theme, Some("system"));
+
+        state.begin_upgrade().expect("upgrade after the process ended");
+        assert_eq!(state.snapshot().ui_locale, Some("en"), "a new run keeps the last language");
+    }
+
+    #[test]
+    fn preferences_after_ready_are_a_protocol_violation() {
+        let (mut state, generation) = running();
+        assert_eq!(state.on_line(at(3), generation, PREFERENCES), LineOutcome::ProtocolViolation);
+        assert_eq!(state.snapshot().failure_code, Some("protocol_failed"));
     }
 
     #[test]

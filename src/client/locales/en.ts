@@ -607,13 +607,9 @@ export const en = {
     serif: "Serif",
     sansSerif: "Sans-serif",
     lineHeight: "Line spacing",
-    theme: "Theme",
-    light: "Light",
-    sepia: "Sepia",
-    dark: "Dark",
     resetSettings: "Restore defaults",
     fixedLayout:
-      "This book has a fixed layout: font size, font and line spacing do not apply. The theme still does.",
+      "This book has a fixed layout: font size, font and line spacing do not apply. The colour theme still does.",
     actionFailed: (detail: string) => `Could not update the book view: ${detail}`,
   },
   settings: {
@@ -635,6 +631,18 @@ export const en = {
     loading: "Loading settings…",
     loadFailed: (detail: string) => `Could not load settings: ${detail}`,
     retry: "Retry",
+    themeSection: "Appearance",
+    themeDescription:
+      "The colour theme of Lumo and of the pages you read. Dark themes invert PDF pages and translation previews; Sepia tints them.",
+    themeLabel: "Theme",
+    themes: {
+      system: "Match system (light or dark)",
+      light: "Light",
+      dark: "Dark",
+      sepia: "Sepia: warm paper",
+      night: "Night: dim and warm",
+    },
+    themeFailed: (detail: string) => `Could not save the theme: ${detail}`,
     languageSection: "Interface language",
     languageDescription:
       "The interface language is independent of the translation target language. Changing it reloads the page.",

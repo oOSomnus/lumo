@@ -4,7 +4,6 @@ import {
   EPUB_FONT_SIZE_MIN,
   EPUB_FONT_SIZE_STEP,
   EPUB_LINE_HEIGHTS,
-  EPUB_THEMES,
 } from "../../shared/contracts";
 import type { EpubReaderStyle } from "../../shared/epub";
 import { useI18n } from "../i18n";
@@ -156,24 +155,6 @@ export function EpubToolbar({
               {EPUB_LINE_HEIGHTS.map((value) => (
                 <option key={value} value={value}>
                   {value}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="epub-setting">
-            {t.epub.theme}
-            <select
-              value={style.theme}
-              disabled={disabled}
-              onChange={(event) =>
-                onStyleChange({
-                  theme: event.target.value as EpubReaderStyle["theme"],
-                })
-              }
-            >
-              {EPUB_THEMES.map((value) => (
-                <option key={value} value={value}>
-                  {t.epub[value]}
                 </option>
               ))}
             </select>

@@ -1,4 +1,5 @@
 import type {
+  ColorTheme,
   EpubReaderView,
   TranslationContext,
 } from "../shared/contracts";
@@ -134,11 +135,12 @@ export interface EpubBridge {
   next(): Promise<void>;
   prev(): Promise<void>;
   /**
-   * Applies the four reading settings of `view` (its cfi is ignored). Before
-   * the first display they only take effect; afterwards the reading position
-   * is kept and a new relocation is published once the layout settled.
+   * Applies the three reading settings of `view` (its cfi is ignored) and the
+   * app's colour theme. Before the first display they only take effect;
+   * afterwards the reading position is kept and a new relocation is published
+   * once the layout settled.
    */
-  setView(view: EpubReaderView): Promise<void>;
+  setView(view: EpubReaderView, theme: ColorTheme): Promise<void>;
   clearSelection(): void;
   /**
    * The book on screen is about to be replaced: everything it still sends is

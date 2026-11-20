@@ -19,6 +19,11 @@
   --c4: #b0703c;
   --c5: #3d7a4f;
   --c6: #a24f6a;
+  --border-strong: #b3bac2;
+  --on-accent: #ffffff;
+  --info-soft: #e8edf5;
+  --viewer-bg: #f3f4f5;
+  --page-bg: #ffffff;
   font-family:
     system-ui,
     -apple-system,
@@ -30,6 +35,96 @@
   color: var(--fg);
   background: var(--surface);
   color-scheme: light;
+}
+
+/*
+ * Colour themes. theme.ts sets data-theme on <html> to the resolved theme (system resolves to
+ * light or dark) and the matching color-scheme; :root above is the light palette.
+ */
+:root[data-theme="dark"] {
+  --fg: #e2e5e9;
+  --muted: #9ba3ad;
+  --border: #3a4048;
+  --border-strong: #565e69;
+  --surface: #15181c;
+  --paper: #1f2328;
+  --chrome: #1a1d22;
+  --accent: #7ea7c8;
+  --accent-strong: #a8c5dd;
+  --accent-soft: #233344;
+  --on-accent: #0f151b;
+  --info-soft: #222e3d;
+  --warning: #e3b45f;
+  --warning-soft: #3a2e16;
+  --error: #f08b8b;
+  --error-soft: #3c2222;
+  --success: #7cc59b;
+  --c1: #5fb3a9;
+  --c2: #84a5d6;
+  --c3: #b897d4;
+  --c4: #d9a06c;
+  --c5: #79b48a;
+  --c6: #d98aa3;
+  --viewer-bg: #2a2a2e;
+  --page-bg: #1e1e1e;
+}
+
+/* Warm paper for long reading in daylight. */
+:root[data-theme="sepia"] {
+  --fg: #3b2f1e;
+  --muted: #76664e;
+  --border: #d8c9a6;
+  --border-strong: #bba67b;
+  --surface: #ebe0c6;
+  --paper: #f8f1e0;
+  --chrome: #f2e8d1;
+  --accent: #8a4b08;
+  --accent-strong: #6b3906;
+  --accent-soft: #efdcbc;
+  --on-accent: #fffaf0;
+  --info-soft: #e9dcc0;
+  --warning: #8a5a00;
+  --warning-soft: #f6e6c2;
+  --error: #9e2b20;
+  --error-soft: #f5dccf;
+  --success: #3f6b2f;
+  --c1: #3c7466;
+  --c2: #4d6890;
+  --c3: #845d99;
+  --c4: #a5622b;
+  --c5: #4f7a3d;
+  --c6: #9c4a5e;
+  --viewer-bg: #e3d7bb;
+  --page-bg: #f4ecd8;
+}
+
+/* Near-black with amber text and little blue, for reading in the dark. */
+:root[data-theme="night"] {
+  --fg: #d6c4a5;
+  --muted: #998a71;
+  --border: #2f2a23;
+  --border-strong: #4a4237;
+  --surface: #0b0a09;
+  --paper: #151310;
+  --chrome: #110f0d;
+  --accent: #d4a05a;
+  --accent-strong: #e8bd80;
+  --accent-soft: #2a2117;
+  --on-accent: #15100a;
+  --info-soft: #221d16;
+  --warning: #e0ad55;
+  --warning-soft: #2d2412;
+  --error: #e5907c;
+  --error-soft: #331d18;
+  --success: #a3bf7a;
+  --c1: #8fb59e;
+  --c2: #a7a5c4;
+  --c3: #c4a1bf;
+  --c4: #d9a06c;
+  --c5: #a3bf7a;
+  --c6: #d4919a;
+  --viewer-bg: #0b0a09;
+  --page-bg: #13110e;
 }
 
 * {
@@ -66,7 +161,7 @@ button {
 }
 
 button:hover:not(:disabled) {
-  border-color: #b3bac2;
+  border-color: var(--border-strong);
   background: var(--chrome);
 }
 
@@ -78,7 +173,7 @@ button:disabled {
 button.primary {
   border-color: var(--accent);
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   font-weight: 600;
 }
 
@@ -481,7 +576,7 @@ input:not([type]) {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  background: #f3f4f5;
+  background: var(--viewer-bg);
 }
 
 .pdf-frame {
@@ -489,7 +584,7 @@ input:not([type]) {
   width: 100%;
   height: 100%;
   border: 0;
-  background: #f3f4f5;
+  background: var(--viewer-bg);
 }
 
 .empty-hint {
@@ -658,7 +753,7 @@ input:not([type]) {
 .layout-switch button[aria-pressed="true"] {
   border-color: var(--accent);
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 .page-panel {
@@ -785,7 +880,7 @@ input:not([type]) {
 .typst-view-toggle button[aria-pressed="true"] {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 .typst-preview {
@@ -793,7 +888,7 @@ input:not([type]) {
   border: 1px solid var(--border);
   border-radius: 4px;
   overflow: hidden;
-  background: #fff;
+  background: var(--page-bg);
 }
 
 /* A zoomed page keeps its own width: centred when narrower than the pane, scrolled sideways when wider. */
@@ -808,7 +903,7 @@ input:not([type]) {
   height: 100%;
   min-height: 240px;
   border: 0;
-  background: #fff;
+  background: var(--page-bg);
 }
 
 .typst-source {
@@ -1221,7 +1316,7 @@ input:not([type]) {
 }
 
 .page-marker.task {
-  background: #e8edf5;
+  background: var(--info-soft);
   color: var(--c2);
 }
 
@@ -1317,7 +1412,7 @@ input:not([type]) {
 .stage-repairing .task-stage,
 .stage-preparing .task-stage,
 .stage-saving .task-stage {
-  background: #e8f0f8;
+  background: var(--info-soft);
   color: var(--c2);
 }
 
@@ -1862,7 +1957,7 @@ input:not([type]) {
   width: 100%;
   height: 100%;
   border: 0;
-  background: #ffffff;
+  background: var(--page-bg);
 }
 
 .epub-pane {

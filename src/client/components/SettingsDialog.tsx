@@ -7,7 +7,9 @@ import {
   type AiLoginEvent,
   type AiReasoningEffort,
   type AiSettingsSnapshot,
+  UI_THEMES,
   type UiLocale,
+  type UiTheme,
 } from "../../shared/contracts";
 import {
   answerAiLogin,
@@ -119,6 +121,9 @@ export interface SettingsDialogProps {
   onClose: () => void;
   uiLocale: UiLocale;
   onApplyUiLocale: (next: UiLocale) => Promise<void>;
+  themePreference: UiTheme;
+  /** Shows the theme at once and saves it; rejects only when the newest pick failed to save. */
+  onApplyTheme: (next: UiTheme) => Promise<void>;
   localeApplyBlockedReason: string | null;
   dataDirectory: string;
   /** Receives every AI settings snapshot the dialog reads or saves, so the reader's readiness stays current. */
@@ -130,6 +135,8 @@ export function SettingsDialog({
   onClose,
   uiLocale,
   onApplyUiLocale,
+  themePreference,
+  onApplyTheme,
   localeApplyBlockedReason,
   dataDirectory,
   onSnapshotChange,
@@ -162,6 +169,7 @@ export function SettingsDialog({
   const [refreshing, setRefreshing] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
 
+  const [themeError, setThemeError] = useState<UiError | null>(null);
   const [languageDraft, setLanguageDraft] = useState<UiLocale>(uiLocale);
   const [applyingLanguage, setApplyingLanguage] = useState(false);
   const [languageError, setLanguageError] = useState<UiError | null>(null);
@@ -260,6 +268,7 @@ export function SettingsDialog({
       // Reset when the dialog opens, not when the fetch returns: a pick made meanwhile must survive.
       setLanguageDraft(uiLocale);
       setLanguageError(null);
+      setThemeError(null);
       setSnapshot(null);
       setCatalog(null);
       setCatalogError(null);
@@ -1216,6 +1225,34 @@ export function SettingsDialog({
               </div>
             </section>
           )}
+
+          <section className="settings-section" aria-labelledby="settings-theme">
+            <h3 id="settings-theme">{t.settings.themeSection}</h3>
+            <p className="muted">{t.settings.themeDescription}</p>
+            <label>
+              {t.settings.themeLabel}
+              <select
+                value={themePreference}
+                onChange={(event) => {
+                  setThemeError(null);
+                  onApplyTheme(event.target.value as UiTheme).catch((error: unknown) =>
+                    setThemeError(toUiError(error)),
+                  );
+                }}
+              >
+                {UI_THEMES.map((value) => (
+                  <option key={value} value={value}>
+                    {t.settings.themes[value]}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {themeError && (
+              <p className="field-error" role="alert">
+                {t.settings.themeFailed(errorText(themeError, locale))}
+              </p>
+            )}
+          </section>
 
           <section className="settings-section" aria-labelledby="settings-language">
             <h3 id="settings-language">{t.settings.languageSection}</h3>

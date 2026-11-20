@@ -3,13 +3,13 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AiConfig, UiLocale } from "../shared/contracts";
+import type { AiConfig, UiLocale, UiTheme } from "../shared/contracts";
 import { openAiCredentialStore, type SqliteCredentialStore } from "./ai-credentials";
 import { createAiManager, type AiManager } from "./ai-settings";
 import { httpErrorFromUnknown } from "./http";
 import { handleLibrary } from "./library";
 import { handleSettings } from "./settings";
-import { getUiLocale, openReaderDb } from "./storage";
+import { getTheme, getUiLocale, openReaderDb } from "./storage";
 
 const directories: string[] = [];
 const stores: SqliteCredentialStore[] = [];
@@ -103,6 +103,26 @@ describe("handleSettings", () => {
     expect(wrongType.status).toBe(400);
   });
 
+  test("updates the theme alone and rejects unknown themes or mixed bodies", async () => {
+    const ctx = await setup();
+    const saved = await callSettings(ctx, "/api/settings", {
+      method: "PATCH",
+      ...jsonBody({ theme: "sepia" }),
+    });
+    expect(saved?.status).toBe(200);
+    expect(await saved?.json()).toEqual({ theme: "sepia" });
+    expect(getTheme(ctx.db)).toBe("sepia");
+    expect(getUiLocale(ctx.db)).toBe("en");
+
+    for (const body of [{ theme: "blue" }, { theme: "dark", uiLocale: "en" }, {}]) {
+      const rejected = await failure(
+        callSettings(ctx, "/api/settings", { method: "PATCH", ...jsonBody(body) }),
+      );
+      expect(rejected.status).toBe(400);
+    }
+    expect(getTheme(ctx.db)).toBe("sepia");
+  });
+
   test("round-trips an AI config and never returns credential secrets", async () => {
     const ctx = await setup();
     const config: AiConfig = {
@@ -164,8 +184,9 @@ describe("handleSettings", () => {
       { db: ctx.db, dataDirectory: ctx.directory },
     );
     const text = await response.text();
-    const snapshot = JSON.parse(text) as { uiLocale: UiLocale };
+    const snapshot = JSON.parse(text) as { uiLocale: UiLocale; theme: UiTheme };
     expect(snapshot.uiLocale).toBe("en");
+    expect(snapshot.theme).toBe("system");
     expect(snapshot).not.toHaveProperty("deviceId");
     expect(text).not.toContain("sk-hidden");
   });

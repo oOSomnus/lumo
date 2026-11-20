@@ -26,6 +26,7 @@ import {
   type TranslationRecord,
   type TranslationZoom,
   type UiLocale,
+  type UiTheme,
 } from "../../shared/contracts";
 import {
   apiFetch,
@@ -36,9 +37,11 @@ import {
   jsonInit,
   requestTranslation,
   saveTranslationRecord,
+  saveTheme,
   saveUiLocale,
   triggerDownload,
 } from "../api";
+import { setThemePreference, useTheme } from "../theme";
 import {
   errorText,
   formatDateTime,
@@ -319,6 +322,11 @@ export function Reader() {
     epubStyleOf(DEFAULT_EPUB_READER_VIEW),
   );
   const epubStyleRef = useRef<EpubReaderStyle>(epubStyle);
+  const { preference: themePreference, theme: colorTheme } = useTheme();
+  const colorThemeRef = useRef(colorTheme);
+  colorThemeRef.current = colorTheme;
+  // The theme the open book was last styled with; a different one is sent once the book is ready.
+  const epubThemeRef = useRef(colorTheme);
   const epubStyleTimerRef = useRef<number | null>(null);
   const epubStyleInflightRef = useRef(0);
   const [epubStyleBusy, setEpubStyleBusy] = useState(false);
@@ -711,7 +719,8 @@ export function Reader() {
       epubStyleRef.current = style;
       setEpubStyle(style);
       try {
-        await bridge.setView(view);
+        epubThemeRef.current = colorThemeRef.current;
+        await bridge.setView(view, epubThemeRef.current);
         if (view.cfi) await bridge.display(view.cfi);
       } catch {
         if (
@@ -746,11 +755,11 @@ export function Reader() {
         epubStyleInflightRef.current += 1;
         epubInternalNavRef.current += 1;
         try {
-          await bridge.setView({
-            format: "epub",
-            cfi: null,
-            ...epubStyleRef.current,
-          });
+          epubThemeRef.current = colorThemeRef.current;
+          await bridge.setView(
+            { format: "epub", cfi: null, ...epubStyleRef.current },
+            epubThemeRef.current,
+          );
           if (live()) setEpubActionError(null);
         } catch (error) {
           const failure = toUiError(error);
@@ -779,6 +788,12 @@ export function Reader() {
     () => changeEpubStyle(epubStyleOf(DEFAULT_EPUB_READER_VIEW)),
     [changeEpubStyle],
   );
+
+  // A theme picked while a book is open restyles it through the same pass as a settings change.
+  useEffect(() => {
+    if (!viewerReady || currentDocumentRef.current?.format !== "epub") return;
+    if (epubThemeRef.current !== colorTheme) changeEpubStyle({});
+  }, [changeEpubStyle, colorTheme, viewerReady]);
 
   const workspaceRef = useRef<HTMLElement | null>(null);
   const pageBodyRef = useRef<HTMLDivElement | null>(null);
@@ -1442,6 +1457,8 @@ export function Reader() {
         const snapshot = await apiJson<LibrarySnapshot>("/api/library");
         if (cancelled) return;
         setUiLocale(snapshot.uiLocale);
+        setThemePreference(snapshot.theme);
+        savedThemeRef.current = snapshot.theme;
         setLibrary(snapshot);
         setLibraryError(null);
         setLanguage(snapshot.settings.targetLanguage);
@@ -2242,7 +2259,8 @@ export function Reader() {
       lastViewRef.current = stored;
       try {
         // The settings go in before the first layout, so the book is paginated once.
-        await bridge.setView(stored);
+        epubThemeRef.current = colorThemeRef.current;
+        await bridge.setView(stored, epubThemeRef.current);
         await showEpubPosition(bridge, stored.cfi, section);
       } catch (error) {
         if (stillOpen()) handleViewerError(toUiError(error));
@@ -3532,6 +3550,27 @@ export function Reader() {
     return null;
   })();
 
+  // A theme shows at once and is saved behind it. Saves may finish out of order: only the newest
+  // pick reports a failure, which falls back to the newest theme that was saved.
+  const savedThemeRef = useRef<UiTheme>("system");
+  const themeAttemptRef = useRef(0);
+  const themeSavedAttemptRef = useRef(0);
+  const applyTheme = useCallback(async (next: UiTheme): Promise<void> => {
+    const attempt = ++themeAttemptRef.current;
+    setThemePreference(next);
+    try {
+      await saveTheme(next);
+      if (attempt > themeSavedAttemptRef.current) {
+        themeSavedAttemptRef.current = attempt;
+        savedThemeRef.current = next;
+      }
+    } catch (error) {
+      if (attempt !== themeAttemptRef.current) return;
+      setThemePreference(savedThemeRef.current);
+      throw error;
+    }
+  }, []);
+
   const applyUiLocale = useCallback(
     async (next: UiLocale): Promise<void> => {
       const blocked =
@@ -4569,6 +4608,8 @@ export function Reader() {
         onSnapshotChange={showAiSnapshot}
         uiLocale={locale}
         onApplyUiLocale={applyUiLocale}
+        themePreference={themePreference}
+        onApplyTheme={applyTheme}
         localeApplyBlockedReason={localeApplyBlockedReason}
         dataDirectory={library.dataDirectory}
       />

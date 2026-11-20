@@ -1,10 +1,7 @@
 import type { EpubReaderView } from "./contracts";
 
 /** The reader settings that change how an EPUB is paginated. */
-export type EpubReaderStyle = Pick<
-  EpubReaderView,
-  "fontSize" | "fontFamily" | "lineHeight" | "theme"
->;
+export type EpubReaderStyle = Pick<EpubReaderView, "fontSize" | "fontFamily" | "lineHeight">;
 
 /**
  * The viewport and reading settings a page was laid out with. It is local to
@@ -16,13 +13,12 @@ export interface EpubLayoutSnapshot {
   style: EpubReaderStyle;
 }
 
-/** Just the four reading settings of a stored view, which also carries a position. */
+/** Just the three reading settings of a stored view, which also carries a position. */
 export function epubStyleOf(view: EpubReaderStyle): EpubReaderStyle {
   return {
     fontSize: view.fontSize,
     fontFamily: view.fontFamily,
     lineHeight: view.lineHeight,
-    theme: view.theme,
   };
 }
 

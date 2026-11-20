@@ -1355,7 +1355,7 @@ describe("TranslationQueue", () => {
         epubLayout: {
           width: 600,
           height: 800,
-          style: { fontSize: 18, fontFamily: "serif", lineHeight: 1.6, theme: "light" },
+          style: { fontSize: 18, fontFamily: "serif", lineHeight: 1.6 },
         },
         epubPage: { page: 2, total: 9 },
       }).key;
