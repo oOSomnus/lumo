@@ -261,7 +261,7 @@ export const TranslationView = memo(function TranslationView({
     <div className={streaming ? "translation-body streaming" : "translation-body"}>
       {!streaming && !immersive && (
         <div className="typst-toolbar">
-          <div className="typst-view-toggle" role="group">
+          <div className="segmented" role="group">
             <button
               type="button"
               aria-pressed={mode === "preview"}

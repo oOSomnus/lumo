@@ -1,4 +1,12 @@
+import type { ReactNode } from "react";
 import { useI18n, type Messages } from "../i18n";
+import {
+  LayoutEqualIcon,
+  LayoutLeftOnlyIcon,
+  LayoutLeftWideIcon,
+  LayoutRightOnlyIcon,
+  LayoutRightWideIcon,
+} from "../icons";
 import type { LayoutPreset } from "../page-keys";
 
 /** Which panes are on screen: both side by side, or only the original (left) or the translation (right). */
@@ -28,15 +36,25 @@ interface LayoutSwitchProps {
   onChange: (mode: PaneMode, ratio?: number) => void;
 }
 
+const LAYOUT_ICONS: Record<LayoutPresetEntry["label"], ReactNode> = {
+  leftOnly: <LayoutLeftOnlyIcon />,
+  rightOnly: <LayoutRightOnlyIcon />,
+  equal: <LayoutEqualIcon />,
+  leftWide: <LayoutLeftWideIcon />,
+  rightWide: <LayoutRightWideIcon />,
+};
+
+/** The five layouts as icons; each keeps its name as hidden text, shown as a tooltip. */
 export function LayoutSwitch({ mode, ratio, onChange }: LayoutSwitchProps) {
   const { t } = useI18n();
   return (
-    <div className="layout-switch" role="group" aria-label={t.layout.label}>
+    <div className="layout-switch segmented" role="group" aria-label={t.layout.label}>
       {LAYOUT_PRESETS.map((preset) => (
         <button
           key={preset.preset}
           type="button"
-          title={t.layout[preset.label]}
+          className="icon-button"
+          title={`${t.layout[preset.label]} (Ctrl+${preset.preset})`}
           aria-keyshortcuts={`Control+${preset.preset} Control+Shift+${preset.preset}`}
           aria-pressed={
             preset.mode === mode &&
@@ -44,9 +62,11 @@ export function LayoutSwitch({ mode, ratio, onChange }: LayoutSwitchProps) {
           }
           onClick={() => onChange(preset.mode, preset.ratio)}
         >
-          {t.layout[preset.label]}
+          {LAYOUT_ICONS[preset.label]}
+          <span className="sr-only">{t.layout[preset.label]}</span>
         </button>
       ))}
     </div>
   );
 }
+

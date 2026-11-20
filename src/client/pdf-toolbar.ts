@@ -13,6 +13,21 @@ const ICON =
 
 const STYLE = `
 ${PDF_THEME_CSS}
+/* The viewer's chrome in the app's own colours, so the embedded toolbar matches the reader header. */
+html[data-lumo-theme="light"] {
+  --toolbar-bg-color: #ffffff; --toolbar-border-color: #dde1e6;
+  --sidebar-toolbar-bg-color: #fafafb; --field-border-color: #dde1e6;
+}
+html[data-lumo-theme="dark"] {
+  --toolbar-bg-color: #1b1e22; --toolbar-border-color: #30353c;
+  --sidebar-toolbar-bg-color: #17191d; --field-bg-color: #131518; --field-border-color: #30353c;
+}
+html[data-lumo-theme="sepia"] {
+  --toolbar-bg-color: #f9f3e3; --toolbar-border-color: #ddcfae;
+  --sidebar-toolbar-bg-color: #f4ead4; --field-bg-color: #fffaf0; --field-border-color: #ddcfae;
+  --main-color: #3b2f1e; --toolbar-icon-bg-color: #3b2f1e;
+}
+.toolbarField { border-radius: 6px; }
 @media (max-width: 690px) {
   #mainContainer { min-width: 0; }
 }

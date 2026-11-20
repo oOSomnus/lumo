@@ -1,6 +1,6 @@
 <h1 align="center"><img src="docs/assets/lumo-readme.png" alt="Lumo" width="640"></h1>
 
-A local PDF and EPUB reader that translates pages with a vision model. Each translated page becomes a standalone Typst document, saved and rendered in the app; one that does not compile locally goes back to the model until it does. Translations of a PDF can be exported as one PDF, alone or after each original page. Reading runs on your computer and opens in your browser, in a light, dark, sepia or night theme. [How translation works](docs/manual.md#overview)
+A local PDF and EPUB reader that translates pages with a vision model. Each translated page becomes a standalone Typst document, saved and rendered in the app; one that does not compile locally goes back to the model until it does. Translations of a PDF can be exported as one PDF, alone or after each original page. Reading runs on your computer and opens in your browser, with a searchable library and a light, dark, sepia or night theme. [How translation works](docs/manual.md#overview)
 
 English · [简体中文](README.zh-CN.md)
 

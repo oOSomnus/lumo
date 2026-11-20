@@ -79,7 +79,7 @@ test.describe("on a touch screen", () => {
 
         // The settings, with the custom provider's fields shown.
         await page.getByRole("button", { name: /^(?:Settings|设置)$/ }).tap();
-        const settings = page.getByRole("dialog");
+        const settings = page.getByRole("main", { name: /^(?:Settings|设置)$/ });
         await expect(settings).toBeVisible();
         await settings.locator("select").first().selectOption("custom");
         await expect(settings.locator("details.settings-advanced")).toBeVisible();
@@ -87,9 +87,9 @@ test.describe("on a touch screen", () => {
           await undersized(settings.locator(":is(button, select, textarea, summary, input:not([type=checkbox], [type=radio]))"), false),
           `settings at ${width}px`,
         ).toEqual([]);
-        expect(await sideways(settings.locator(".dialog-card")), `settings at ${width}px`).toBeLessThanOrEqual(1);
+        expect(await sideways(settings), `settings at ${width}px`).toBeLessThanOrEqual(1);
         expect(await pageSideways(page), `page at ${width}px`).toBeLessThanOrEqual(1);
-        await settings.locator(".dialog-heading button").tap();
+        await settings.getByRole("button", { name: /^(?:Close|关闭)$/ }).tap();
         await expect(settings).toBeHidden();
       }
     });

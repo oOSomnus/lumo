@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AI_REASONING_EFFORTS,
   type AiCatalog,
@@ -23,8 +23,15 @@ import {
   startAiLogin,
 } from "../api";
 import { errorText, toUiError, useI18n, type UiError } from "../i18n";
+import {
+  CloseIcon,
+  DatabaseIcon,
+  GlobeIcon,
+  KeyboardIcon,
+  PaletteIcon,
+  SparklesIcon,
+} from "../icons";
 import { LAYOUT_PRESETS } from "./LayoutSwitch";
-import { ModalDialog } from "./ModalDialog";
 
 type LoginNotification = Extract<AiLoginEvent, { type: "notification" }>["event"];
 type LoginPrompt = Extract<AiLoginEvent, { type: "prompt" }>["prompt"];
@@ -116,8 +123,22 @@ function safeExternalUrl(value: string): string | null {
   return null;
 }
 
-export interface SettingsDialogProps {
-  open: boolean;
+/** The page's sections, in order; the index beside them scrolls to each. */
+const SECTIONS = ["ai", "appearance", "language", "shortcuts", "data"] as const;
+type SectionId = (typeof SECTIONS)[number];
+
+/** Paper, text and accent of each theme, for its swatch; `system` shows light and dark halves. */
+const THEME_SWATCHES: Record<Exclude<UiTheme, "system">, [string, string, string]> = {
+  light: ["#ffffff", "#1f2329", "#365f7d"],
+  dark: ["#1b1e22", "#e4e7eb", "#7ea7c8"],
+  sepia: ["#f9f3e3", "#3b2f1e", "#8a4b08"],
+  night: ["#141210", "#d6c4a5", "#d4a05a"],
+};
+
+export interface SettingsPageProps {
+  /** The Settings screen is shown; its content mounts (and loads) only then. */
+  active: boolean;
+  /** Leaves Settings for the screen it was opened from. */
   onClose: () => void;
   uiLocale: UiLocale;
   onApplyUiLocale: (next: UiLocale) => Promise<void>;
@@ -130,8 +151,8 @@ export interface SettingsDialogProps {
   onSnapshotChange: (snapshot: AiSettingsSnapshot) => void;
 }
 
-export function SettingsDialog({
-  open,
+export function SettingsPage({
+  active,
   onClose,
   uiLocale,
   onApplyUiLocale,
@@ -140,13 +161,10 @@ export function SettingsDialog({
   localeApplyBlockedReason,
   dataDirectory,
   onSnapshotChange,
-}: SettingsDialogProps) {
+}: SettingsPageProps) {
   const { locale, t } = useI18n();
-  const shortcutsRef = useRef<HTMLDetailsElement>(null);
-
-  useEffect(() => {
-    if (open && shortcutsRef.current) shortcutsRef.current.open = false;
-  }, [open]);
+  const sectionsRef = useRef<HTMLDivElement>(null);
+  const [currentSection, setCurrentSection] = useState<SectionId>("ai");
 
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<UiError | null>(null);
@@ -308,7 +326,7 @@ export function SettingsDialog({
   );
 
   useEffect(() => {
-    if (!open) {
+    if (!active) {
       stopLogin();
       catalogAbort.current?.abort();
       return;
@@ -316,7 +334,32 @@ export function SettingsDialog({
     const controller = new AbortController();
     void loadSettings(controller.signal);
     return () => controller.abort();
-  }, [open, loadNonce, loadSettings, stopLogin]);
+  }, [active, loadNonce, loadSettings, stopLogin]);
+
+  const sectionsShown = active && !loading && !loadError && snapshot !== null;
+  // The index marks the section nearest the top of the page.
+  useEffect(() => {
+    const root = sectionsRef.current?.closest(".settings-screen");
+    const sections = sectionsRef.current?.querySelectorAll<HTMLElement>("[data-section]");
+    if (!sectionsShown || !root || !sections || sections.length === 0) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const top = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
+        const id = (top?.target as HTMLElement | undefined)?.dataset.section;
+        if (id && (SECTIONS as readonly string[]).includes(id)) setCurrentSection(id as SectionId);
+      },
+      { root, rootMargin: "0px 0px -60% 0px" },
+    );
+    for (const section of sections) observer.observe(section);
+    return () => observer.disconnect();
+  }, [sectionsShown]);
+
+  const showSection = (id: SectionId) => {
+    setCurrentSection(id);
+    document.getElementById(`settings-section-${id}`)?.scrollIntoView({ block: "start" });
+  };
 
   useEffect(() => {
     return () => {
@@ -817,65 +860,61 @@ export function SettingsDialog({
   const frozen =
     loginActive || saving || removing || endpointConfirm !== null;
 
+  const sectionLabels: Record<SectionId, string> = {
+    ai: t.settings.aiSection,
+    appearance: t.settings.themeSection,
+    language: t.settings.languageSection,
+    shortcuts: t.settings.shortcuts,
+    data: t.settings.dataSection,
+  };
+  const sectionIcons: Record<SectionId, ReactNode> = {
+    ai: <SparklesIcon size={16} />,
+    appearance: <PaletteIcon size={16} />,
+    language: <GlobeIcon size={16} />,
+    shortcuts: <KeyboardIcon size={16} />,
+    data: <DatabaseIcon size={16} />,
+  };
+  const heading = (id: SectionId) => (
+    <h2 id={`settings-${id}`}>
+      {sectionIcons[id]}
+      {sectionLabels[id]}
+    </h2>
+  );
+
   return (
-    <ModalDialog
-      open={open}
-      onClose={handleClose}
-      label={t.settings.title}
-      className="settings-dialog"
+    <main
+      className="settings-screen"
+      aria-labelledby="settings-title"
+      hidden={!active}
+      inert={!active}
     >
-      {open && (
-        <>
-      <div className="dialog-heading">
-        <h2>{t.settings.title}</h2>
-        <button type="button" onClick={handleClose}>
+      {active && (
+      <div className="settings-layout">
+      <header className="page-header">
+        <div>
+          <h1 id="settings-title" tabIndex={-1}>{t.settings.title}</h1>
+          <p className="page-subtitle">{t.settings.subtitle}</p>
+        </div>
+        <button type="button" className="ghost" onClick={handleClose}>
+          <CloseIcon size={16} />
           {t.settings.close}
         </button>
-      </div>
+      </header>
+      <nav className="settings-index" aria-label={t.settings.sections}>
+        {SECTIONS.map((id) => (
+          <button
+            key={id}
+            type="button"
+            aria-current={currentSection === id ? "true" : undefined}
+            onClick={() => showSection(id)}
+          >
+            {sectionIcons[id]}
+            {sectionLabels[id]}
+          </button>
+        ))}
+      </nav>
+      <div className="settings-sections" ref={sectionsRef}>
 
-      <details className="settings-shortcuts" ref={shortcutsRef}>
-        <summary>{t.settings.shortcuts}</summary>
-        <table>
-          <thead>
-            <tr>
-              <th scope="col">{t.settings.shortcutsAction}</th>
-              <th scope="col">{t.settings.shortcutsKeys}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>{t.settings.shortcutsPrevious}</td>
-              <td><kbd>←</kbd></td>
-            </tr>
-            <tr>
-              <td>{t.settings.shortcutsNext}</td>
-              <td><kbd>→</kbd></td>
-            </tr>
-            <tr>
-              <td>{t.settings.shortcutsTranslate}</td>
-              <td><kbd>Enter</kbd></td>
-            </tr>
-            {LAYOUT_PRESETS.map((preset) => (
-              <tr key={preset.preset}>
-                <td>{t.layout[preset.label]}</td>
-                <td>
-                  <kbd>Ctrl</kbd> + <kbd>{preset.preset}</kbd>
-                </td>
-              </tr>
-            ))}
-            <tr>
-              <td>{t.settings.shortcutsEnterImmersive}</td>
-              <td><kbd>F</kbd></td>
-            </tr>
-            <tr>
-              <td>{t.settings.shortcutsImmersive}</td>
-              <td><kbd>Esc</kbd></td>
-            </tr>
-          </tbody>
-        </table>
-        <p className="muted">{t.settings.shortcutsInputs}</p>
-        <p className="muted">{t.settings.shortcutsBrowser}</p>
-      </details>
 
       {loading && <p>{t.settings.loading}</p>}
       {loadError && (
@@ -888,9 +927,9 @@ export function SettingsDialog({
       )}
 
       {!loading && !loadError && snapshot && (
-        <div className="settings-sections">
-          <section className="settings-section" aria-labelledby="settings-ai">
-            <h3 id="settings-ai">{t.settings.aiSection}</h3>
+        <>
+          <section id="settings-section-ai" data-section="ai" className="settings-section" aria-labelledby="settings-ai">
+            {heading("ai")}
             {aiSummary && (
               <div className="ai-summary" aria-live="polite">
                 <strong>{aiSummary.title}</strong>
@@ -1009,7 +1048,7 @@ export function SettingsDialog({
             )}
 
             <div className="settings-subsection" role="group" aria-labelledby="settings-auth">
-              <h4 id="settings-auth">{t.settings.authSection}</h4>
+              <h3 id="settings-auth">{t.settings.authSection}</h3>
               {providerOption ? (
                 <>
                   <p>{t.settings.authProvider(providerOption.name)}</p>
@@ -1206,7 +1245,7 @@ export function SettingsDialog({
 
           {endpointConfirm && (
             <section className="settings-section" aria-labelledby="settings-endpoint">
-              <h3 id="settings-endpoint">{t.confirm.endpointTitle}</h3>
+              <h2 id="settings-endpoint">{t.confirm.endpointTitle}</h2>
               <p>{t.confirm.endpointBody(endpointConfirm.destination)}</p>
               <div className="dialog-actions">
                 <button
@@ -1226,27 +1265,39 @@ export function SettingsDialog({
             </section>
           )}
 
-          <section className="settings-section" aria-labelledby="settings-theme">
-            <h3 id="settings-theme">{t.settings.themeSection}</h3>
+          <section id="settings-section-appearance" data-section="appearance" className="settings-section" aria-labelledby="settings-appearance">
+            {heading("appearance")}
             <p className="muted">{t.settings.themeDescription}</p>
-            <label>
-              {t.settings.themeLabel}
-              <select
-                value={themePreference}
-                onChange={(event) => {
-                  setThemeError(null);
-                  onApplyTheme(event.target.value as UiTheme).catch((error: unknown) =>
-                    setThemeError(toUiError(error)),
-                  );
-                }}
-              >
-                {UI_THEMES.map((value) => (
-                  <option key={value} value={value}>
-                    {t.settings.themes[value]}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <fieldset className="theme-options">
+              <legend className="sr-only">{t.settings.themeLabel}</legend>
+              {UI_THEMES.map((value) => (
+                <label key={value} className="theme-option">
+                  <input
+                    type="radio"
+                    name="lumo-theme"
+                    value={value}
+                    checked={themePreference === value}
+                    onChange={() => {
+                      setThemeError(null);
+                      onApplyTheme(value).catch((error: unknown) => setThemeError(toUiError(error)));
+                    }}
+                  />
+                  {value === "system" ? (
+                    <span className="theme-swatch system" aria-hidden="true" />
+                  ) : (
+                    <span
+                      className="theme-swatch"
+                      aria-hidden="true"
+                      style={{ background: THEME_SWATCHES[value][0] }}
+                    >
+                      <span style={{ background: THEME_SWATCHES[value][1] }} />
+                      <span style={{ background: THEME_SWATCHES[value][2] }} />
+                    </span>
+                  )}
+                  <span>{t.settings.themes[value]}</span>
+                </label>
+              ))}
+            </fieldset>
             {themeError && (
               <p className="field-error" role="alert">
                 {t.settings.themeFailed(errorText(themeError, locale))}
@@ -1254,8 +1305,8 @@ export function SettingsDialog({
             )}
           </section>
 
-          <section className="settings-section" aria-labelledby="settings-language">
-            <h3 id="settings-language">{t.settings.languageSection}</h3>
+          <section id="settings-section-language" data-section="language" className="settings-section" aria-labelledby="settings-language">
+            {heading("language")}
             <p className="muted">{t.settings.languageDescription}</p>
             <label>
               {t.settings.languageSection}
@@ -1292,19 +1343,63 @@ export function SettingsDialog({
             </button>
           </section>
 
-          <section className="settings-section" aria-labelledby="settings-data">
-            <h3 id="settings-data">{t.settings.dataSection}</h3>
-            <p>
-              {t.settings.dataDirectory} {dataDirectory}
-            </p>
+          <section id="settings-section-shortcuts" data-section="shortcuts" className="settings-section" aria-labelledby="settings-shortcuts">
+            {heading("shortcuts")}
+        <table className="settings-shortcuts">
+          <thead>
+            <tr>
+              <th scope="col">{t.settings.shortcutsAction}</th>
+              <th scope="col">{t.settings.shortcutsKeys}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>{t.settings.shortcutsPrevious}</td>
+              <td><kbd>←</kbd></td>
+            </tr>
+            <tr>
+              <td>{t.settings.shortcutsNext}</td>
+              <td><kbd>→</kbd></td>
+            </tr>
+            <tr>
+              <td>{t.settings.shortcutsTranslate}</td>
+              <td><kbd>Enter</kbd></td>
+            </tr>
+            {LAYOUT_PRESETS.map((preset) => (
+              <tr key={preset.preset}>
+                <td>{t.layout[preset.label]}</td>
+                <td>
+                  <kbd>Ctrl</kbd> + <kbd>{preset.preset}</kbd>
+                </td>
+              </tr>
+            ))}
+            <tr>
+              <td>{t.settings.shortcutsEnterImmersive}</td>
+              <td><kbd>F</kbd></td>
+            </tr>
+            <tr>
+              <td>{t.settings.shortcutsImmersive}</td>
+              <td><kbd>Esc</kbd></td>
+            </tr>
+          </tbody>
+        </table>
+        <p className="muted">{t.settings.shortcutsInputs}</p>
+        <p className="muted">{t.settings.shortcutsBrowser}</p>
+          </section>
+
+          <section id="settings-section-data" data-section="data" className="settings-section" aria-labelledby="settings-data">
+            {heading("data")}
+            <p className="muted">{t.settings.dataDirectory}</p>
+            <code className="data-path">{dataDirectory}</code>
             <p className="muted">{t.settings.backup}</p>
             <p className="muted">{t.settings.access}</p>
             <p className="muted">{t.settings.signOutNote}</p>
           </section>
-        </div>
-      )}
         </>
       )}
-    </ModalDialog>
+      </div>
+      </div>
+      )}
+    </main>
   );
 }
