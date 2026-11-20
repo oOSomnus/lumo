@@ -1445,6 +1445,47 @@ input:not([type]) {
   max-width: min(640px, 94vw);
 }
 
+.pdf-export-dialog {
+  max-width: min(760px, 94vw);
+}
+
+.pdf-export-options {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.pdf-export-width {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.pdf-export-width + .muted {
+  margin: 4px 0 0;
+}
+
+.pdf-export-prompt {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--accent-soft);
+}
+
+.pdf-export-prompt p {
+  margin: 0;
+}
+
 .page-details {
   display: grid;
   grid-template-columns: auto 1fr;

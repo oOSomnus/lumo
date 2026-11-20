@@ -86,7 +86,6 @@ import {
 import { compileTypst, type TypstAsset } from "../typst";
 import { stripPlaceholderControls } from "../../shared/typst";
 import {
-  compareEpubCfi,
   epubStyleOf,
   isEpubPageUnit,
   type EpubLayoutSnapshot,
@@ -105,12 +104,14 @@ import {
   translationKey,
   type TranslationTask,
 } from "../translation-queue";
+import { collectPageSources, documentBaseName } from "../export-sources";
 import { BatchTranslationPanel } from "./BatchTranslationPanel";
 import { AI_SETTINGS_CODES, ErrorDetails } from "./ErrorDetails";
 import { LAYOUT_PRESETS, LayoutSwitch, type PaneMode } from "./LayoutSwitch";
 import { Library } from "./Library";
 import { TypstRepairPanel } from "./TypstRepairPanel";
 import { ModalDialog } from "./ModalDialog";
+import { PdfExportDialog } from "./PdfExportDialog";
 import { EpubTocPanel } from "./EpubTocPanel";
 import { EpubToolbar } from "./EpubToolbar";
 import { EpubViewerFrame } from "./EpubViewerFrame";
@@ -185,12 +186,8 @@ interface EpubTarget {
   epubLayout?: EpubLayoutSnapshot;
 }
 
-function baseName(name: string): string {
-  return name.replace(/\.(?:pdf|epub)$/i, "");
-}
-
 function copyName(name: string, suffix: string): string {
-  const base = baseName(name).slice(0, 230);
+  const base = documentBaseName(name).slice(0, 230);
   return `${base}${suffix}.pdf`;
 }
 
@@ -481,6 +478,7 @@ export function Reader() {
     wasNarrowRef.current = narrow;
   }, [narrow, paneMode, rightTab]);
   const [exportOpen, setExportOpen] = useState(false);
+  const [pdfExportOpen, setPdfExportOpen] = useState(false);
   const [exportError, setExportError] = useState<UiError | null>(null);
   const [storedReload, setStoredReload] = useState(0);
 
@@ -2859,7 +2857,7 @@ export function Reader() {
       return;
     }
     if (!document) return;
-    const name = `${baseName(document.name)}-${
+    const name = `${documentBaseName(document.name)}-${
       document.format === "epub"
         ? `s${targetPage}-${currentUnit.slice(0, 13)}`
         : `p${targetPage}`
@@ -2901,50 +2899,9 @@ export function Reader() {
         `/api/documents/${document.id}/translations?targetLanguage=${exportLanguage}`,
       );
       // One file per saved page; selections stay out. An unsaved draft or a saved task replaces the stored text.
-      const wholePage = (unit: string | undefined): boolean =>
-        document.format === "epub" ? isEpubPageUnit(unit ?? "") : !unit;
-      const entries = new Map<
-        string,
-        { pageNumber: number; unit: string; sourceCfi?: string; typst: string }
-      >();
-      const put = (
-        pageNumber: number,
-        unit: string | undefined,
-        sourceCfi: string | undefined,
-        typst: string,
-      ): void => {
-        entries.set(`${pageNumber}/${unit ?? ""}`, {
-          pageNumber,
-          unit: unit ?? "",
-          ...(sourceCfi ? { sourceCfi } : {}),
-          typst: typst.trim(),
-        });
-      };
-      for (const record of records) {
-        if (wholePage(record.unit)) {
-          put(record.pageNumber, record.unit, record.sourceCfi, record.typst);
-        }
-      }
-      for (const task of tasks) {
-        if (
-          task.documentId !== document.id ||
-          task.targetLanguage !== exportLanguage ||
-          !wholePage(task.unit)
-        ) {
-          continue;
-        }
-        if (hasRetainedDraft(task)) {
-          put(task.pageNumber, task.unit, task.sourceCfi, task.draft.typst);
-        } else if (task.stage === "saved" && task.saved?.typst) {
-          put(task.pageNumber, task.unit, task.sourceCfi, task.saved.typst);
-        }
-      }
-      const ordered = [...entries.values()].sort(
-        (a, b) =>
-          a.pageNumber - b.pageNumber ||
-          compareEpubCfi(a.sourceCfi ?? "", b.sourceCfi ?? "") ||
-          a.unit.localeCompare(b.unit),
-      );
+      const ordered = collectPageSources(document, exportLanguage, records, tasks, {
+        drafts: true,
+      });
       if (ordered.length === 0) {
         setExportError({ code: "EXPORT_NONE" });
         return;
@@ -2965,7 +2922,7 @@ export function Reader() {
       const blob = await zip.generateAsync({ type: "blob" });
       triggerDownload(
         blob,
-        `${baseName(document.name)}-${exportLanguage}-translations.zip`,
+        `${documentBaseName(document.name)}-${exportLanguage}-translations.zip`,
       );
       setExportOpen(false);
     } catch (error) {
@@ -3007,7 +2964,7 @@ export function Reader() {
         }
         triggerDownload(
           await zip.generateAsync({ type: "blob" }),
-          `${baseName(target.name)}-unsaved.zip`,
+          `${documentBaseName(target.name)}-unsaved.zip`,
         );
       } catch (error) {
         setExportError(toUiError(error));
@@ -4259,7 +4216,7 @@ export function Reader() {
                       setExportError(null);
                       setExportOpen(true);
                     }}
-                    disabled={!hasExportable}
+                    disabled={!hasExportable && currentDocument?.format !== "pdf"}
                   >
                     {t.page.export}
                   </button>
@@ -4588,17 +4545,60 @@ export function Reader() {
           </p>
         )}
         <div className="dialog-actions vertical">
-          <button type="button" onClick={() => void exportCurrentPage()}>
+          <button
+            type="button"
+            disabled={!hasExportable}
+            onClick={() => void exportCurrentPage()}
+          >
             {t.export.currentPage}
           </button>
           <button type="button" onClick={() => void exportAllTypst()}>
             {t.export.allPages}
           </button>
+          {currentDocument?.format === "pdf" && (
+            <button
+              type="button"
+              onClick={() => {
+                setExportOpen(false);
+                setPdfExportOpen(true);
+              }}
+            >
+              {t.export.pdf}
+            </button>
+          )}
           <button type="button" onClick={() => setExportOpen(false)}>
             {t.common.cancel}
           </button>
         </div>
       </ModalDialog>
+
+      {currentDocument?.format === "pdf" && (
+        <PdfExportDialog
+          key={currentDocument.id}
+          open={pdfExportOpen}
+          onClose={() => setPdfExportOpen(false)}
+          document={currentDocument}
+          pageCount={pageCount}
+          currentPage={page}
+          language={language}
+          tasks={tasks}
+          queue={queue}
+          translationDisabledReason={pageDisabledReason}
+          password={() => passwordRef.current ?? undefined}
+          outline={outline}
+          outlineGenerationDisabledReason={outlineGenerationDisabledReason}
+          onGenerateOutline={() => void generateOutline()}
+          onCancelOutline={cancelOutlineGeneration}
+          onReloadOutline={reloadOutline}
+          onRetrySaveOutline={() => void retrySaveOutline()}
+          onDiscardOutline={discardOutline}
+          onOpenOutlinePage={openOutlinePage}
+          aiStatus={ai.state === "ready" ? ai.snapshot.status : null}
+          aiStatusError={ai.state === "error" ? ai.error : null}
+          onConfigureAi={() => setSettingsOpen(true)}
+          onRetryAiStatus={() => void refreshAiStatus(true)}
+        />
+      )}
 
       <ModalDialog
         open={detailsOpen}
