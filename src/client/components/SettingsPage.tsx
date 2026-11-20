@@ -1268,7 +1268,7 @@ export function SettingsPage({
           <section id="settings-section-appearance" data-section="appearance" className="settings-section" aria-labelledby="settings-appearance">
             {heading("appearance")}
             <p className="muted">{t.settings.themeDescription}</p>
-            <fieldset className="theme-options">
+            <fieldset className="theme-options" disabled={applyingLanguage}>
               <legend className="sr-only">{t.settings.themeLabel}</legend>
               {UI_THEMES.map((value) => (
                 <label key={value} className="theme-option">

@@ -3606,11 +3606,14 @@ export function Reader() {
 
   // A theme shows at once and is saved behind it. Saves run one at a time in the order picked, so
   // the stored theme ends as the last pick that saved. Only the newest pick reports a failure,
-  // which falls back to that stored theme.
+  // which falls back to that stored theme. While a language change is reloading the page, new picks
+  // are refused so that the reload cannot cut off a save queued after it.
   const savedThemeRef = useRef<UiTheme>("system");
+  const localeReloadingRef = useRef(false);
   const themeAttemptRef = useRef(0);
   const themeSaveChainRef = useRef<Promise<void>>(Promise.resolve());
   const applyTheme = useCallback(async (next: UiTheme): Promise<void> => {
+    if (localeReloadingRef.current) return;
     const attempt = ++themeAttemptRef.current;
     setThemePreference(next);
     const save = themeSaveChainRef.current.then(() => saveTheme(next));
@@ -3643,27 +3646,34 @@ export function Reader() {
         previewUploadCount > 0 ||
         Boolean(bridgeRef.current?.hasEdits);
       if (blocked) throw { code: "LANGUAGE_RELOAD_BLOCKED" };
-      await saveChainRef.current;
-      if (!(await commitCurrentView())) throw { code: "VIEW_SAVE_FAILED" };
-      const document = currentDocumentRef.current;
-      await apiJson(
-        "/api/reader",
-        jsonInit(
-          "PATCH",
-          document
-            ? {
-                documentId: document.id,
-                pageNumber: pageRef.current,
-                targetLanguage: languageRef.current,
-              }
-            : {
-                documentId: null,
-                pageNumber: null,
-                targetLanguage: languageRef.current,
-              },
-        ),
-      );
-      await saveUiLocale(next);
+      localeReloadingRef.current = true;
+      try {
+        await saveChainRef.current;
+        if (!(await commitCurrentView())) throw { code: "VIEW_SAVE_FAILED" };
+        const document = currentDocumentRef.current;
+        await apiJson(
+          "/api/reader",
+          jsonInit(
+            "PATCH",
+            document
+              ? {
+                  documentId: document.id,
+                  pageNumber: pageRef.current,
+                  targetLanguage: languageRef.current,
+                }
+              : {
+                  documentId: null,
+                  pageNumber: null,
+                  targetLanguage: languageRef.current,
+                },
+          ),
+        );
+        await saveUiLocale(next);
+        await themeSaveChainRef.current;
+      } catch (error) {
+        localeReloadingRef.current = false;
+        throw error;
+      }
       location.reload();
     },
     [commitCurrentView, hasOutlineDraft, modified, outline.stage, previewOnly, previewUploadCount, savingCopy, tasks],

@@ -187,6 +187,31 @@ test("R2 completed preview import unblocks the language reload", async ({ page, 
   ).toBeEnabled();
 });
 
+test("R2 a language reload waits for a theme save still in flight", async ({ page, lumo }) => {
+  await openApp(page, lumo.url);
+  // Hold the theme save so the language save and reload overtake it.
+  let releaseTheme: () => void = () => {};
+  const themeHeld = new Promise<void>((resolve) => (releaseTheme = resolve));
+  await page.route("**/api/settings", async (route) => {
+    const request = route.request();
+    if (request.method() === "PATCH" && "theme" in (request.postDataJSON() ?? {})) await themeHeld;
+    await route.continue();
+  });
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const settings = page.getByRole("main", { name: "Settings" });
+  await settings.getByText("Sepia: warm paper").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "sepia");
+  await settings.getByRole("combobox", { name: /^Interface language/ }).selectOption("zh-CN");
+  await settings.getByRole("button", { name: "Save language and reload" }).click();
+  await expect(settings.getByRole("radio", { name: "Light", exact: true })).toBeDisabled();
+  await page.waitForTimeout(500);
+  releaseTheme();
+
+  await expect(page.getByRole("main", { name: "书库" })).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "sepia");
+});
+
 type SaveGate = {
   ready: boolean;
   release: (() => void) | null;
