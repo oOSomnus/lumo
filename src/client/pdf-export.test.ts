@@ -67,7 +67,7 @@ describe("overridePageWidth", () => {
       "\\#set page(width: 1cm)",
       "/* a /* b */ #set page(width: 1cm) */",
       "// #set page(width: 1cm)",
-      "#my-page(width: 1cm) #x.page(width: 1cm) #page.with(width: 1cm)",
+      "#my-page(width: 1cm) #x.page(width: 1cm)",
       "#let my-page(w) = w\n#set text(red)",
       '#context counter(page).display("1")',
     ]) {
@@ -92,8 +92,20 @@ describe("overridePageWidth", () => {
     );
   });
 
+  test("ends a statement on the last line with the file", () => {
+    expect(override("#set page(width: 1cm)\n#let note = [Last]")).toBe(
+      `${PREFIX}#set page(width: 1cm, ..lumo-page)\n#let note = [Last]`,
+    );
+    expect(override("#set page(width: 1cm) if true")).toBe(
+      `${PREFIX}#set page(width: 1cm, ..lumo-page) if true`,
+    );
+  });
+
   test("gives up on a source it cannot scan", () => {
     expect(override("#set page(width: 1cm")).toBeNull();
+    expect(override("#let wide = page.with(width: 180mm)\n#wide[Body]")).toBeNull();
+    expect(override("#show: page.with(width: 180mm)")).toBeNull();
+    expect(override("#let x = (1, 2")).toBeNull();
     expect(override('#set page(numbering: "1)')).toBeNull();
     expect(override("#box[unterminated")).toBeNull();
   });
@@ -260,13 +272,34 @@ describe("buildTranslationPdf", () => {
     expect(text(matched.calls[0]!.files[0])).toStartWith("#let lumo-page = (width: 602pt,");
   });
 
-  test("refuses a selection without any saved translation", async () => {
-    const promise = buildTranslationPdf(
-      { title: "B", layout: "interleaved", width: "a4", pages: [1], sources: new Map() },
+  test("refuses an empty selection, and a translation-only selection without translations", async () => {
+    const empty = buildTranslationPdf(
+      { title: "B", layout: "interleaved", width: "a4", pages: [], sources: new Map() },
       { compiler: fakeCompiler(() => PDF), original: fakeOriginal() },
       signal(),
     );
-    await expect(promise).rejects.toBeInstanceOf(PdfExportError);
+    await expect(empty).rejects.toMatchObject({ code: "EXPORT_PDF_EMPTY" });
+    const untranslated = buildTranslationPdf(
+      { title: "B", layout: "translation", width: "a4", pages: [1], sources: new Map() },
+      { compiler: fakeCompiler(() => PDF), original: fakeOriginal() },
+      signal(),
+    );
+    await expect(untranslated).rejects.toBeInstanceOf(PdfExportError);
+    await expect(untranslated).rejects.toMatchObject({ code: "EXPORT_PDF_NONE" });
+  });
+
+  test("exports interleaved originals even without a saved translation", async () => {
+    const compiler = fakeCompiler(() => PDF);
+    const result = await buildTranslationPdf(
+      { title: "B", layout: "interleaved", width: "a4", pages: [1, 2], sources: new Map() },
+      { compiler, original: fakeOriginal() },
+      signal(),
+    );
+    expect(result.pdf).toBe(PDF);
+    const main = compiler.calls.at(-1)!.main;
+    expect(main).toContain('image("original.pdf", page: 1,');
+    expect(main).toContain('image("original.pdf", page: 2,');
+    expect(main).not.toContain("#include");
   });
 
   test("embeds originals as vector pages after Typst reads them", async () => {
@@ -287,6 +320,8 @@ describe("buildTranslationPdf", () => {
     expect(compiler.calls[0]!.main).toBe('#image("original.pdf", page: 1)');
     const main = compiler.calls[1]!.main;
     expect(main).toContain('#page(width: 601pt, height: 800pt, margin: 0pt, image("original.pdf", page: 1,');
+    expect(main).toContain('page: 2, width');
+    expect(main).toContain('#include "t/2.typ"');
     expect(main.indexOf('page: 2, width')).toBeLessThan(main.indexOf('#include "t/2.typ"'));
     expect(compiler.calls[1]!.files.at(-1)).toEqual({ path: "original.pdf", data: original.bytes });
     expect(original.rendered).toEqual([]);

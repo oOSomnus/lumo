@@ -254,6 +254,7 @@ export const zhCN: Messages = {
     TYPST_RUNTIME_UNAVAILABLE: () => "本地 Typst 运行时不可用，请重新加载后重试。",
     EXPORT_EMPTY: () => "这一页还没有可导出的完整译文。",
     EXPORT_NONE: () => "还没有可导出的完整译文。",
+    EXPORT_PDF_EMPTY: () => "请至少选择一页再导出。",
     EXPORT_PDF_NONE: () => "所选页面都没有保存的译文。",
     EXPORT_PDF_ENCRYPTED: () => "该 PDF 已加密。请先输入密码打开，再导出。",
     LANGUAGE_RELOAD_BLOCKED: () =>

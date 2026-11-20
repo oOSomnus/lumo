@@ -87,11 +87,12 @@ export function useTranslatedPages(
         add(location.pageNumber, location.unit);
       }
     }
+    // A saved record stays saved while the page is regenerated or edited; a draft never counts.
     for (const task of pageTasks) {
       if (
         task.documentId === document.id &&
         task.targetLanguage === language &&
-        task.stage === "saved"
+        (task.stage === "saved" || task.saved !== undefined)
       ) {
         add(task.pageNumber, task.unit ?? "");
       }

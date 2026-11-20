@@ -268,6 +268,7 @@ export const en = {
       "The local Typst runtime is unavailable. Reload and try again.",
     EXPORT_EMPTY: () => "This page has no complete translation to export.",
     EXPORT_NONE: () => "No complete translations to export yet.",
+    EXPORT_PDF_EMPTY: () => "Select at least one page to export.",
     EXPORT_PDF_NONE: () => "None of the selected pages has a saved translation.",
     EXPORT_PDF_ENCRYPTED: () =>
       "The PDF is encrypted. Open it with its password, then export again.",

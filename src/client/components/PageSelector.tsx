@@ -178,6 +178,18 @@ export function PageSelector({
         </label>
       </fieldset>
 
+      {/* Both methods mark translated pages, so a failed read shows whichever is open. */}
+      {translated.status === "error" && (
+        <div className="inline-error" role="alert">
+          {t.batch.readTranslatedFailed(
+            errorText(translated.error ?? { code: "UNKNOWN" }, locale),
+          )}
+          <button type="button" onClick={translated.reload}>
+            {t.common.retry}
+          </button>
+        </div>
+      )}
+
       {selectionMethod === "outline" && (
       <section
         className="batch-outline"
@@ -414,17 +426,6 @@ export function PageSelector({
             {t.batch.clear}
           </button>
         </div>
-
-        {translated.status === "error" && (
-          <div className="inline-error" role="alert">
-            {t.batch.readTranslatedFailed(
-              errorText(translated.error ?? { code: "UNKNOWN" }, locale),
-            )}
-            <button type="button" onClick={translated.reload}>
-              {t.common.retry}
-            </button>
-          </div>
-        )}
 
         <div className="page-group-nav">
           <button

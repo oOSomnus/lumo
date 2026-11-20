@@ -172,11 +172,17 @@ export function overridePageWidth(source: string, width: string): string | null 
       }
       last = c;
     }
+    // A statement on the last line ends with the file; an open group does not.
+    if (closer === null) return { end: n, last };
     throw new ScanError("unterminated code");
   };
 
   // `page` was read and ends at `end`: overrides its arguments when it is a call.
   const pageCall = (end: number): number => {
+    // A page function bound with `.with(…)` is called under another name the scanner cannot follow.
+    if (s[end] === "." && ident(end + 1) === "with") {
+      throw new ScanError("page.with cannot be overridden");
+    }
     if (s[end] === "(") {
       const args = code(end + 1, ")");
       const close = args.end - 1;
@@ -454,7 +460,7 @@ export class TypstPdfCompileError extends TypstError {
 
 export class PdfExportError extends Error {
   constructor(
-    readonly code: "EXPORT_PDF_NONE",
+    readonly code: "EXPORT_PDF_EMPTY" | "EXPORT_PDF_NONE",
     message: string,
   ) {
     super(message);
@@ -514,7 +520,11 @@ export async function buildTranslationPdf(
   const { compiler, original } = services;
   const pages = [...new Set(request.pages)].sort((a, b) => a - b);
   const interleaved = request.layout === "interleaved";
-  if (!pages.some((page) => request.sources.has(page))) {
+  if (pages.length === 0) {
+    throw new PdfExportError("EXPORT_PDF_EMPTY", "no page is selected");
+  }
+  // An interleaved export still has the original pages to show.
+  if (!interleaved && !pages.some((page) => request.sources.has(page))) {
     throw new PdfExportError("EXPORT_PDF_NONE", "no selected page has a saved translation");
   }
 
@@ -688,11 +698,15 @@ export class TypstPdfWorker implements PdfCompiler {
     void this.start().then(
       (worker) => {
         if (this.pending !== settle) return;
-        const copies = files.map((file) => ({ path: file.path, data: file.data.slice() }));
-        worker.postMessage(
-          { type: "pdf", id, main, files: copies },
-          copies.map((file) => file.data.buffer),
-        );
+        try {
+          const copies = files.map((file) => ({ path: file.path, data: file.data.slice() }));
+          worker.postMessage(
+            { type: "pdf", id, main, files: copies },
+            copies.map((file) => file.data.buffer),
+          );
+        } catch (error) {
+          if (this.pending === settle) settle.reject(error);
+        }
       },
       (error: unknown) => {
         if (this.pending === settle) settle.reject(error);

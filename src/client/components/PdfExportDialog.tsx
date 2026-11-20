@@ -219,7 +219,11 @@ export function PdfExportDialog({
     queue.resume();
     for (const page of targets) {
       const task = languageTasks.find((item) => item.pageNumber === page);
-      if (task && (task.stage === "error" || task.stage === "cancelled")) {
+      // Retrying a retained draft validates and saves it; a failed attempt is generated again.
+      if (
+        task &&
+        (task.stage === "error" || task.stage === "cancelled" || hasRetainedDraft(task))
+      ) {
         queue.retry(task.key);
       } else if (!task || task.stage === "saved") {
         queue.enqueue({
@@ -234,6 +238,8 @@ export function PdfExportDialog({
     setPhase({ kind: "waiting", pages, targets });
   };
 
+  const halt = queue.halt;
+
   // While waiting, every queue change is checked: all saved builds, anything stuck blocks.
   useEffect(() => {
     if (phase.kind !== "waiting") return;
@@ -243,6 +249,9 @@ export function PdfExportDialog({
       if (savedPages.has(page)) continue;
       const task = languageTasks.find((item) => item.pageNumber === page);
       if (task && (task.stage === "error" || task.stage === "cancelled" || hasRetainedDraft(task))) {
+        failed.push(page);
+      } else if (halt && (!task || task.stage === "queued")) {
+        // A halted queue starts nothing new; only the running pages can still finish.
         failed.push(page);
       } else {
         pending = true;
@@ -254,7 +263,7 @@ export function PdfExportDialog({
     } else {
       void build(phase.pages);
     }
-  }, [phase, savedPages, languageTasks, build]);
+  }, [phase, savedPages, languageTasks, halt, build]);
 
   const close = (): void => {
     stop();
@@ -262,6 +271,8 @@ export function PdfExportDialog({
   };
 
   const busy = phase.kind === "waiting" || phase.kind === "building";
+  // A pending decision was made for these pages and options; they stay as they are until it is settled.
+  const locked = busy || phase.kind === "prompt" || phase.kind === "blocked";
   const savedInTargets =
     phase.kind === "waiting"
       ? phase.targets.filter((page) => savedPages.has(page)).length
@@ -277,7 +288,7 @@ export function PdfExportDialog({
       </div>
       <p className="muted">{t.pdfExport.language(TARGET_LANGUAGE_LABELS[language])}</p>
 
-      <fieldset className="pdf-export-options" disabled={busy}>
+      <fieldset className="pdf-export-options" disabled={locked}>
         <PageSelector
           idPrefix="pdf-export"
           document={document}
@@ -418,6 +429,7 @@ export function PdfExportDialog({
         {phase.kind === "blocked" && (
           <div className="inline-error" role="alert">
             <p>{t.pdfExport.blocked(phase.failed.length)}</p>
+            {halt && <p>{errorText({ code: halt.code, params: halt.params }, locale)}</p>}
             <div className="inline-actions">
               <button
                 type="button"
@@ -470,13 +482,7 @@ export function PdfExportDialog({
           <button
             type="button"
             className="primary"
-            disabled={
-              selectedPages.length === 0 ||
-              translated.status !== "ready" ||
-              busy ||
-              phase.kind === "prompt" ||
-              phase.kind === "blocked"
-            }
+            disabled={selectedPages.length === 0 || translated.status !== "ready" || locked}
             onClick={startExport}
           >
             {t.pdfExport.export}

@@ -512,17 +512,25 @@ export async function openExportOriginal(
   const bytes = new Uint8Array(await response.arrayBuffer());
   signal.throwIfAborted();
   const pdfjs = await loadPdfjsRuntime();
+  signal.throwIfAborted();
   pdfjs.GlobalWorkerOptions.workerSrc = "/pdfjs/build/pdf.worker.mjs";
   const task = pdfjs.getDocument({
     data: bytes.slice(),
     ...(password ? { password } : {}),
     ...PDFJS_ASSETS,
   });
+  // Cancelling while PDF.js opens the file destroys the loading task, which rejects it.
+  const onAbort = (): void => {
+    void task.destroy().catch(() => {});
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
   let pdf: PDFDocumentProxy;
   try {
     pdf = await task.promise;
+    signal.throwIfAborted();
   } catch (error) {
     await task.destroy().catch(() => {});
+    if (signal.aborted) throw new DOMException("aborted", "AbortError");
     if (error && typeof error === "object" && "name" in error && error.name === "PasswordException") {
       throw new PagePreparationError(
         "EXPORT_PDF_ENCRYPTED",
@@ -530,6 +538,8 @@ export async function openExportOriginal(
       );
     }
     throw error;
+  } finally {
+    signal.removeEventListener("abort", onAbort);
   }
 
   return {
@@ -548,6 +558,7 @@ export async function openExportOriginal(
       const page = await pdf.getPage(pageNumber);
       const canvas = document.createElement("canvas");
       try {
+        renderSignal.throwIfAborted();
         const base = page.getViewport({ scale: 1 });
         const scale = Math.min(
           EXPORT_MAX_SCALE,
