@@ -4,6 +4,7 @@ import { useI18n } from "../i18n";
 import { compileTypst, type TypstAsset } from "../typst";
 import { stripPlaceholderControls } from "../../shared/typst";
 import { watchReaderKeys, type ReaderShortcut } from "../page-keys";
+import { watchPointerActivity } from "../pointer-activity";
 import { translationPreviewWidth, type Size } from "../translation-zoom";
 import type { TranslationZoom } from "../../shared/contracts";
 import { TypstSource } from "./TypstSource";
@@ -82,6 +83,8 @@ interface TranslationViewProps {
   immersive?: boolean;
   /** A reading shortcut pressed inside the preview; true when it did something. */
   onShortcut?: (shortcut: ReaderShortcut) => boolean;
+  /** The mouse moved over the preview (throttled). */
+  onPointerActivity?: () => void;
   /** The preview or the source body is laid out; reading position may be restored now. */
   onRendered?: () => void;
   /** A preview failed while nothing else could show the error; the reader can leave immersive mode. */
@@ -112,6 +115,7 @@ export const TranslationView = memo(function TranslationView({
   onDiscard,
   immersive = false,
   onShortcut,
+  onPointerActivity,
   onRendered,
   onPreviewError,
   zoom,
@@ -123,30 +127,37 @@ export const TranslationView = memo(function TranslationView({
   const [preview, setPreview] = useState<PreviewState>({ status: "compiling" });
   const [liveOpen, setLiveOpen] = useState(true);
 
-  // The preview document belongs to the model's output: the page only listens there for reader keys,
-  // and stops when the document is replaced or the frame is gone.
+  // The preview document belongs to the model's output: the page only listens there for reader keys
+  // and mouse movement, and stops when the document is replaced or the frame is gone.
   const shortcutRef = useRef(onShortcut);
   shortcutRef.current = onShortcut;
+  const pointerRef = useRef(onPointerActivity);
+  pointerRef.current = onPointerActivity;
   const renderedRef = useRef(onRendered);
   renderedRef.current = onRendered;
   const previewErrorRef = useRef(onPreviewError);
   previewErrorRef.current = onPreviewError;
-  const stopKeysRef = useRef<(() => void) | null>(null);
+  const stopFrameRef = useRef<(() => void) | null>(null);
   const attachKeys = useCallback((frame: HTMLIFrameElement): void => {
-    stopKeysRef.current?.();
-    stopKeysRef.current = null;
+    stopFrameRef.current?.();
+    stopFrameRef.current = null;
     const doc = frame.contentDocument;
     if (!doc) return;
-    stopKeysRef.current = watchReaderKeys(
+    const stopKeys = watchReaderKeys(
       doc,
       (shortcut) => shortcutRef.current?.(shortcut) ?? false,
     );
+    const stopPointer = watchPointerActivity(doc, () => pointerRef.current?.());
+    stopFrameRef.current = () => {
+      stopKeys();
+      stopPointer();
+    };
     renderedRef.current?.();
   }, []);
   const frameRef = useCallback((frame: HTMLIFrameElement | null): void => {
     if (frame) return;
-    stopKeysRef.current?.();
-    stopKeysRef.current = null;
+    stopFrameRef.current?.();
+    stopFrameRef.current = null;
   }, []);
 
   const previewRef = useRef(preview);

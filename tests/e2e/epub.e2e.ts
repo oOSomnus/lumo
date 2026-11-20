@@ -19,6 +19,12 @@ import { MAX_EPUB_IMAGE_PIXELS } from "../../src/shared/limits";
 const POSITION = /^Section (\d+) \/ (\d+) · page (\d+) \/ (\d+)$/;
 const SAVED = { timeout: 20_000 };
 
+// The translation toolbar has page buttons of the same names; these tests drive the book's own.
+const epubButton = (page: Page, name: string) =>
+  page
+    .getByRole("toolbar", { name: "EPUB reading controls" })
+    .getByRole("button", { name, exact: true });
+
 interface Reference {
   text?: string;
   imageBase64?: string;
@@ -173,7 +179,7 @@ test("EPUB translates the visible page, sends its neighbours as reference only a
   ]);
 
   // The next screen page is another unit with nothing saved yet.
-  await page.getByRole("button", { name: "Next page", exact: true }).click();
+  await epubButton(page, "Next page").click();
   await expect(page.locator(".epub-position")).toContainText(
     `page ${middle.page + 1} / ${middle.pages}`,
   );
@@ -185,7 +191,7 @@ test("EPUB translates the visible page, sends its neighbours as reference only a
   expect(await savedLocations(lumo.api, document.id)).toHaveLength(2);
 
   // Back on the first page, its own translation shows.
-  await page.getByRole("button", { name: "Previous page", exact: true }).click();
+  await epubButton(page, "Previous page").click();
   await expect(page.locator(".epub-position")).toContainText(
     `page ${middle.page} / ${middle.pages}`,
   );
@@ -269,13 +275,13 @@ test("EPUB sends an image-only neighbour as its image and omits a neighbour past
     await expect(page.locator(".page-status")).toHaveText(/Saved/, SAVED);
   };
   await translated(1);
-  await page.getByRole("button", { name: "Next page", exact: true }).click();
+  await epubButton(page, "Next page").click();
   await expect(label).toContainText("page 2 / 3");
   await translated(2);
-  await page.getByRole("button", { name: "Next page", exact: true }).click();
+  await epubButton(page, "Next page").click();
   await expect(label).toContainText("page 3 / 3");
   await translated(3);
-  await page.getByRole("button", { name: "Next page", exact: true }).click();
+  await epubButton(page, "Next page").click();
   await expect(label).toContainText("Section 2 / 2");
   await translated(4);
 
@@ -309,14 +315,14 @@ test("EPUB disables translating a page with nothing to translate and says why", 
   await expect(label).toContainText("page 1 / 2");
   await expect(translate).toBeEnabled();
 
-  await page.getByRole("button", { name: "Next page", exact: true }).click();
+  await epubButton(page, "Next page").click();
   await expect(label).toContainText("page 2 / 2");
   await expect(translate).toBeDisabled();
   await expect(page.getByText("This page has no text or image the reader can translate.")).toBeVisible();
   expect(requests).toHaveLength(0);
 
   // The page after it translates again.
-  await page.getByRole("button", { name: "Next page", exact: true }).click();
+  await epubButton(page, "Next page").click();
   await expect(label).toContainText("Section 2 / 2");
   await expect(translate).toBeEnabled();
 });
@@ -383,7 +389,7 @@ test("EPUB selection is its own unit, the page keeps its translation and the pos
   await page.getByRole("button", { name: "Source", exact: true }).click();
   await expect(page.locator(".typst-source")).toContainText(`= ${pageRequest.unit.slice(-6)}`);
 
-  await page.getByRole("button", { name: "Next page", exact: true }).click();
+  await epubButton(page, "Next page").click();
   await book().getByText("Chapter Two").waitFor();
   await expect.poll(() => readPosition(page)).toEqual({ section: 2, sections: 2, page: 1, pages: 1 });
   await expect
@@ -758,7 +764,7 @@ test("EPUB images over the pixel limit never reach the decoder, and their pages 
   await expect.poll(() => requests.length).toBe(1);
   await expect(page.locator(".page-status")).toHaveText(/Saved/, SAVED);
   await expect(page.locator(".page-warning")).toBeVisible();
-  await page.getByRole("button", { name: "Next page", exact: true }).click();
+  await epubButton(page, "Next page").click();
   await expect(label).toContainText("page 2 / 3");
   await page.getByRole("button", { name: "Translate this page" }).click();
   await expect.poll(() => requests.length).toBe(2);
@@ -927,7 +933,7 @@ test("an EPUB selection still being measured when the page turns is dropped, not
   await expect.poll(selections.held).toBe(1);
 
   const before = await readPosition(page);
-  await page.getByRole("button", { name: "Next page", exact: true }).click();
+  await epubButton(page, "Next page").click();
   await expect.poll(async () => (await readPosition(page)).page).toBe(before.page + 1);
   await selections.release();
 

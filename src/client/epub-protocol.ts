@@ -65,6 +65,8 @@ export type ViewerMessage =
   | { type: "selection"; generation: number; selection: EpubSelection | null }
   /** A reader shortcut pressed inside the book; the reader page decides whether it applies. */
   | { type: "shortcut"; generation: number; shortcut: ReaderShortcut }
+  /** The mouse moved over the book (throttled); immersive reading shows its page buttons. */
+  | { type: "pointer"; generation: number }
   | { type: "reply"; generation: number; id: number; result: EpubReplies[keyof EpubReplies] }
   | { type: "page"; generation: number; id: number; page: EpubPageLocation }
   | { type: "done"; generation: number; id: number }
