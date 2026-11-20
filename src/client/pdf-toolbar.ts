@@ -27,6 +27,19 @@ html[data-lumo-theme="sepia"] {
   --sidebar-toolbar-bg-color: #f4ead4; --field-bg-color: #fffaf0; --field-border-color: #ddcfae;
   --main-color: #3b2f1e; --toolbar-icon-bg-color: #3b2f1e;
 }
+/* Menus, the outline and thumbnail sidebar and their text: PDF.js reads these hooks before its own white or grey. */
+html[data-lumo-theme="sepia"] { --background-color-box: #f9f3e3; --text-color: #3b2f1e; --focus-outline-color: #8a4b08; }
+html[data-lumo-theme="dark"] { --background-color-box: #1b1e22; --text-color: #e4e7eb; --focus-outline-color: #7ea7c8; }
+html[data-lumo-theme="night"] { --background-color-box: #141210; --text-color: #d6c4a5; --focus-outline-color: #d4a05a; }
+html[data-lumo-theme="sepia"] #viewsManager {
+  --sidebar-bg-color: rgb(249 243 227 / 0.94); --header-bg: #f4ead4; --image-page-number-bg: #ede3cb;
+}
+html[data-lumo-theme="dark"] #viewsManager {
+  --sidebar-bg-color: rgb(27 30 34 / 0.94); --header-bg: #17191d; --image-page-number-bg: #131518;
+}
+html[data-lumo-theme="night"] #viewsManager {
+  --sidebar-bg-color: rgb(20 18 16 / 0.94); --header-bg: #100e0c; --image-page-number-bg: #0b0a09;
+}
 .toolbarField { border-radius: 6px; }
 @media (max-width: 690px) {
   #mainContainer { min-width: 0; }
