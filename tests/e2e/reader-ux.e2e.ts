@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import type { APIRequestContext, Locator, Page } from "@playwright/test";
+import type { APIRequestContext, FrameLocator, Locator, Page } from "@playwright/test";
 import {
   configureCustomAi,
   expect,
@@ -33,6 +33,17 @@ function tokenColors(block: Locator): Promise<number> {
   return block
     .locator("span[style*='color']")
     .evaluateAll((spans) => new Set(spans.map((span) => span.style.color)).size);
+}
+
+/** Opens the PDF.js sidebar on its outline view. */
+async function openOutlineSidebar(viewer: FrameLocator): Promise<void> {
+  const view = viewer.locator("#outlinesView");
+  if (await view.isVisible()) return;
+  await viewer.locator("#viewsManagerToggleButton").click();
+  if (await view.isVisible()) return;
+  await viewer.locator("#viewsManagerSelectorButton").click();
+  await viewer.locator("#outlinesViewMenu").click();
+  await expect(view).toBeVisible();
 }
 
 /** A /api/translate answer that ends in a finished document, in the wire format of the real endpoint. */
@@ -816,6 +827,14 @@ test("An imported outline is checked line by line, saved, used for selection, ke
     { title: "Part Two", level: 1, pageNumber: 3 },
   ]);
 
+  // The viewer's outline sidebar shows the imported outline, and its entries open their pages.
+  const viewer = page.frameLocator("iframe.pdf-frame");
+  const sidebarLinks = viewer.locator("#outlinesView a");
+  await expect(sidebarLinks).toHaveText(["Part One", "Chapter A", "Part Two"]);
+  await openOutlineSidebar(viewer);
+  await sidebarLinks.filter({ hasText: "Part Two" }).click();
+  await expect(viewer.locator("#pageNumber")).toHaveValue("3");
+
   // Ticking a part selects its whole page range.
   await panel.getByRole("checkbox", { name: "Select pages 3–4" }).check();
   await panel.getByRole("radio", { name: "By page numbers" }).check();
@@ -826,6 +845,7 @@ test("An imported outline is checked line by line, saved, used for selection, ke
   await page.getByRole("tab", { name: "Batch translation" }).click();
   await panel.getByRole("radio", { name: "By outline" }).check();
   await expect(panel).toContainText("Imported outline");
+  await expect(viewer.locator("#outlinesView a")).toHaveText(["Part One", "Chapter A", "Part Two"]);
 
   // Editing starts from the saved outline.
   await panel.getByRole("button", { name: "Edit outline…" }).click();
@@ -834,7 +854,55 @@ test("An imported outline is checked line by line, saved, used for selection, ke
 
   await panel.getByRole("button", { name: "Remove imported outline" }).click();
   await expect(panel).toContainText("This PDF has no outline.");
+  await expect(viewer.locator("#outlinesView a")).toHaveCount(0);
   expect((await (await lumo.api.get(`/api/documents/${stored.id}/outline`)).json()).outline).toBeNull();
+});
+
+test("A PDF's own outline gives way to an imported one in the viewer sidebar and comes back once it is removed", async ({
+  page,
+  lumo,
+}) => {
+  const upload = await lumo.api.post(
+    `/api/documents?${new URLSearchParams({ name: "native-outline.pdf", pageCount: "3", format: "pdf" })}`,
+    {
+      headers: { "Content-Type": "application/pdf" },
+      data: Buffer.from(
+        fixturePdf("native", 3, [
+          { title: "Native One", page: 1 },
+          { title: "Native Two", page: 3 },
+        ]),
+      ),
+    },
+  );
+  expect(upload.ok()).toBe(true);
+  await openTranslatedPage(page, lumo.url, "native-outline.pdf");
+  const viewer = page.frameLocator("iframe.pdf-frame");
+  await expect(viewer.locator("#pageNumber")).toHaveAttribute("max", "3");
+  const sidebarLinks = viewer.locator("#outlinesView a");
+  await expect(sidebarLinks).toHaveText(["Native One", "Native Two"]);
+
+  await page.getByRole("tab", { name: "Batch translation" }).click();
+  const panel = page.locator(".batch-panel");
+  await panel.getByRole("radio", { name: "By outline" }).check();
+  await expect(panel).toContainText("Document outline");
+  // Importing starts from the PDF's own outline.
+  await panel.getByRole("button", { name: "Import outline…" }).click();
+  const text = panel.getByRole("textbox", { name: "Outline text" });
+  await expect(text).toHaveValue("# Native One  1\n# Native Two  3");
+  await text.fill("# Imported  1\n## Imported Part  2");
+  await panel.getByRole("button", { name: "Save outline" }).click();
+  await expect(panel).toContainText("Imported outline");
+  await expect(sidebarLinks).toHaveText(["Imported", "Imported Part"]);
+  // "Find current outline item" still works after the native outline was replaced.
+  await viewer.locator("#pageNumber").fill("2");
+  await viewer.locator("#pageNumber").press("Enter");
+  await openOutlineSidebar(viewer);
+  await viewer.locator("#viewsManagerCurrentOutlineButton").click();
+  await expect(viewer.locator("#outlinesView .treeItem.selected > a")).toHaveText("Imported Part");
+
+  await panel.getByRole("button", { name: "Remove imported outline" }).click();
+  await expect(panel).toContainText("Document outline");
+  await expect(sidebarLinks).toHaveText(["Native One", "Native Two"]);
 });
 
 test("A draft that could not be saved is retried without the AI, and sending it back to the model asks for the setup first", async ({

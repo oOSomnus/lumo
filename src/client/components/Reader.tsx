@@ -272,6 +272,14 @@ function LocaleSwitch() {
   );
 }
 
+/** The viewer's outline sidebar follows the outline in use; it is cosmetic, so a failure is ignored. */
+function showSidebarOutline(
+  bridge: ViewerBridge,
+  entries: readonly OutlineEntry[] | null,
+): void {
+  void bridge.setSidebarOutline(entries).catch(() => {});
+}
+
 export function Reader() {
   const token = accessToken();
   const narrow = useNarrowLayout();
@@ -1498,14 +1506,16 @@ export function Reader() {
         );
         if (stale()) return;
         if (result.outline && result.outline.length > 0) {
+          const entries = outlineEntriesSchema.parse(result.outline);
           setOutline({
-            entries: outlineEntriesSchema.parse(result.outline),
+            entries,
             source: "imported",
             loadStatus: "ready",
             stage: "idle",
             skipped: 0,
             error: null,
           });
+          showSidebarOutline(bridge, entries);
           return;
         }
 
@@ -1521,6 +1531,7 @@ export function Reader() {
           }
         }
         if (stale()) return;
+        showSidebarOutline(bridge, null);
         if (native && native.entries.length > 0) {
           setOutline({
             entries: native.entries,
@@ -1625,6 +1636,7 @@ export function Reader() {
         outlineRef.current = next;
         setOutline(next);
         setOutlineDraft(null);
+        if (bridgeRef.current === bridge) showSidebarOutline(bridge, parsed);
       } catch (error) {
         if (attempt !== outlineAttemptRef.current) return;
         setOutline((previous) => ({
