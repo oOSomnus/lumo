@@ -61,3 +61,12 @@ test("prints each distinct license text once and flags packages that ship none",
   expect(notices).toContain("two 2.0.0 (cargo) — MIT — license text [1]");
   expect(notices).toContain("bare 3.0.0 (cargo) — Zlib — metadata only, the package ships no license text; see https://example.test/bare");
 });
+
+test("license texts print the same whatever line endings the checkout used", () => {
+  const entry = (text: string) => [
+    { ecosystem: "bundled" as const, name: "icons", version: "1", license: "ISC", source: null, texts: [{ file: "LICENSE", text }] },
+  ];
+  const lf = renderNotices(entry("ISC License\n\nPermission granted."));
+  expect(renderNotices(entry("ISC License\r\n\r\nPermission granted."))).toBe(lf);
+  expect(lf).not.toContain("\r");
+});

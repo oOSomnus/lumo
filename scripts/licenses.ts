@@ -222,7 +222,9 @@ export function renderNotices(entries: NoticeEntry[]): string {
   const texts = new Map<string, { id: number; text: string }>();
   const lines: string[] = [];
   for (const entry of sorted) {
-    const ids = entry.texts.map(({ text }) => {
+    // Line endings follow the checkout (CRLF on Windows runners); every target must print the same file.
+    const ids = entry.texts.map(({ text: raw }) => {
+      const text = raw.replace(/\r\n?/g, "\n");
       const key = createHash("sha256").update(text).digest("hex");
       let known = texts.get(key);
       if (!known) {
