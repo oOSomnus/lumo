@@ -1059,7 +1059,15 @@ test("EPUB 'Untranslated sections' counts the pages of the current layout, not t
   await larger.click();
   await larger.click();
   await expect(page.locator(".epub-settings output")).toHaveText("22 px");
-  await expect.poll(async () => (await readPosition(page)).pages).toBeGreaterThan(before.pages);
+  // Each click reflows the book, so wait until the count is past the old one and holds still: a count
+  // read between the two reflows would undercount the pages the batch will see.
+  await expect
+    .poll(async () => {
+      const first = (await readPosition(page)).pages;
+      await page.waitForTimeout(500);
+      return first > before.pages && first === (await readPosition(page)).pages;
+    })
+    .toBe(true);
   const after = await readPosition(page);
 
   await page.getByRole("button", { name: "Untranslated sections", exact: true }).click();
