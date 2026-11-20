@@ -268,6 +268,10 @@ export const en = {
       "The local Typst runtime is unavailable. Reload and try again.",
     EXPORT_EMPTY: () => "This page has no complete translation to export.",
     EXPORT_NONE: () => "No complete translations to export yet.",
+    EXPORT_PDF_EMPTY: () => "Select at least one page to export.",
+    EXPORT_PDF_NONE: () => "None of the selected pages has a saved translation.",
+    EXPORT_PDF_ENCRYPTED: () =>
+      "The PDF is encrypted. Open it with its password, then export again.",
     LANGUAGE_RELOAD_BLOCKED: () =>
       "Finish the current translation, save or discard PDF edits, and leave the library before changing the language.",
     VIEW_SAVE_FAILED: () =>
@@ -373,9 +377,63 @@ export const en = {
     title: "Export translation",
     currentPage: "This page as Typst",
     allPages: "All translated content in this language (ZIP)",
+    pdf: "PDF: choose pages, layout and width…",
     noCurrent: "This page has no complete translation to export.",
     none: "No complete translations to export yet.",
     failed: (detail: string) => `Export failed: ${detail}`,
+  },
+  pdfExport: {
+    title: "Export translation as PDF",
+    language: (label: string) => `Translations in ${label}`,
+    translatedPages: "Translated pages",
+    layout: "Layout",
+    translationOnly: "Translation only",
+    interleaved: "Each original page, then its translation",
+    width: "Translation page width",
+    widthNote:
+      "The height follows the content, so each translated page stays one sheet.",
+    widths: {
+      a4: "A4 (210 mm)",
+      letter: "Letter (8.5 in)",
+      a5: "A5 (148 mm)",
+      b5: "B5 (176 mm)",
+      original: "Same as the original page",
+      saved: "As translated (180 mm)",
+    },
+    summary: (selected: number, translated: number) =>
+      `${selected} page${selected === 1 ? "" : "s"} selected · ${translated} translated`,
+    export: "Export PDF",
+    missing: (missing: number, selected: number) =>
+      `${missing} of ${selected} selected page${selected === 1 ? " has" : "s have"} no saved translation.`,
+    inProgress: (count: number) =>
+      `${count} ${count === 1 ? "is" : "are"} being translated already.`,
+    drafts: (count: number) =>
+      `${count} ${count === 1 ? "holds" : "hold"} an unsaved draft: save or discard ${count === 1 ? "it" : "them"} on the page, or ${count === 1 ? "it is" : "they are"} left out.`,
+    translateFirst: (count: number) =>
+      `Translate ${count} page${count === 1 ? "" : "s"} first, then export`,
+    waitOnly: "Wait for the running translations, then export",
+    exportWithout: "Export without them",
+    withoutNote: {
+      translation: "Pages without a translation are left out of the PDF.",
+      interleaved: "Pages without a translation keep their original page only.",
+    },
+    waiting: (saved: number, total: number) =>
+      `Translating: ${saved} / ${total} saved. The PDF is built when all of them are saved.`,
+    waitingNote:
+      "Cancelling the export leaves the translations running; stop them in the Batch tab.",
+    cancelExport: "Cancel export",
+    blocked: (count: number) =>
+      `${count} page${count === 1 ? "" : "s"} could not be translated.`,
+    preparing: "Reading the translations…",
+    originals: (done: number, total: number) =>
+      `Rendering original pages: ${done} / ${total}`,
+    typesetting: "Typesetting the PDF…",
+    done: "The PDF was downloaded.",
+    doneSkipped: (count: number) =>
+      `${count} selected page${count === 1 ? " had" : "s had"} no translation.`,
+    keptWidth: (pages: string) =>
+      `Pages ${pages} keep the width they were translated at, because the chosen width could not be applied to them.`,
+    failed: (detail: string) => `PDF export failed: ${detail}`,
   },
   library: {
     title: "Library",

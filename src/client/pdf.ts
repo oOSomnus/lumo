@@ -6,7 +6,8 @@ import {
   MAX_TRANSLATION_CONTEXT_CHARS,
 } from "../shared/limits";
 import type { TranslationContext, TranslationReference } from "../shared/contracts";
-import { accessToken } from "./api";
+import { accessToken, apiFetch } from "./api";
+import type { ExportOriginal } from "./pdf-export";
 import type { PreparedTranslationPage } from "./translation-queue";
 import type { ViewerBridge } from "./pdfBridge";
 
@@ -478,4 +479,136 @@ export async function renderDocumentCover(
     signal.removeEventListener("abort", onAbort);
     await destroy();
   }
+}
+
+const EXPORT_LONG_EDGE = 2400;
+const EXPORT_MAX_SCALE = 3;
+
+const PDFJS_ASSETS = {
+  disableRange: true,
+  disableStream: true,
+  cMapUrl: "/pdfjs/web/cmaps/",
+  cMapPacked: true,
+  standardFontDataUrl: "/pdfjs/web/standard_fonts/",
+  wasmUrl: "/pdfjs/web/wasm/",
+  iccUrl: "/pdfjs/web/iccs/",
+} as const;
+
+/**
+ * Opens a stored PDF for a PDF export: its bytes for Typst, and PDF.js for page
+ * sizes, page images when Typst cannot read the file, and counting the pages
+ * of the PDFs Typst produces. PDF.js only ever receives copies, because it
+ * transfers the buffers it is given. Close it when the export ends.
+ */
+export async function openExportOriginal(
+  documentId: string,
+  password: string | undefined,
+  signal: AbortSignal,
+): Promise<ExportOriginal & { close(): Promise<void> }> {
+  const response = await apiFetch(
+    `/api/documents/${encodeURIComponent(documentId)}/file`,
+    { signal },
+  );
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  signal.throwIfAborted();
+  const pdfjs = await loadPdfjsRuntime();
+  signal.throwIfAborted();
+  pdfjs.GlobalWorkerOptions.workerSrc = "/pdfjs/build/pdf.worker.mjs";
+  const task = pdfjs.getDocument({
+    data: bytes.slice(),
+    ...(password ? { password } : {}),
+    ...PDFJS_ASSETS,
+  });
+  // Cancelling while PDF.js opens the file destroys the loading task, which rejects it.
+  const onAbort = (): void => {
+    void task.destroy().catch(() => {});
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+  let pdf: PDFDocumentProxy;
+  try {
+    pdf = await task.promise;
+    signal.throwIfAborted();
+  } catch (error) {
+    await task.destroy().catch(() => {});
+    if (signal.aborted) throw new DOMException("aborted", "AbortError");
+    if (error && typeof error === "object" && "name" in error && error.name === "PasswordException") {
+      throw new PagePreparationError(
+        "EXPORT_PDF_ENCRYPTED",
+        "the PDF is encrypted; open it with its password first",
+      );
+    }
+    throw error;
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+
+  return {
+    bytes,
+    async pageSize(pageNumber) {
+      const page = await pdf.getPage(pageNumber);
+      try {
+        const viewport = page.getViewport({ scale: 1 });
+        return { width: viewport.width, height: viewport.height };
+      } finally {
+        page.cleanup();
+      }
+    },
+    async renderJpeg(pageNumber, renderSignal) {
+      renderSignal.throwIfAborted();
+      const page = await pdf.getPage(pageNumber);
+      const canvas = document.createElement("canvas");
+      try {
+        renderSignal.throwIfAborted();
+        const base = page.getViewport({ scale: 1 });
+        const scale = Math.min(
+          EXPORT_MAX_SCALE,
+          EXPORT_LONG_EDGE / Math.max(base.width, base.height),
+        );
+        const viewport = page.getViewport({ scale });
+        canvas.width = Math.max(1, Math.ceil(viewport.width));
+        canvas.height = Math.max(1, Math.ceil(viewport.height));
+        const renderTask = page.render({ canvas, viewport, background: "#ffffff" });
+        const cancel = (): void => renderTask.cancel();
+        renderSignal.addEventListener("abort", cancel, { once: true });
+        try {
+          await renderTask.promise;
+        } finally {
+          renderSignal.removeEventListener("abort", cancel);
+        }
+        renderSignal.throwIfAborted();
+        const encoded = Promise.withResolvers<Blob | null>();
+        canvas.toBlob(encoded.resolve, "image/jpeg", 0.9);
+        const blob = await encoded.promise;
+        if (!blob) {
+          throw new PagePreparationError(
+            "PAGE_RENDER_FAILED",
+            "the browser could not encode the page image",
+          );
+        }
+        return new Uint8Array(await blob.arrayBuffer());
+      } catch (error) {
+        if (renderSignal.aborted) throw new DOMException("aborted", "AbortError");
+        if (error instanceof PagePreparationError) throw error;
+        throw new PagePreparationError(
+          "PAGE_RENDER_FAILED",
+          error instanceof Error ? error.message : "the page could not be rendered",
+        );
+      } finally {
+        canvas.width = 0;
+        canvas.height = 0;
+        page.cleanup();
+      }
+    },
+    async countPages(typstPdf) {
+      const counted = pdfjs.getDocument({ data: typstPdf.slice(), ...PDFJS_ASSETS });
+      try {
+        return (await counted.promise).numPages;
+      } finally {
+        await counted.destroy().catch(() => {});
+      }
+    },
+    async close() {
+      await task.destroy().catch(() => {});
+    },
+  };
 }

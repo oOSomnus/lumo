@@ -81,35 +81,45 @@ function failActive(error: unknown, killWorker: boolean): void {
   pump();
 }
 
-function createWorker(): Promise<Worker> {
+/**
+ * Starts a Typst worker. `ready` settles with the runtime's initialization; a
+ * failure to initialize, or a later crash, is reported once through `onFailure`.
+ * Every other message goes to `onMessage`. The caller owns termination.
+ */
+export function spawnTypstWorker(
+  name: string,
+  handlers: {
+    onMessage(message: { type: string; id?: number } & Record<string, unknown>): void;
+    onFailure(error: TypstError): void;
+  },
+): { worker: Worker; ready: Promise<Worker> } {
   const created = new Worker(new URL("/typst/worker.js", location.origin), {
     type: "module",
-    name: "lumo-typst",
+    name,
   });
-  worker = created;
   const ready = Promise.withResolvers<Worker>();
+  // A worker that fails before anyone awaits it must not surface as an unhandled rejection.
+  ready.promise.catch(() => undefined);
   let initialized = false;
-  // Ends this instance and fails its waiting job, so the next job starts a fresh Worker.
-  const retire = (error: TypstError): void => {
-    terminateWorker();
+  let failed = false;
+  const fail = (error: TypstError): void => {
+    if (failed) return;
+    failed = true;
     ready.reject(error);
-    failActive(error, false);
+    handlers.onFailure(error);
   };
   created.onmessage = (event: MessageEvent<unknown>) => {
-    if (worker !== created) return;
     const message = event.data as
-      | { type: "ready" }
-      | { type: "init-error"; message?: string }
-      | { type: "compiled"; id: number; svg: string }
-      | { type: "failed"; id: number; message?: string };
-    if (!message || typeof message !== "object") return;
+      | ({ type: string; id?: number; message?: string } & Record<string, unknown>)
+      | null;
+    if (!message || typeof message !== "object" || failed) return;
     if (message.type === "ready") {
       initialized = true;
       ready.resolve(created);
       return;
     }
     if (message.type === "init-error") {
-      retire(
+      fail(
         new TypstError(
           "TYPST_RUNTIME_UNAVAILABLE",
           message.message ?? "the Typst runtime could not initialize",
@@ -117,22 +127,10 @@ function createWorker(): Promise<Worker> {
       );
       return;
     }
-    if (!active || message.id !== active.id) return;
-    if (message.type === "compiled") {
-      settleActive(message.svg);
-    } else if (message.type === "failed") {
-      failActive(
-        new TypstError(
-          "TYPST_COMPILE_FAILED",
-          message.message ?? "Typst compilation failed",
-        ),
-        false,
-      );
-    }
+    handlers.onMessage(message);
   };
   created.onerror = (event) => {
-    if (worker !== created) return;
-    retire(
+    fail(
       new TypstError(
         "TYPST_RUNTIME_UNAVAILABLE",
         initialized
@@ -141,7 +139,37 @@ function createWorker(): Promise<Worker> {
       ),
     );
   };
-  return ready.promise;
+  return { worker: created, ready: ready.promise };
+}
+
+function createWorker(): Promise<Worker> {
+  const spawned = spawnTypstWorker("lumo-typst", {
+    onMessage: (message) => {
+      if (worker !== spawned.worker) return;
+      if (!active || message.id !== active.id) return;
+      if (message.type === "compiled" && typeof message.svg === "string") {
+        settleActive(message.svg);
+      } else if (message.type === "failed") {
+        failActive(
+          new TypstError(
+            "TYPST_COMPILE_FAILED",
+            typeof message.message === "string"
+              ? message.message
+              : "Typst compilation failed",
+          ),
+          false,
+        );
+      }
+    },
+    // Ends this instance and fails its waiting job, so the next job starts a fresh Worker.
+    onFailure: (error) => {
+      if (worker !== spawned.worker) return;
+      terminateWorker();
+      failActive(error, false);
+    },
+  });
+  worker = spawned.worker;
+  return spawned.ready;
 }
 
 function ensureWorker(): Promise<Worker> {
