@@ -3601,20 +3601,23 @@ export function Reader() {
     return null;
   })();
 
-  // A theme shows at once and is saved behind it. Saves may finish out of order: only the newest
-  // pick reports a failure, which falls back to the newest theme that was saved.
+  // A theme shows at once and is saved behind it. Saves run one at a time in the order picked, so
+  // the stored theme ends as the last pick that saved. Only the newest pick reports a failure,
+  // which falls back to that stored theme.
   const savedThemeRef = useRef<UiTheme>("system");
   const themeAttemptRef = useRef(0);
-  const themeSavedAttemptRef = useRef(0);
+  const themeSaveChainRef = useRef<Promise<void>>(Promise.resolve());
   const applyTheme = useCallback(async (next: UiTheme): Promise<void> => {
     const attempt = ++themeAttemptRef.current;
     setThemePreference(next);
+    const save = themeSaveChainRef.current.then(() => saveTheme(next));
+    themeSaveChainRef.current = save.then(
+      () => undefined,
+      () => undefined,
+    );
     try {
-      await saveTheme(next);
-      if (attempt > themeSavedAttemptRef.current) {
-        themeSavedAttemptRef.current = attempt;
-        savedThemeRef.current = next;
-      }
+      await save;
+      savedThemeRef.current = next;
     } catch (error) {
       if (attempt !== themeAttemptRef.current) return;
       setThemePreference(savedThemeRef.current);
