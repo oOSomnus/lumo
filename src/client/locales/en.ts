@@ -317,6 +317,7 @@ export const en = {
       "The images of this page are too large to use together.",
     OUTLINE_INVALID: () =>
       "The PDF outline could not be used. Select pages manually.",
+    OUTLINE_OUTSIDE_DOCUMENT: () => "It points at pages outside this PDF.",
     UNKNOWN: () => "Something went wrong.",
   } satisfies Record<string, ErrorMessage>,
   confirm: {
@@ -330,7 +331,6 @@ export const en = {
     switchModified: "the PDF has unsaved edits",
     switchPreview: "the current PDF is not in the library",
     switchOutlineActive: "an outline is being saved",
-    switchOutlineDraft: "an outline being imported is not saved",
     switchBody: (reasons: string) =>
       `${reasons}. Continuing stops tasks and discards unsaved new text; saved translations are kept.`,
     switchConfirm: "Switch anyway",
@@ -537,6 +537,8 @@ export const en = {
     import: "Import outline…",
     edit: "Edit outline…",
     remove: "Remove imported outline",
+    importedFailed: (detail: string) =>
+      `The imported outline is not in use: ${detail}`,
     saving: "Saving the outline…",
     editor: {
       title: "Import outline",

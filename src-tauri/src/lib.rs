@@ -14,8 +14,9 @@ use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
 use launcher::{
-    take_run, Level, LineOutcome, Phase, Snapshot, State, StopPlan, StopPurpose, Termination,
-    SHUTDOWN_COMMAND, SHUTDOWN_TIMEOUT_SECS, STARTUP_TIMEOUT_SECS, UPGRADE_DATABASE_ARG,
+    take_run, Level, LineOutcome, Phase, Snapshot, StartupCheck, State, StopPlan, StopPurpose,
+    Termination, SHUTDOWN_COMMAND, SHUTDOWN_TIMEOUT_SECS, STARTUP_TIMEOUT_SECS,
+    UPGRADE_DATABASE_ARG,
 };
 
 const STATE_EVENT: &str = "launcher-state";
@@ -156,9 +157,18 @@ fn start_server(app: &AppHandle, upgrade: bool) {
 
     let watchdog = app.clone();
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(STARTUP_TIMEOUT_SECS)).await;
-        if update(&watchdog, |state| state.startup_overdue(now_ms(), generation)) {
-            kill_child(&watchdog, generation);
+        // An approved upgrade keeps asking for more time until its database is open.
+        let mut wait = Duration::from_secs(STARTUP_TIMEOUT_SECS);
+        loop {
+            tokio::time::sleep(wait).await;
+            match update(&watchdog, |state| state.startup_check(now_ms(), generation)) {
+                StartupCheck::Settled => break,
+                StartupCheck::Overdue => {
+                    kill_child(&watchdog, generation);
+                    break;
+                }
+                StartupCheck::Wait(ms) => wait = Duration::from_millis(ms.max(1)),
+            }
         }
     });
 }

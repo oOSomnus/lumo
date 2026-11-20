@@ -194,15 +194,31 @@ function backupPathFor(dbPath: string, version: number): string {
   return `${dbPath}.v${version}-${stamp}.bak`;
 }
 
-function documentColumns(db: Database): string[] {
-  return (db.query("PRAGMA table_info(documents)").all() as { name: string }[]).map(
-    (column) => column.name,
-  );
+/** The documents table's columns as SQLite describes them: name, type, nullability, default and key. */
+function documentColumns(db: Database): string {
+  return JSON.stringify(db.query("PRAGMA table_info(documents)").all());
+}
+
+let currentDocumentColumns: string | undefined;
+
+/** The documents columns of a database created by this build. */
+function expectedDocumentColumns(): string {
+  if (currentDocumentColumns === undefined) {
+    const fresh = new Database(":memory:");
+    try {
+      fresh.exec(SCHEMA_SQL);
+      currentDocumentColumns = documentColumns(fresh);
+    } finally {
+      fresh.close();
+    }
+  }
+  return currentDocumentColumns;
 }
 
 /**
  * Upgrades the previous schema in place: a full copy is written next to the database
  * first, then every change and the new version commit in one immediate transaction.
+ * A documents table that does not end up exactly as this build creates it rolls back.
  */
 function upgradeReaderDb(db: Database, dbPath: string): string {
   const backupPath = backupPathFor(dbPath, UPGRADABLE_SCHEMA_VERSION);
@@ -212,8 +228,7 @@ function upgradeReaderDb(db: Database, dbPath: string): string {
     const version = readUserVersion(db);
     if (version !== UPGRADABLE_SCHEMA_VERSION) throw unsupportedVersion(dbPath, version);
     db.exec("ALTER TABLE documents RENAME COLUMN generatedOutline TO importedOutline");
-    const columns = documentColumns(db);
-    if (!columns.includes("importedOutline") || columns.includes("generatedOutline")) {
+    if (documentColumns(db) !== expectedDocumentColumns()) {
       throw new Error(`database ${dbPath} could not be upgraded: unexpected documents columns`);
     }
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);

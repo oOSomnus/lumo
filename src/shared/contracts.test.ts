@@ -3,6 +3,9 @@ import {
   AI_REASONING_EFFORTS,
   MAX_EPUB_CFI_CHARS,
   MAX_OUTLINE_ENTRIES,
+  MAX_OUTLINE_JSON_BYTES,
+  MAX_OUTLINE_LEVEL,
+  MAX_OUTLINE_TITLE_CHARS,
   MAX_TYPST_CHARS,
   MAX_TYPST_DIAGNOSTICS_CHARS,
   TARGET_LANGUAGES,
@@ -441,6 +444,20 @@ describe("outline schemas", () => {
         Array.from({ length: MAX_OUTLINE_ENTRIES + 1 }, () => entry),
       ),
     ).toThrow();
+  });
+});
+
+describe("outline body limit", () => {
+  test("fits the largest outline the schema accepts", () => {
+    const title = "\u0001".repeat(MAX_OUTLINE_TITLE_CHARS);
+    const entries = Array.from({ length: MAX_OUTLINE_ENTRIES }, (_, index) => ({
+      title,
+      level: Math.min(index + 1, MAX_OUTLINE_LEVEL),
+      pageNumber: Number.MAX_SAFE_INTEGER,
+    }));
+    expect(outlineEntriesSchema.parse(entries)).toHaveLength(MAX_OUTLINE_ENTRIES);
+    const bytes = new TextEncoder().encode(JSON.stringify(entries)).byteLength;
+    expect(bytes).toBeLessThanOrEqual(MAX_OUTLINE_JSON_BYTES);
   });
 });
 

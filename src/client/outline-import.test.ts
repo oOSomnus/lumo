@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { MAX_OUTLINE_ENTRIES } from "../shared/contracts";
+import { MAX_OUTLINE_ENTRIES, MAX_OUTLINE_LEVEL, MAX_OUTLINE_TITLE_CHARS } from "../shared/contracts";
 import {
   buildOutlineImportPrompt,
   formatOutlineImport,
@@ -28,6 +28,41 @@ describe("parseOutlineImport", () => {
         { title: "2 Background", level: 2, pageNumber: 15 },
         { title: "Part II  Methods", level: 1, pageNumber: 41 },
       ],
+    });
+  });
+
+  test("keeps punctuation that ends a title and strips only dot leaders of their own", () => {
+    expect(
+      parseOutlineImport(
+        ["# Introduction.  1", "# What next?  2", "## Notes...  3", "# Scope …… 4", "# Tail ....5"].join("\n"),
+        5,
+      ),
+    ).toEqual({
+      ok: true,
+      entries: [
+        { title: "Introduction.", level: 1, pageNumber: 1 },
+        { title: "What next?", level: 1, pageNumber: 2 },
+        { title: "Notes...", level: 2, pageNumber: 3 },
+        { title: "Scope", level: 1, pageNumber: 4 },
+        { title: "Tail", level: 1, pageNumber: 5 },
+      ],
+    });
+  });
+
+  test("accepts a full-length title on a deep heading", () => {
+    // 800 # marks and a 500-character title make one line far longer than the title alone.
+    const depth = 800;
+    const entries = Array.from({ length: depth }, (_, index) => ({
+      title: index === depth - 1 ? "x".repeat(MAX_OUTLINE_TITLE_CHARS) : "x",
+      level: index + 1,
+      pageNumber: 1,
+    }));
+    const result = parseOutlineImport(formatOutlineImport(entries), 1);
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.entries.at(-1)).toEqual(entries.at(-1));
+    expect(parseOutlineImport(`${"#".repeat(MAX_OUTLINE_LEVEL + 1)} Too deep  1`, 1)).toEqual({
+      ok: false,
+      errors: [{ line: 1, code: "level_too_deep" }],
     });
   });
 
@@ -112,6 +147,21 @@ describe("formatOutlineImport", () => {
     const text = formatOutlineImport(entries);
     expect(text).toBe("# A  1\n## A.1 Detail 2  2\n# B  7");
     expect(parseOutlineImport(text, 7)).toEqual({ ok: true, entries });
+  });
+
+  test("keeps a bookmark title broken over lines on one line", () => {
+    const text = formatOutlineImport([
+      { title: "Part One:\r\n  The Start", level: 1, pageNumber: 1 },
+      { title: "End.", level: 1, pageNumber: 2 },
+    ]);
+    expect(text).toBe("# Part One: The Start  1\n# End.  2");
+    expect(parseOutlineImport(text, 2)).toEqual({
+      ok: true,
+      entries: [
+        { title: "Part One: The Start", level: 1, pageNumber: 1 },
+        { title: "End.", level: 1, pageNumber: 2 },
+      ],
+    });
   });
 });
 

@@ -229,6 +229,16 @@ export type TranslationSaveInput = z.infer<typeof translationSaveInputSchema>;
 export const MAX_OUTLINE_ENTRIES = 10_000;
 export const MAX_OUTLINE_TITLE_CHARS = 500;
 export const MAX_OUTLINE_LEVEL = 10_000;
+/**
+ * The largest JSON body a valid outline can serialize to, in UTF-8 bytes: every title
+ * character escaped as \uXXXX (6 bytes), plus the widest level and page fields per entry.
+ */
+export const MAX_OUTLINE_JSON_BYTES =
+  2 +
+  MAX_OUTLINE_ENTRIES *
+    (MAX_OUTLINE_TITLE_CHARS * 6 +
+      JSON.stringify({ title: "", level: MAX_OUTLINE_LEVEL, pageNumber: Number.MAX_SAFE_INTEGER }).length +
+      1);
 
 const outlineTitleSchema = z
   .string()

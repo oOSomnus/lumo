@@ -1,4 +1,4 @@
-import { useDeferredValue, useId, useMemo, useRef, useState } from "react";
+import { useDeferredValue, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { OutlineEntry } from "../../shared/contracts";
 import { errorText, useI18n, type UiError } from "../i18n";
 import {
@@ -35,6 +35,15 @@ export function OutlineImportEditor({
   const copy = t.outline.editor;
   const id = useId();
   const fileInput = useRef<HTMLInputElement>(null);
+  // Bumped whenever the draft changes hands (a new read, an edit, save, cancel or unmount),
+  // so a file read that finishes later only fills the draft if nothing happened since.
+  const editToken = useRef(0);
+  useEffect(
+    () => () => {
+      editToken.current += 1;
+    },
+    [],
+  );
   const [notice, setNotice] = useState<"copied" | "copyFailed" | "fileFailed" | "tooLarge" | null>(null);
   const deferredDraft = useDeferredValue(draft);
   const result = useMemo(
@@ -58,18 +67,34 @@ export function OutlineImportEditor({
       setNotice("tooLarge");
       return;
     }
+    const token = ++editToken.current;
+    let text: string;
     try {
-      onDraftChange(await file.text());
-      setNotice(null);
+      text = await file.text();
     } catch {
-      setNotice("fileFailed");
+      if (token === editToken.current) setNotice("fileFailed");
+      return;
     }
+    if (token !== editToken.current) return;
+    onDraftChange(text);
+    setNotice(null);
+  };
+
+  const edit = (text: string): void => {
+    editToken.current += 1;
+    onDraftChange(text);
   };
 
   const save = (): void => {
+    editToken.current += 1;
     // Checks the text as it is now, not the deferred copy the summary shows.
     const latest = parseOutlineImport(draft, pageCount);
     if (latest.ok) onSave(latest.entries);
+  };
+
+  const cancel = (): void => {
+    editToken.current += 1;
+    onCancel();
   };
 
   const noticeText =
@@ -129,7 +154,7 @@ export function OutlineImportEditor({
         placeholder={copy.placeholder}
         disabled={saving}
         aria-describedby={`${id}-check`}
-        onChange={(event) => onDraftChange(event.currentTarget.value)}
+        onChange={(event) => edit(event.currentTarget.value)}
       />
       <div id={`${id}-check`} aria-live="polite">
         {result.ok ? (
@@ -167,7 +192,7 @@ export function OutlineImportEditor({
         >
           {saving ? t.outline.saving : copy.save}
         </button>
-        <button type="button" disabled={saving} onClick={onCancel}>
+        <button type="button" disabled={saving} onClick={cancel}>
           {copy.cancel}
         </button>
       </div>

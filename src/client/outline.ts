@@ -24,11 +24,16 @@ export interface DocumentOutlineState {
   stage: "idle" | "saving";
   skipped: number;
   error: UiError | null;
+  /**
+   * Why the saved imported outline is not in use (it could not be read, or does not fit
+   * the open PDF); the native outline shows meanwhile, and the import can be removed.
+   */
+  importIssue: UiError | null;
 }
 
 export class OutlineError extends Error {
   constructor(
-    readonly code: "OUTLINE_INVALID",
+    readonly code: "OUTLINE_INVALID" | "OUTLINE_OUTSIDE_DOCUMENT",
     message: string,
     readonly params?: Record<string, string | number>,
   ) {
@@ -45,7 +50,21 @@ export function emptyOutlineState(): DocumentOutlineState {
     stage: "idle",
     skipped: 0,
     error: null,
+    importIssue: null,
   };
+}
+
+/** Rejects an outline that points past the open PDF, which page ranges cannot be built for. */
+export function assertOutlineFits(
+  entries: readonly OutlineEntry[],
+  pageCount: number,
+): void {
+  if (entries.some((entry) => entry.pageNumber > pageCount)) {
+    throw new OutlineError(
+      "OUTLINE_OUTSIDE_DOCUMENT",
+      "the outline points at pages outside the document",
+    );
+  }
 }
 
 /**

@@ -294,6 +294,7 @@ export const zhCN: Messages = {
     EPUB_PAGE_TOO_LARGE: () => "这一页的文字超过 100000 字符上限。",
     PAGE_ASSETS_TOO_LARGE: () => "这一页的图片总量过大，无法一起使用。",
     OUTLINE_INVALID: () => "无法使用 PDF 目录，请手动选择页码。",
+    OUTLINE_OUTSIDE_DOCUMENT: () => "其中有页码超出了这个 PDF。",
     UNKNOWN: () => "出现未知错误。",
   },
   confirm: {
@@ -304,7 +305,6 @@ export const zhCN: Messages = {
     switchModified: "PDF 有未保存的修改",
     switchPreview: "当前 PDF 尚未加入书库",
     switchOutlineActive: "目录正在保存",
-    switchOutlineDraft: "正在导入的目录尚未保存",
     switchBody: (reasons) =>
       `${reasons}。继续会停止任务并丢弃未保存的新正文；已保存译文不受影响。`,
     switchConfirm: "仍然切换",
@@ -481,6 +481,7 @@ export const zhCN: Messages = {
     import: "导入目录…",
     edit: "编辑目录…",
     remove: "移除导入的目录",
+    importedFailed: (detail) => `导入的目录未被使用：${detail}`,
     saving: "正在保存目录…",
     editor: {
       title: "导入目录",

@@ -212,6 +212,8 @@ export function PageSelector({
           <>
             {editingOutline && (
               <OutlineImportEditor
+                // A new editor per document, so a file still being read never lands in another's draft.
+                key={document.id}
                 pageCount={pageCount}
                 draft={outlineDraft}
                 saving={outline.stage === "saving"}
@@ -230,6 +232,21 @@ export function PageSelector({
               <p className="field-error" role="alert">
                 {errorText(outline.error, locale)}
               </p>
+            )}
+            {!editingOutline && outline.importIssue && (
+              <div className="inline-error" role="alert">
+                {t.outline.importedFailed(errorText(outline.importIssue, locale))}
+                <button type="button" onClick={onReloadOutline}>
+                  {t.outline.reload}
+                </button>
+                <button
+                  type="button"
+                  disabled={outline.stage !== "idle"}
+                  onClick={onRemoveImportedOutline}
+                >
+                  {t.outline.remove}
+                </button>
+              </div>
             )}
             {!editingOutline && outline.entries.length > 0 && (
               <>

@@ -12,6 +12,7 @@ use url::Url;
 
 pub const LOG_LIMIT: usize = 200;
 pub const STARTUP_TIMEOUT_SECS: u64 = 45;
+const STARTUP_TIMEOUT_MS: u64 = STARTUP_TIMEOUT_SECS * 1000;
 pub const SHUTDOWN_TIMEOUT_SECS: u64 = 35;
 pub const SHUTDOWN_COMMAND: &[u8] = b"{\"type\":\"shutdown\"}\n";
 
@@ -234,6 +235,17 @@ pub struct Snapshot {
     pub logs: Vec<LogEntry>,
 }
 
+/// What the startup watchdog does next for the run it watches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartupCheck {
+    /// The run is no longer starting (ready, failed, stopping or replaced): stop watching.
+    Settled,
+    /// The run ran out of time and has been marked failed: end its process.
+    Overdue,
+    /// Look again after this many milliseconds.
+    Wait(u64),
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum LineOutcome {
     Unchanged,
@@ -357,6 +369,10 @@ pub struct State {
     exit_allowed: bool,
     stop_purpose: Option<StopPurpose>,
     stop_confirmed: bool,
+    /// An approved database upgrade is running; its backup and migration have no deadline.
+    upgrade_pending: bool,
+    /// When an upgrade run's reader database opened; the ordinary deadline counts from here.
+    reader_opened_at: Option<u64>,
     logs: VecDeque<LogEntry>,
 }
 
@@ -383,6 +399,8 @@ impl State {
             exit_allowed: false,
             stop_purpose: None,
             stop_confirmed: false,
+            upgrade_pending: false,
+            reader_opened_at: None,
             logs: VecDeque::new(),
         }
     }
@@ -456,6 +474,8 @@ impl State {
         self.failure_code = None;
         self.stop_purpose = None;
         self.stop_confirmed = false;
+        self.upgrade_pending = false;
+        self.reader_opened_at = None;
         self.revision += 1;
         Some(self.generation)
     }
@@ -466,7 +486,9 @@ impl State {
         if !self.can_upgrade() {
             return None;
         }
-        self.begin_start()
+        let generation = self.begin_start()?;
+        self.upgrade_pending = true;
+        Some(generation)
     }
 
     /// The process could not be spawned at all.
@@ -499,6 +521,11 @@ impl State {
             }
             (_, Parsed::Access(_)) => self.violation(at),
             (_, Parsed::Event(Event::Log(code))) => {
+                // The upgrade is done once the reader database is open, upgraded or found current.
+                if self.upgrade_pending && matches!(code, "reader_upgraded" | "reader_ready") {
+                    self.upgrade_pending = false;
+                    self.reader_opened_at = Some(at);
+                }
                 self.push(at, Level::Info, code);
                 LineOutcome::Changed
             }
@@ -561,14 +588,24 @@ impl State {
     }
 
     /// True when this run never became ready in time and must be killed.
-    pub fn startup_overdue(&mut self, at: u64, generation: u64) -> bool {
-        let overdue = generation == self.generation
-            && self.process_alive
-            && self.phase == Phase::Starting;
-        if overdue {
-            self.fail(at, "startup_timeout");
+    /// Checked by the startup watchdog, first after [`STARTUP_TIMEOUT_SECS`]. A normal run is
+    /// overdue then. An approved upgrade waits while the server backs up and migrates the
+    /// database, then gets the same deadline counted from when the database opened.
+    pub fn startup_check(&mut self, at: u64, generation: u64) -> StartupCheck {
+        if generation != self.generation || !self.process_alive || self.phase != Phase::Starting {
+            return StartupCheck::Settled;
         }
-        overdue
+        if self.upgrade_pending {
+            return StartupCheck::Wait(STARTUP_TIMEOUT_MS);
+        }
+        if let Some(opened) = self.reader_opened_at {
+            let deadline = opened.saturating_add(STARTUP_TIMEOUT_MS);
+            if at < deadline {
+                return StartupCheck::Wait(deadline - at);
+            }
+        }
+        self.fail(at, "startup_timeout");
+        StartupCheck::Overdue
     }
 
     pub fn begin_stop(&mut self, purpose: StopPurpose) -> StopPlan {
@@ -1096,18 +1133,59 @@ mod tests {
     #[test]
     fn overdue_checks_only_apply_to_the_run_they_were_armed_for() {
         let (mut state, generation) = started();
-        assert!(!state.startup_overdue(1, generation + 1));
-        assert!(state.startup_overdue(2, generation));
+        assert_eq!(state.startup_check(1, generation + 1), StartupCheck::Settled);
+        assert_eq!(state.startup_check(2, generation), StartupCheck::Overdue);
         assert_eq!(state.snapshot().failure_code, Some("startup_timeout"));
-        assert!(!state.startup_overdue(3, generation), "already failed");
+        assert_eq!(state.startup_check(3, generation), StartupCheck::Settled, "already failed");
 
         let (mut state, generation) = running();
-        assert!(!state.startup_overdue(1, generation), "ready in time");
+        assert_eq!(state.startup_check(1, generation), StartupCheck::Settled, "ready in time");
         assert!(!state.shutdown_overdue(1, generation), "not stopping");
         state.begin_stop(StopPurpose::Quit);
         assert!(state.shutdown_overdue(2, generation));
         assert_eq!(state.on_terminated(3, generation, true), Termination::Quit);
         assert!(!state.shutdown_overdue(4, generation), "process already ended");
+    }
+
+    #[test]
+    fn an_approved_upgrade_has_no_deadline_until_the_database_opens() {
+        let (mut state, generation) = started();
+        state.on_line(
+            1,
+            generation,
+            r#"{"type":"failed","code":"READER_DATABASE_UPGRADE_REQUIRED"}"#,
+        );
+        state.on_terminated(2, generation, false);
+        let upgrade = state.begin_upgrade().expect("upgrade after the process ended");
+
+        // Backing up and migrating a large library may take far longer than a normal start.
+        assert_eq!(state.startup_check(45_000, upgrade), StartupCheck::Wait(STARTUP_TIMEOUT_MS));
+        assert_eq!(state.startup_check(600_000, upgrade), StartupCheck::Wait(STARTUP_TIMEOUT_MS));
+        assert_eq!(state.phase(), Phase::Starting);
+
+        // Once the database is open, the rest of startup has the ordinary deadline.
+        state.on_line(610_000, upgrade, r#"{"type":"log","code":"reader_upgraded"}"#);
+        assert_eq!(state.startup_check(645_000, upgrade), StartupCheck::Wait(10_000));
+        assert_eq!(state.startup_check(655_000, upgrade), StartupCheck::Overdue);
+        assert_eq!(state.snapshot().failure_code, Some("startup_timeout"));
+
+        // A database another run already upgraded opens without `reader_upgraded`.
+        let (mut state, generation) = started();
+        state.on_line(
+            1,
+            generation,
+            r#"{"type":"failed","code":"READER_DATABASE_UPGRADE_REQUIRED"}"#,
+        );
+        state.on_terminated(2, generation, false);
+        let upgrade = state.begin_upgrade().expect("upgrade after the process ended");
+        state.on_line(3, upgrade, r#"{"type":"log","code":"reader_ready"}"#);
+        assert_eq!(state.startup_check(45_000, upgrade), StartupCheck::Wait(3));
+
+        // A normal retry keeps the plain deadline even after an upgrade run.
+        state.on_line(4, upgrade, r#"{"type":"failed","code":"SERVER_LISTEN_FAILED"}"#);
+        state.on_terminated(5, upgrade, false);
+        let retry = state.begin_start().expect("retry after the process ended");
+        assert_eq!(state.startup_check(45_000, retry), StartupCheck::Overdue);
     }
 
     /// Stands in for the child handle, whose drop kills the process: counts how often it is released.
@@ -1126,7 +1204,7 @@ mod tests {
         let mut slot = Some((old, Process(released.clone())));
 
         // The old run's startup watchdog fires, but the process ends on its own before the kill.
-        assert!(state.startup_overdue(1, old));
+        assert_eq!(state.startup_check(1, old), StartupCheck::Overdue);
         assert_eq!(state.on_terminated(2, old, true), Termination::Ignored);
         drop(take_run(&mut slot, old));
         assert_eq!(released.get(), 1);

@@ -91,8 +91,8 @@ import {
 } from "../../shared/epub";
 import JSZip from "jszip/dist/jszip.min.js";
 import {
+  assertOutlineFits,
   emptyOutlineState,
-  OutlineError,
   type DocumentOutlineState,
 } from "../outline";
 import {
@@ -846,9 +846,42 @@ export function Reader() {
 
   const [selection, setSelection] = useState<Set<number>>(new Set());
   const [outline, setOutline] = useState<DocumentOutlineState>(emptyOutlineState);
-  // The outline text being imported; null while the import editor is closed.
-  const [outlineDraft, setOutlineDraft] = useState<string | null>(null);
-  const hasOutlineDraft = outlineDraft !== null && outlineDraft.trim().length > 0;
+  // Outline text being imported, per PDF: a draft stays with its document while others are
+  // open (including an edited copy saved from it) and is dropped only once saved, cancelled
+  // or its document is deleted. A document without an entry has the editor closed.
+  const [outlineDrafts, setOutlineDrafts] = useState<ReadonlyMap<string, string>>(
+    () => new Map(),
+  );
+  const outlineDraft =
+    currentDocument?.format === "pdf"
+      ? outlineDrafts.get(currentDocument.id) ?? null
+      : null;
+  // A reload loses every draft, not only the open document's.
+  const hasOutlineDraft = useMemo(
+    () => [...outlineDrafts.values()].some((draft) => draft.trim().length > 0),
+    [outlineDrafts],
+  );
+  const updateOutlineDraft = useCallback(
+    (documentId: string, draft: string | null) => {
+      setOutlineDrafts((previous) => {
+        if (draft === null ? !previous.has(documentId) : previous.get(documentId) === draft) {
+          return previous;
+        }
+        const next = new Map(previous);
+        if (draft === null) next.delete(documentId);
+        else next.set(documentId, draft);
+        return next;
+      });
+    },
+    [],
+  );
+  const setOutlineDraft = useCallback(
+    (draft: string | null) => {
+      const document = currentDocumentRef.current;
+      if (document?.format === "pdf") updateOutlineDraft(document.id, draft);
+    },
+    [updateOutlineDraft],
+  );
   const outlineRef = useRef(outline);
   const outlineAttemptRef = useRef(0);
   const outlineControllerRef = useRef<AbortController | null>(null);
@@ -969,7 +1002,6 @@ export function Reader() {
     const nextOutline = emptyOutlineState();
     outlineRef.current = nextOutline;
     setOutline(nextOutline);
-    setOutlineDraft(null);
     outlineLoadedSessionRef.current = -1;
     outlineAttemptRef.current += 1;
     outlineControllerRef.current?.abort();
@@ -1041,7 +1073,6 @@ export function Reader() {
       const nextOutline = emptyOutlineState();
       outlineRef.current = nextOutline;
       setOutline(nextOutline);
-      setOutlineDraft(null);
       outlineLoadedSessionRef.current = -1;
     }
     currentDocumentRef.current = document;
@@ -1499,24 +1530,34 @@ export function Reader() {
         bridgeRef.current !== bridge;
 
       try {
-        // An imported outline replaces the PDF's own one until it is removed.
-        const result = await apiJson<{ outline: OutlineEntry[] | null }>(
-          `/api/documents/${documentId}/outline`,
-          { signal: controller.signal },
-        );
-        if (stale()) return;
-        if (result.outline && result.outline.length > 0) {
-          const entries = outlineEntriesSchema.parse(result.outline);
-          setOutline({
-            entries,
-            source: "imported",
-            loadStatus: "ready",
-            stage: "idle",
-            skipped: 0,
-            error: null,
-          });
-          showSidebarOutline(bridge, entries);
-          return;
+        // An imported outline replaces the PDF's own one until it is removed. One that
+        // cannot be read, or does not fit the open PDF, leaves the native outline in use
+        // and says why, so it can be retried, replaced or removed.
+        let importIssue: UiError | null = null;
+        try {
+          const result = await apiJson<{ outline: OutlineEntry[] | null }>(
+            `/api/documents/${documentId}/outline`,
+            { signal: controller.signal },
+          );
+          if (stale()) return;
+          if (result.outline && result.outline.length > 0) {
+            const entries = outlineEntriesSchema.parse(result.outline);
+            assertOutlineFits(entries, bridge.pageCount);
+            setOutline({
+              entries,
+              source: "imported",
+              loadStatus: "ready",
+              stage: "idle",
+              skipped: 0,
+              error: null,
+              importIssue: null,
+            });
+            showSidebarOutline(bridge, entries);
+            return;
+          }
+        } catch (error) {
+          if (stale() || controller.signal.aborted) return;
+          importIssue = toUiError(error);
         }
 
         let native: { entries: OutlineEntry[]; skipped: number } | null = null;
@@ -1532,20 +1573,14 @@ export function Reader() {
         }
         if (stale()) return;
         showSidebarOutline(bridge, null);
-        if (native && native.entries.length > 0) {
-          setOutline({
-            entries: native.entries,
-            source: "native",
-            loadStatus: "ready",
-            stage: "idle",
-            skipped: native.skipped,
-            error: null,
-          });
-          return;
-        }
+        const hasNative = native !== null && native.entries.length > 0;
         setOutline({
           ...emptyOutlineState(),
+          entries: hasNative ? native!.entries : [],
+          source: hasNative ? "native" : null,
           loadStatus: "ready",
+          skipped: hasNative ? native!.skipped : 0,
+          importIssue,
         });
       } catch (error) {
         if (
@@ -1586,11 +1621,14 @@ export function Reader() {
       }
       const total = bridge.pageCount;
       const parsedCopy = outlineEntriesSchema.safeParse(structuredClone(entries));
-      if (
-        !parsedCopy.success ||
-        parsedCopy.data.some((entry) => entry.pageNumber > total)
-      ) {
+      if (!parsedCopy.success) {
         setOutline((previous) => ({ ...previous, error: { code: "OUTLINE_INVALID" } }));
+        return;
+      }
+      try {
+        assertOutlineFits(parsedCopy.data, total);
+      } catch (error) {
+        setOutline((previous) => ({ ...previous, error: toUiError(error) }));
         return;
       }
 
@@ -1619,12 +1657,7 @@ export function Reader() {
           return;
         }
         const parsed = outlineEntriesSchema.parse(saved.outline);
-        if (parsed.some((entry) => entry.pageNumber > total)) {
-          throw new OutlineError(
-            "OUTLINE_INVALID",
-            "the saved outline is outside the document",
-          );
-        }
+        assertOutlineFits(parsed, total);
         const next: DocumentOutlineState = {
           entries: parsed,
           source: "imported",
@@ -1632,10 +1665,11 @@ export function Reader() {
           stage: "idle",
           skipped: 0,
           error: null,
+          importIssue: null,
         };
         outlineRef.current = next;
         setOutline(next);
-        setOutlineDraft(null);
+        updateOutlineDraft(document.id, null);
         if (bridgeRef.current === bridge) showSidebarOutline(bridge, parsed);
       } catch (error) {
         if (attempt !== outlineAttemptRef.current) return;
@@ -1650,7 +1684,7 @@ export function Reader() {
         }
       }
     },
-    [],
+    [updateOutlineDraft],
   );
 
   /** Deletes the imported outline; the PDF's own outline, if any, shows again. */
@@ -1662,7 +1696,8 @@ export function Reader() {
       !document ||
       document.format !== "pdf" ||
       previewOnlyRef.current ||
-      outlineRef.current.source !== "imported" ||
+      (outlineRef.current.source !== "imported" &&
+        outlineRef.current.importIssue === null) ||
       outlineRef.current.stage !== "idle"
     ) {
       return;
@@ -1755,14 +1790,12 @@ export function Reader() {
     const document = currentDocumentRef.current;
     const { active, drafts } = currentHasWork(document?.id ?? null);
     const outlineActive = outline.stage === "saving";
-    const outlineUnsaved = hasOutlineDraft;
     if (
       !active &&
       !modified &&
       !previewOnly &&
       drafts.length === 0 &&
-      !outlineActive &&
-      !outlineUnsaved
+      !outlineActive
     ) {
       return true;
     }
@@ -1770,7 +1803,6 @@ export function Reader() {
       active ? t.confirm.switchActive : null,
       drafts.length > 0 ? t.confirm.switchDrafts(drafts.length) : null,
       outlineActive ? t.confirm.switchOutlineActive : null,
-      outlineUnsaved ? t.confirm.switchOutlineDraft : null,
       modified ? t.confirm.switchModified : null,
       previewOnly ? t.confirm.switchPreview : null,
     ].filter((value): value is string => value !== null);
@@ -1781,7 +1813,7 @@ export function Reader() {
       extraLabel: drafts.length > 0 ? t.confirm.exportDrafts : undefined,
       onExtra: () => exportDraftTypst(),
     });
-  }, [ask, currentHasWork, hasOutlineDraft, modified, outline.stage, previewOnly, t]);
+  }, [ask, currentHasWork, modified, outline.stage, previewOnly, t]);
 
   const stopCurrentWork = useCallback(() => {
     queue.cancelAll();
@@ -2188,6 +2220,7 @@ export function Reader() {
         stage: "idle",
         skipped: 0,
         error: null,
+        importIssue: null,
       });
       const view = await resolveInitialView(
         document.id,
@@ -3032,6 +3065,7 @@ export function Reader() {
           };
         });
         queue.cancelDocument(document.id);
+        updateOutlineDraft(document.id, null);
         if (currentDocumentRef.current?.id === document.id) {
           openAttemptRef.current += 1;
           abortOutlineWork();
@@ -3067,6 +3101,7 @@ export function Reader() {
       setPageCount,
       setPageValue,
       t,
+      updateOutlineDraft,
       viewStore,
     ],
   );

@@ -419,6 +419,52 @@ describe("storage", () => {
     }
   });
 
+  test("rolls back an upgrade that fails after renaming the column, keeping the backup", () => {
+    const directory = previousSchemaDirectory();
+    // An extra column survives the rename, so the table does not match this build's and the check after it fails.
+    const raw = new Database(join(directory, DB_FILENAME));
+    raw.exec("ALTER TABLE documents ADD COLUMN unexpected TEXT");
+    raw.close();
+    const backups: string[] = [];
+
+    expect(() =>
+      openReaderDb(directory, { upgrade: true, onUpgraded: (path) => backups.push(path) }),
+    ).toThrow("unexpected documents columns");
+    expect(backups).toEqual([]);
+
+    const check = new Database(join(directory, DB_FILENAME), { readonly: true });
+    try {
+      expect(check.query("PRAGMA user_version").get()).toEqual({
+        user_version: UPGRADABLE_SCHEMA_VERSION,
+      });
+      const columns = (check.query("PRAGMA table_info(documents)").all() as { name: string }[]).map(
+        (column) => column.name,
+      );
+      expect(columns).toContain("generatedOutline");
+      expect(columns).not.toContain("importedOutline");
+      expect(
+        JSON.parse(
+          (check.query("SELECT generatedOutline FROM documents").get() as { generatedOutline: string })
+            .generatedOutline,
+        ),
+      ).toEqual(previousOutline);
+    } finally {
+      check.close();
+    }
+    const kept = readdirSync(directory).filter(
+      (name) => name.startsWith(`${DB_FILENAME}.v${UPGRADABLE_SCHEMA_VERSION}-`) && name.endsWith(".bak"),
+    );
+    expect(kept).toHaveLength(1);
+    const backup = new Database(join(directory, kept[0]!), { readonly: true });
+    try {
+      expect(backup.query("PRAGMA user_version").get()).toEqual({
+        user_version: UPGRADABLE_SCHEMA_VERSION,
+      });
+    } finally {
+      backup.close();
+    }
+  });
+
   test("never upgrades any other schema version", () => {
     for (const version of [3, 6, SCHEMA_VERSION + 1]) {
       const directory = mkdtempSync(join(tmpdir(), "lumo-storage-"));

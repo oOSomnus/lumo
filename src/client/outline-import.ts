@@ -34,12 +34,13 @@ export type OutlineImportResult =
   | { ok: true; entries: OutlineEntry[] }
   | { ok: false; errors: OutlineImportError[] };
 
-// `## Title  12`, optionally with dot leaders before the page number.
-const HEADING_LINE = /^(#+)[ \t]+(.*?)[ \t.·…]*[ \t.·…](\d+)[ \t]*$/u;
+// `## Title  12`. Dot leaders count only as their own token before the page
+// (`Title ..... 12`), so punctuation that ends a title (`Introduction.  1`) stays in it.
+const HEADING_LINE = /^(#+)[ \t]+(.*?)(?:[ \t]+[.·…]{2,}[ \t]*|[ \t]+)(\d+)[ \t]*$/u;
 const HEADING_WITHOUT_PAGE = /^#+[ \t]+\S/u;
 const FENCE_LINE = /^(```|~~~)/u;
-// Room for a full title, deep levels, leaders and the page; longer lines are rejected before matching.
-const MAX_LINE_CHARS = MAX_OUTLINE_TITLE_CHARS + 256;
+// Room for the deepest level's # marks, a full title, leaders and the page; longer lines are rejected before matching.
+const MAX_LINE_CHARS = MAX_OUTLINE_LEVEL + 1 + MAX_OUTLINE_TITLE_CHARS + 256;
 
 /**
  * Reads an outline written as Markdown headings, one per line: `#` repeated for the
@@ -103,10 +104,17 @@ export function parseOutlineImport(text: string, pageCount: number): OutlineImpo
   return { ok: true, entries: outlineEntriesSchema.parse(entries) };
 }
 
-/** Writes an outline in the import format, so an existing one can be edited and imported again. */
+/**
+ * Writes an outline in the import format, so an existing one can be edited and imported
+ * again. A title broken over several lines (PDF bookmarks may be) is joined with spaces,
+ * keeping every entry on its own line.
+ */
 export function formatOutlineImport(entries: readonly OutlineEntry[]): string {
   return entries
-    .map((entry) => `${"#".repeat(entry.level)} ${entry.title}  ${entry.pageNumber}`)
+    .map((entry) => {
+      const title = entry.title.replace(/[ \t]*[\r\n]+[ \t]*/gu, " ");
+      return `${"#".repeat(entry.level)} ${title}  ${entry.pageNumber}`;
+    })
     .join("\n");
 }
 
