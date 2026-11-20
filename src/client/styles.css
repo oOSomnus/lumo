@@ -407,6 +407,57 @@ input:not([type]) {
   opacity: 1;
 }
 
+/* Page buttons at the edges: invisible and click-through until the mouse moves (or a key focuses one). */
+.immersive-page-step {
+  position: fixed;
+  inset-block-start: 50%;
+  z-index: 20;
+  width: 44px;
+  height: 72px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--paper);
+  color: var(--fg);
+  font-size: 28px;
+  line-height: 1;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-50%);
+  transition: opacity 0.2s ease;
+}
+
+/* Previous on the left and next on the right, like the arrow keys, whatever the text direction. */
+.immersive-page-step.prev {
+  left: 12px;
+}
+
+.immersive-page-step.next {
+  right: 12px;
+}
+
+.immersive-page-nav.revealed .immersive-page-step,
+.immersive-page-step:focus-visible {
+  opacity: 0.75;
+  pointer-events: auto;
+}
+
+.immersive-page-nav.revealed .immersive-page-step:hover,
+.immersive-page-step:focus-visible {
+  opacity: 1;
+}
+
+.immersive-page-nav.revealed .immersive-page-step[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .immersive-page-step {
+    transition: none;
+  }
+}
+
 .workspace.immersive .page-body {
   padding: 0;
   scrollbar-width: none;
@@ -641,6 +692,13 @@ input:not([type]) {
 
 .page-position .muted {
   font-size: 12px;
+}
+
+.page-step {
+  min-width: 32px;
+  padding: 0 8px;
+  font-size: 18px;
+  line-height: 1;
 }
 
 .language-field {

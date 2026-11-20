@@ -20,6 +20,7 @@ interface EpubViewerFrameProps {
   onRelocated: (relocation: EpubRelocation) => void;
   onSelection: (selection: EpubSelection | null) => void;
   onShortcut: (shortcut: ReaderShortcut) => void;
+  onPointerActivity: () => void;
   onError: (error: UiError) => void;
 }
 
@@ -32,13 +33,30 @@ export function EpubViewerFrame({
   onRelocated,
   onSelection,
   onShortcut,
+  onPointerActivity,
   onError,
 }: EpubViewerFrameProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const clientRef = useRef<EpubBridgeClient | null>(null);
   const [loaded, setLoaded] = useState(false);
-  const callbacks = useRef({ onBridge, onReady, onRelocated, onSelection, onShortcut, onError });
-  callbacks.current = { onBridge, onReady, onRelocated, onSelection, onShortcut, onError };
+  const callbacks = useRef({
+    onBridge,
+    onReady,
+    onRelocated,
+    onSelection,
+    onShortcut,
+    onPointerActivity,
+    onError,
+  });
+  callbacks.current = {
+    onBridge,
+    onReady,
+    onRelocated,
+    onSelection,
+    onShortcut,
+    onPointerActivity,
+    onError,
+  };
   const documentId = document?.format === "epub" ? document.id : null;
 
   useEffect(() => {
@@ -50,6 +68,7 @@ export function EpubViewerFrame({
       onRelocated: (relocation) => callbacks.current.onRelocated(relocation),
       onSelection: (selection) => callbacks.current.onSelection(selection),
       onShortcut: (shortcut) => callbacks.current.onShortcut(shortcut),
+      onPointerActivity: () => callbacks.current.onPointerActivity(),
       onFatal: ({ code, message }) =>
         callbacks.current.onError({ code, detail: message }),
     });

@@ -32,6 +32,7 @@ import type {
 } from "./epub-protocol";
 import { watchReaderKeys } from "./page-keys";
 import type { ReaderShortcut } from "./page-keys";
+import { watchPointerActivity } from "./pointer-activity";
 import { flattenEpubToc } from "./epub-toc";
 
 // The sandboxed half of the EPUB reader. It owns the book, the foreground
@@ -55,8 +56,8 @@ interface Session {
   lastPosted: string;
   /** Counts the moments a selection still being measured stops being the current one; only the latest, unmoved selection may be posted. */
   selectionSeq: number;
-  /** Stops the arrow-key listener of every section document the foreground rendition showed. */
-  keyStops: Map<Document, () => void>;
+  /** Stops the key and pointer listeners of every section document the foreground rendition showed. */
+  docStops: Map<Document, () => void>;
 }
 
 let current: Session | null = null;
@@ -73,6 +74,12 @@ function forwardKey(session: Session, shortcut: ReaderShortcut): boolean {
   if (current !== session || session.closed) return false;
   post({ type: "shortcut", generation: session.generation, shortcut });
   return true;
+}
+
+/** The mouse moved over the book; the reader page shows its immersive page buttons. */
+function forwardPointer(session: Session): void {
+  if (current !== session || session.closed) return;
+  post({ type: "pointer", generation: session.generation });
 }
 
 const unavailable = (message: string): EpubBridgeError =>
@@ -365,8 +372,8 @@ function fail(session: Session, id: number | null, error: unknown, fallback: Epu
 
 async function closeSession(session: Session): Promise<void> {
   session.closed = true;
-  for (const stop of session.keyStops.values()) stop();
-  session.keyStops.clear();
+  for (const stop of session.docStops.values()) stop();
+  session.docStops.clear();
   for (const controller of [...session.requests.values()]) controller.abort();
   session.content.dispose();
   await session.renditions.close();
@@ -419,7 +426,7 @@ async function open(generation: number, bytes: ArrayBuffer): Promise<void> {
       queued: null,
       lastPosted: "",
       selectionSeq: 0,
-      keyStops: new Map(),
+      docStops: new Map(),
     };
     // epub.js relayouts on its own when the window resizes.
     rendition.on("relocated", () => {
@@ -432,15 +439,17 @@ async function open(generation: number, bytes: ArrayBuffer): Promise<void> {
     // Non-passive and in the capture phase: epub.js forwards key events through passive listeners that cannot cancel them.
     rendition.hooks.content.register((contents) => {
       if (session.closed) return;
-      for (const [shown, stop] of session.keyStops) {
+      for (const [shown, stop] of session.docStops) {
         if (shown.defaultView) continue;
         stop();
-        session.keyStops.delete(shown);
+        session.docStops.delete(shown);
       }
-      session.keyStops.set(
-        contents.document,
-        watchReaderKeys(contents.document, (shortcut) => forwardKey(session, shortcut)),
-      );
+      const stopKeys = watchReaderKeys(contents.document, (shortcut) => forwardKey(session, shortcut));
+      const stopPointer = watchPointerActivity(contents.document, () => forwardPointer(session));
+      session.docStops.set(contents.document, () => {
+        stopKeys();
+        stopPointer();
+      });
     });
     current = session;
     post({
@@ -500,3 +509,6 @@ post({ type: "viewer-ready" });
 
 // Focus can also rest on the viewer page itself, outside any section.
 watchReaderKeys(document, (shortcut) => (current ? forwardKey(current, shortcut) : false));
+watchPointerActivity(document, () => {
+  if (current) forwardPointer(current);
+});

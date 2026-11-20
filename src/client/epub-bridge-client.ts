@@ -27,6 +27,8 @@ export interface EpubBridgeEvents {
   onSelection(selection: EpubSelection | null): void;
   /** A reader shortcut pressed inside the book. */
   onShortcut(shortcut: ReaderShortcut): void;
+  /** The mouse moved over the book. */
+  onPointerActivity(): void;
   /** The book itself could not be opened. */
   onFatal(failure: { code: EpubFailureCode; message: string }): void;
 }
@@ -214,6 +216,9 @@ export class EpubBridgeClient implements EpubBridge {
         break;
       case "shortcut":
         if (this.ready) this.events.onShortcut(message.shortcut);
+        break;
+      case "pointer":
+        if (this.ready) this.events.onPointerActivity();
         break;
       case "relocated":
         this.events.onRelocated(message.relocation);

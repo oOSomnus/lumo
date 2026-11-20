@@ -55,6 +55,7 @@ function setup() {
     onRelocated: () => events.push("relocated"),
     onSelection: () => events.push("selection"),
     onShortcut: (shortcut) => events.push(`shortcut:${shortcut.type === "step" ? shortcut.direction : shortcut.type}`),
+    onPointerActivity: () => events.push("pointer"),
     onFatal: ({ code }) => events.push(`fatal:${code}`),
   });
   const deliver = (message: ViewerMessage, source: unknown = contentWindow): void => {
@@ -128,6 +129,23 @@ describe("EpubBridgeClient requests", () => {
     expect(events.at(-1)).toBe("ready");
   });
 
+  test("mouse movement in the book reaches the reader only for the current book once it is ready", () => {
+    const { client, events, deliver, openBook } = setup();
+    client.open(new ArrayBuffer(8));
+    deliver({ type: "pointer", generation: 1 });
+    expect(events).toEqual([]);
+
+    deliver({ type: "ready", generation: 1, info });
+    deliver({ type: "pointer", generation: 1 });
+    deliver({ type: "pointer", generation: 0 });
+    deliver({ type: "pointer", generation: 2 });
+    expect(events).toEqual(["ready", "pointer"]);
+
+    openBook(2);
+    deliver({ type: "pointer", generation: 1 });
+    expect(events.at(-1)).toBe("ready");
+  });
+
   test("invalidating ends the old book's events at once, before the next book is opened", async () => {
     const { client, sent, events, deliver, requests, openBook } = setup();
     openBook();
@@ -140,6 +158,7 @@ describe("EpubBridgeClient requests", () => {
     deliver({ type: "relocated", generation: 1, relocation: { ...pageAt(1), atStart: true, atEnd: false } });
     deliver({ type: "selection", generation: 1, selection: null });
     deliver({ type: "shortcut", generation: 1, shortcut: { type: "step", direction: "next" } });
+    deliver({ type: "pointer", generation: 1 });
     deliver({ type: "ready", generation: 1, info });
     deliver({ type: "failure", generation: 1, id: null, code: "EPUB_OPEN_FAILED", message: "bad zip" });
     deliver({ type: "reply", generation: 1, id: request!.id, result: undefined });

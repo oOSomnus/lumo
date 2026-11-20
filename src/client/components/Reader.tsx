@@ -69,6 +69,7 @@ import type {
 import { currentTocId, outlineFromEpubToc } from "../toc";
 import { generationRequest, repairRequest } from "../translation-input";
 import { watchReaderKeys, type PageStep, type ReaderShortcut } from "../page-keys";
+import { watchPointerActivity } from "../pointer-activity";
 import { ViewerBridgeError, type PdfScrollLocation, type ViewerBridge } from "../pdfBridge";
 import {
   rememberPdfScroll,
@@ -115,6 +116,7 @@ import { PdfExportDialog } from "./PdfExportDialog";
 import { EpubTocPanel } from "./EpubTocPanel";
 import { EpubToolbar } from "./EpubToolbar";
 import { EpubViewerFrame } from "./EpubViewerFrame";
+import { ImmersivePageNav } from "./ImmersivePageNav";
 import { PdfViewerFrame } from "./PdfViewerFrame";
 import { SettingsDialog } from "./SettingsDialog";
 import { TranslationView, type TranslationZoomFrame } from "./TranslationView";
@@ -139,6 +141,8 @@ type AiState =
 const MIN_SPLIT = 0.2;
 const MAX_SPLIT = 0.8;
 const SPLITTER_WIDTH = 6;
+// How long the immersive page buttons stay after the mouse stops.
+const PAGE_NAV_HIDE_MS = 2000;
 
 const ZOOM_PRESET_LABELS = {
   auto: "auto",
@@ -369,6 +373,10 @@ export function Reader() {
   const [immersive, setImmersive] = useState(false);
   const immersiveRef = useRef(false);
   const fullscreenPendingRef = useRef(false);
+  // Immersive page buttons show while the mouse moves and fade after it rests.
+  const [pageNavShown, setPageNavShown] = useState(false);
+  const pageNavTimerRef = useRef<number | null>(null);
+  const pageNavHeldRef = useRef(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const scrollMemoryRef = useRef<Map<string, ReaderScrollMemory>>(new Map());
   // Each book's translation zoom for the Right-only layout; the state is the current book's.
@@ -442,6 +450,51 @@ export function Reader() {
       aiControllerRef.current = null;
     };
   }, [refreshAiStatus, token]);
+
+  const clearPageNavTimer = useCallback((): void => {
+    if (pageNavTimerRef.current === null) return;
+    window.clearTimeout(pageNavTimerRef.current);
+    pageNavTimerRef.current = null;
+  }, []);
+
+  const schedulePageNavHide = useCallback((): void => {
+    clearPageNavTimer();
+    if (pageNavHeldRef.current) return;
+    pageNavTimerRef.current = window.setTimeout(() => {
+      pageNavTimerRef.current = null;
+      setPageNavShown(false);
+    }, PAGE_NAV_HIDE_MS);
+  }, [clearPageNavTimer]);
+
+  // Mouse movement over the page or any reading frame; only immersive reading acts on it.
+  const revealPageNav = useCallback((): void => {
+    if (!immersiveRef.current) return;
+    setPageNavShown(true);
+    schedulePageNavHide();
+  }, [schedulePageNavHide]);
+
+  const holdPageNav = useCallback(
+    (held: boolean): void => {
+      pageNavHeldRef.current = held;
+      if (held) clearPageNavTimer();
+      else schedulePageNavHide();
+    },
+    [clearPageNavTimer, schedulePageNavHide],
+  );
+
+  useEffect(() => {
+    if (!immersive) {
+      clearPageNavTimer();
+      pageNavHeldRef.current = false;
+      setPageNavShown(false);
+      return;
+    }
+    const stop = watchPointerActivity(window.document, revealPageNav);
+    return () => {
+      stop();
+      clearPageNavTimer();
+    };
+  }, [clearPageNavTimer, immersive, revealPageNav]);
 
   // Leaving immersive first keeps a dialog or error visible in the normal reading layout.
   const exitImmersive = useCallback(async (): Promise<void> => {
@@ -556,7 +609,8 @@ export function Reader() {
     [runEpubCommand],
   );
 
-  // The one entry for an arrow-key page turn, from the page, the PDF and EPUB frames and the translation preview.
+  // The one entry for a page turn: arrow keys from the page, the PDF and EPUB frames and the translation preview,
+  // and the translation toolbar's and immersive reading's page buttons.
   const turnPage = useCallback(
     (direction: PageStep): boolean => {
       if (screenRef.current !== "reader" || !viewerReadyRef.current) return false;
@@ -3340,6 +3394,11 @@ export function Reader() {
     };
   }, []);
 
+  // The page buttons follow the arrow keys: usable once the viewer shows a page, idle at either end.
+  const pageNavDisabled = !viewerReady || pageCount === 0;
+  const atFirstPage = isEpubDocument ? (epubLocation?.atStart ?? true) : page <= 1;
+  const atLastPage = isEpubDocument ? (epubLocation?.atEnd ?? true) : page >= pageCount;
+
   const outlineBusy =
     outline.stage === "generating" || outline.stage === "saving";
   const pageDisabledReason = !currentDocument
@@ -3898,6 +3957,16 @@ export function Reader() {
                 {t.appBar.exitImmersive}
               </button>
             )}
+            {immersive && (
+              <ImmersivePageNav
+                shown={pageNavShown}
+                disabled={pageNavDisabled}
+                atStart={atFirstPage}
+                atEnd={atLastPage}
+                onStep={turnPage}
+                onHold={holdPageNav}
+              />
+            )}
         {narrow && (
           <nav
             className="mobile-tabs"
@@ -3979,6 +4048,7 @@ export function Reader() {
                   onSelection={handleEpubSelection}
                   onError={handleViewerError}
                   onShortcut={(shortcut) => void handleReaderShortcut(shortcut)}
+                  onPointerActivity={revealPageNav}
                 />
                 {epubTocOpen && (
                   <EpubTocPanel
@@ -4007,6 +4077,7 @@ export function Reader() {
               onError={handleViewerError}
               onFilePicked={(file) => void openPreview(file)}
               onShortcut={handleReaderShortcut}
+              onPointerActivity={revealPageNav}
               onPassword={(password) => {
                 passwordRef.current = password;
               }}
@@ -4138,6 +4209,17 @@ export function Reader() {
             <div className="page-panel">
               <div className="page-toolbar">
                 <div className="page-position">
+                  <button
+                    type="button"
+                    className="page-step"
+                    aria-label={t.page.previousPage}
+                    title={t.page.previousPage}
+                    aria-keyshortcuts="ArrowLeft"
+                    disabled={pageNavDisabled || atFirstPage}
+                    onClick={() => turnPage("prev")}
+                  >
+                    ‹
+                  </button>
                   <strong>
                     {isEpubDocument
                       ? epubLocation
@@ -4150,6 +4232,17 @@ export function Reader() {
                         : t.epub.locating
                       : t.common.pageOf(page, pageCount)}
                   </strong>
+                  <button
+                    type="button"
+                    className="page-step"
+                    aria-label={t.page.nextPage}
+                    title={t.page.nextPage}
+                    aria-keyshortcuts="ArrowRight"
+                    disabled={pageNavDisabled || atLastPage}
+                    onClick={() => turnPage("next")}
+                  >
+                    ›
+                  </button>
                   <span className="muted">
                     {isEpubDocument && epubChapter ? epubChapter : null}
                   </span>
@@ -4472,6 +4565,7 @@ export function Reader() {
                             onDiscard={discardCurrentDraft}
                             immersive={immersive}
                             onShortcut={handleReaderShortcut}
+                            onPointerActivity={revealPageNav}
                             onRendered={handleTranslationRendered}
                             onPreviewError={() => void exitImmersive()}
                             zoom={translationZoomFrame}

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ReaderView, UiLocale } from "../../shared/contracts";
 import { toUiError, useI18n, type UiError } from "../i18n";
 import { watchReaderKeys, type ReaderShortcut } from "../page-keys";
+import { watchPointerActivity } from "../pointer-activity";
 import { adaptPdfToolbar } from "../pdf-toolbar";
 import {
   waitForViewer,
@@ -40,6 +41,8 @@ interface PdfViewerFrameProps {
   onError: (error: UiError) => void;
   onFilePicked: (file: File) => void;
   onShortcut: (shortcut: ReaderShortcut) => boolean;
+  /** The mouse moved over the viewer (throttled). */
+  onPointerActivity: () => void;
   onPassword?: (password: string) => void;
 }
 
@@ -90,6 +93,7 @@ export function PdfViewerFrame({
   onError,
   onFilePicked,
   onShortcut,
+  onPointerActivity,
   onPassword,
 }: PdfViewerFrameProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -114,6 +118,7 @@ export function PdfViewerFrame({
     onError,
     onFilePicked,
     onShortcut,
+    onPointerActivity,
     onPassword,
   });
   callbacks.current = {
@@ -127,6 +132,7 @@ export function PdfViewerFrame({
     onError,
     onFilePicked,
     onShortcut,
+    onPointerActivity,
     onPassword,
   };
 
@@ -247,6 +253,9 @@ export function PdfViewerFrame({
       if (inAnnotationEditor(event.target)) return false;
       return callbacks.current.onShortcut(_shortcut);
     });
+    const stopPointer = watchPointerActivity(document, () =>
+      callbacks.current.onPointerActivity(),
+    );
     const stopToolbar = adaptPdfToolbar(window, toolsLabelRef.current);
     const coarse = window.matchMedia("(pointer: coarse)");
     const onCoarseChange = (): void =>
@@ -267,6 +276,7 @@ export function PdfViewerFrame({
       document.removeEventListener("touchstart", onUserScroll, true);
       document.removeEventListener("pointerdown", onUserScroll, true);
       stopKeys();
+      stopPointer();
       stopToolbar();
       coarse.removeEventListener("change", onCoarseChange);
       unsubscribe?.();
