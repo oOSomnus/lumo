@@ -1381,6 +1381,12 @@ export function SettingsPage({
               <td>{t.settings.shortcutsImmersive}</td>
               <td><kbd>Esc</kbd></td>
             </tr>
+            <tr>
+              <td>{t.settings.shortcutsImmersiveScroll}</td>
+              <td>
+                <kbd>↑</kbd> <kbd>↓</kbd>
+              </td>
+            </tr>
           </tbody>
         </table>
         <p className="muted">{t.settings.shortcutsInputs}</p>

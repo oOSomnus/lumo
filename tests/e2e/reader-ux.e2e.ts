@@ -286,6 +286,54 @@ test("Immersive reading hides the app chrome, keeps the pane layout and leaves b
   await expect(page.locator(".workspace")).not.toHaveClass(/immersive/);
 });
 
+test("Up and Down scroll the pane under the mouse in immersive reading, wherever the focus is", async ({
+  page,
+  lumo,
+}) => {
+  const book = await uploadPdf(lumo.api, "immersive-scroll.pdf", 2, "immersive-scroll");
+  const response = await lumo.api.put(translationPath(book.id, 1, "en"), {
+    data: { typst: "#set page(width: 300pt, height: 2000pt)\nTall", provider: "custom", model: "smoke" },
+  });
+  expect(response.ok()).toBe(true);
+  await openTranslatedPage(page, lumo.url, "immersive-scroll.pdf");
+  await expect(page.locator(".typst-preview")).toBeVisible();
+  const viewer = page.frameLocator("iframe.pdf-frame");
+  await viewer.locator("#scaleSelect").selectOption("4");
+  const body = page.locator(".side-pane .page-body");
+  const bodyTop = () => body.evaluate((node) => node.scrollTop);
+  const pdfTop = () => viewer.locator("#viewerContainer").evaluate((node) => node.scrollTop);
+
+  // Outside immersive reading the page keeps the keys.
+  await page.locator(".fullscreen-button").focus();
+  await body.hover();
+  await page.keyboard.press("ArrowDown");
+  expect(await bodyTop()).toBe(0);
+
+  await page.locator(".fullscreen-button").click();
+  await expect(page.locator(".workspace")).toHaveClass(/immersive/);
+  const pdfStart = await pdfTop();
+  // Focus stays on the page while the mouse picks the translation...
+  await body.hover();
+  await page.keyboard.press("ArrowDown");
+  await expect.poll(bodyTop).toBeGreaterThan(0);
+  await page.keyboard.press("ArrowUp");
+  await expect.poll(bodyTop).toBe(0);
+  expect(await pdfTop()).toBe(pdfStart);
+  // ...or the original.
+  await page.locator(".pdf-pane").hover();
+  await page.keyboard.press("ArrowDown");
+  await expect.poll(pdfTop).toBeGreaterThan(pdfStart);
+  await page.keyboard.press("ArrowUp");
+  await expect.poll(pdfTop).toBe(pdfStart);
+  expect(await bodyTop()).toBe(0);
+  // With the focus in the PDF viewer, the translation under the mouse still scrolls.
+  await viewer.locator("#viewerContainer").click({ position: { x: 3, y: 3 } });
+  await body.hover();
+  await page.keyboard.press("ArrowDown");
+  await expect.poll(bodyTop).toBeGreaterThan(0);
+  expect(await pdfTop()).toBe(pdfStart);
+});
+
 test("A single pane keeps the batch tab it was showing", async ({ page, lumo }) => {
   await uploadPdf(lumo.api, "batch-layout.pdf", 4, "batch-layout");
   await openTranslatedPage(page, lumo.url, "batch-layout.pdf");

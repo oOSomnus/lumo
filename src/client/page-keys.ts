@@ -2,10 +2,13 @@
 
 export type PageStep = "next" | "prev";
 
+export type ScrollStep = "up" | "down";
+
 export type LayoutPreset = 1 | 2 | 3 | 4 | 5;
 
 export type ReaderShortcut =
   | { type: "step"; direction: PageStep }
+  | { type: "scroll"; direction: ScrollStep }
   | { type: "translate" }
   | { type: "layout"; preset: LayoutPreset }
   | { type: "toggle-immersive" }
@@ -50,6 +53,8 @@ export function readerShortcut(event: ShortcutEvent): ReaderShortcut | null {
   if (event.shiftKey) return null;
   if (event.key === "ArrowRight") return { type: "step", direction: "next" };
   if (event.key === "ArrowLeft") return { type: "step", direction: "prev" };
+  if (event.key === "ArrowDown") return { type: "scroll", direction: "down" };
+  if (event.key === "ArrowUp") return { type: "scroll", direction: "up" };
   return null;
 }
 
@@ -164,7 +169,9 @@ export function watchReaderKeys(
     if (event.defaultPrevented) return;
     const shortcut = readerShortcut(event);
     if (!shortcut) return;
-    if (shortcut.type === "step" && ownsArrowKeys(event.target)) return;
+    if ((shortcut.type === "step" || shortcut.type === "scroll") && ownsArrowKeys(event.target)) {
+      return;
+    }
     if (shortcut.type === "translate" && ownsEnterKeys(event.target)) return;
     if (shortcut.type === "toggle-immersive" && ownsEnterKeys(event.target)) return;
     if (!handle(shortcut, event)) return;

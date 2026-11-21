@@ -68,7 +68,12 @@ import type {
 } from "../epub-bridge";
 import { currentTocId, outlineFromEpubToc } from "../toc";
 import { generationRequest, repairRequest } from "../translation-input";
-import { watchReaderKeys, type PageStep, type ReaderShortcut } from "../page-keys";
+import {
+  watchReaderKeys,
+  type PageStep,
+  type ReaderShortcut,
+  type ScrollStep,
+} from "../page-keys";
 import { watchPointerActivity } from "../pointer-activity";
 import { ViewerBridgeError, type PdfScrollLocation, type ViewerBridge } from "../pdfBridge";
 import {
@@ -156,6 +161,8 @@ const MAX_SPLIT = 0.8;
 const SPLITTER_WIDTH = 6;
 // How long the immersive page buttons stay after the mouse stops.
 const PAGE_NAV_HIDE_MS = 2000;
+// How far one press of Up or Down scrolls a pane in immersive reading: about a line, as browsers do.
+const IMMERSIVE_SCROLL_STEP = 40;
 
 const ZOOM_PRESET_LABELS = {
   auto: "auto",
@@ -815,6 +822,8 @@ export function Reader() {
   }, [changeEpubStyle, colorTheme, viewerReady]);
 
   const workspaceRef = useRef<HTMLElement | null>(null);
+  const originalPaneRef = useRef<HTMLElement | null>(null);
+  const translationPaneRef = useRef<HTMLElement | null>(null);
   const pageBodyRef = useRef<HTMLDivElement | null>(null);
   const [pageBody, setPageBody] = useState<HTMLDivElement | null>(null);
   const attachPageBody = useCallback((node: HTMLDivElement | null) => {
@@ -3433,6 +3442,42 @@ export function Reader() {
     return t.page.mode.notTranslated;
   })();
 
+  // Immersive reading hides every control that could hold focus, so Up and Down scroll a pane
+  // themselves: the one under the mouse, else the one with focus, else the translation.
+  const scrollImmersivePane = useCallback(
+    (direction: ScrollStep): boolean => {
+      const original = originalPaneRef.current;
+      const translation = translationPaneRef.current;
+      const panes = [original, translation].filter(
+        (pane): pane is HTMLElement => pane !== null && !pane.inert,
+      );
+      const focused = window.document.activeElement;
+      const pane =
+        panes.find((candidate) => candidate.matches(":hover")) ??
+        panes.find((candidate) => candidate.contains(focused)) ??
+        panes.at(-1);
+      if (!pane) return false;
+      const top = direction === "down" ? IMMERSIVE_SCROLL_STEP : -IMMERSIVE_SCROLL_STEP;
+      if (pane === translation) {
+        const body = pageBodyRef.current;
+        if (!body) return false;
+        handleBodyUserIntent();
+        body.scrollBy({ top });
+        return true;
+      }
+      // An EPUB original is paginated: there is nothing to scroll, and the key goes nowhere else.
+      if (currentDocumentRef.current?.format === "epub") return true;
+      // From inside the PDF viewer the key is PDF.js's own, which scrolls or turns as its mode says.
+      if (pane.contains(focused)) return false;
+      const bridge = bridgeRef.current;
+      if (!bridge) return false;
+      cancelPdfRestore();
+      bridge.scrollBy(top);
+      return true;
+    },
+    [cancelPdfRestore, handleBodyUserIntent],
+  );
+
   const handleReaderShortcut = useCallback(
     (shortcut: ReaderShortcut): boolean => {
       if (screenRef.current !== "reader" || !viewerReadyRef.current) return false;
@@ -3440,6 +3485,9 @@ export function Reader() {
       switch (shortcut.type) {
         case "step":
           return turnPage(shortcut.direction);
+        case "scroll":
+          // Outside immersive reading the focused pane scrolls on its own.
+          return immersiveRef.current && scrollImmersivePane(shortcut.direction);
         case "exit-immersive":
           if (!immersiveRef.current) return false;
           void exitImmersive();
@@ -3477,6 +3525,7 @@ export function Reader() {
       currentTask,
       exitImmersive,
       narrow,
+      scrollImmersivePane,
       t,
       translateCurrent,
       translationDisabledReason,
@@ -3961,6 +4010,7 @@ export function Reader() {
         <div className={`workspace-panes${singlePane ? " single" : ""}`} style={panesStyle}>
 
         <section
+          ref={originalPaneRef}
           className={`pdf-pane${isEpubDocument ? " epub-pane" : ""}`}
           aria-label={t.tabs.original}
           inert={!showLeft}
@@ -4085,6 +4135,7 @@ export function Reader() {
         )}
 
         <section
+          ref={translationPaneRef}
           className="side-pane"
           aria-label={t.tabs.translation}
           inert={!showRight}
