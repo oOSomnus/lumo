@@ -582,6 +582,7 @@ export const zhCN: Messages = {
     shortcutsTranslate: "翻译本页",
     shortcutsEnterImmersive: "进入或退出沉浸阅读",
     shortcutsImmersive: "退出沉浸阅读",
+    shortcutsImmersiveScroll: "沉浸阅读中滚动鼠标所在的窗格",
     shortcutsInputs: "输入框、编辑器、弹窗和按钮保留各自的按键行为。",
     shortcutsBrowser:
       "macOS 上用 Cmd 代替 Ctrl。也可使用 Ctrl+Shift+1–5。浏览器可能占用 Ctrl+1–5；沉浸阅读可能需要授权才能保留这些按键。",

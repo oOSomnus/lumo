@@ -55,6 +55,15 @@ describe("readerShortcut", () => {
     expect(readerShortcut(key("ArrowLeft"))).toEqual({ type: "step", direction: "prev" });
   });
 
+  test("maps the plain up and down arrows to a scroll, held down too", () => {
+    expect(readerShortcut(key("ArrowDown"))).toEqual({ type: "scroll", direction: "down" });
+    expect(readerShortcut(key("ArrowUp"))).toEqual({ type: "scroll", direction: "up" });
+    expect(readerShortcut(key("ArrowDown", { repeat: true }))).toEqual({
+      type: "scroll",
+      direction: "down",
+    });
+  });
+
   test("a plain Enter translates and a repeat or held key does not", () => {
     expect(readerShortcut(key("Enter"))).toEqual({ type: "translate" });
     expect(readerShortcut(key("Enter", { repeat: true }))).toBeNull();
@@ -98,11 +107,13 @@ describe("readerShortcut", () => {
   });
 
   test("leaves other keys and IME composition alone", () => {
-    expect(readerShortcut(key("ArrowUp"))).toBeNull();
     expect(readerShortcut(key("PageDown"))).toBeNull();
+    expect(readerShortcut(key("Home"))).toBeNull();
     expect(readerShortcut(key("ArrowLeft", { isComposing: true }))).toBeNull();
+    expect(readerShortcut(key("ArrowDown", { isComposing: true }))).toBeNull();
     for (const modifier of ["altKey", "ctrlKey", "metaKey", "shiftKey"] as const) {
       expect(readerShortcut(key("ArrowRight", { [modifier]: true }))).toBeNull();
+      expect(readerShortcut(key("ArrowDown", { [modifier]: true }))).toBeNull();
     }
   });
 });
@@ -243,7 +254,10 @@ describe("watchReaderKeys", () => {
     listener(press("f", node("button")).event);
     listener(press("ArrowRight", node("body"), { shiftKey: true }).event);
     listener(press("ArrowRight", node("body"), { defaultPrevented: true }).event);
-    listener(press("ArrowDown", node("body")).event);
+    listener(press("ArrowDown", node("textarea")).event);
+    listener(press("ArrowUp", node("div", { role: "slider" })).event);
+    listener(press("ArrowDown", node("body"), { shiftKey: true }).event);
+    listener(press("PageDown", node("body")).event);
     expect(handled).toBe(0);
   });
 });

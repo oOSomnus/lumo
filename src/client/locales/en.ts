@@ -645,6 +645,7 @@ export const en = {
     shortcutsTranslate: "Translate this page",
     shortcutsEnterImmersive: "Enter or leave immersive reading",
     shortcutsImmersive: "Leave immersive reading",
+    shortcutsImmersiveScroll: "Scroll the pane under the mouse in immersive reading",
     shortcutsInputs:
       "Text fields, editors, dialogs and buttons keep their own keys.",
     shortcutsBrowser:

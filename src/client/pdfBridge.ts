@@ -52,6 +52,8 @@ interface PdfDocumentLike {
 }
 
 interface PdfViewerLike {
+  /** The scrolling `#viewerContainer`. */
+  container: HTMLElement;
   currentScaleValue: string;
   pagesRotation: number;
   scrollMode: number;
@@ -340,6 +342,11 @@ export class ViewerBridge {
       ignoreDestinationZoom: true,
     });
     return true;
+  }
+
+  /** Scrolls the pages down (positive) or up by CSS pixels, as a key pressed in the viewer would. */
+  scrollBy(top: number): void {
+    this.#app.pdfViewer.container.scrollBy({ top });
   }
 
   async getPage(pageNumber: number): Promise<PDFPageProxy> {
