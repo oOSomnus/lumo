@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { COLOR_THEMES } from "../shared/contracts";
-import { colorSchemeOf, PDF_THEME_CSS, previewThemeCss } from "./reading-theme";
+import { colorSchemeOf, PDF_THEME_CSS, previewPaint } from "./reading-theme";
 import { resolveTheme } from "./theme";
 
 describe("resolveTheme", () => {
@@ -20,11 +20,14 @@ describe("reading surfaces", () => {
   });
 
   test("the light preview keeps the page as rendered; the others repaint it", () => {
-    expect(previewThemeCss("light")).toBe("html{background:#fff}");
-    expect(previewThemeCss("sepia")).toContain("mix-blend-mode:multiply");
-    expect(previewThemeCss("dark")).toContain("invert(");
-    expect(previewThemeCss("night")).toContain("invert(");
-    expect(new Set(COLOR_THEMES.map(previewThemeCss)).size).toBe(COLOR_THEMES.length);
+    expect(previewPaint("light")).toEqual({ paper: "#fff", blend: "source-over", filter: null });
+    expect(previewPaint("sepia")).toMatchObject({ blend: "multiply", filter: null });
+    expect(previewPaint("sepia").paper).not.toBe("#fff");
+    expect(previewPaint("dark").filter).toContain("invert(");
+    expect(previewPaint("night").filter).toContain("invert(");
+    expect(new Set(COLOR_THEMES.map((theme) => JSON.stringify(previewPaint(theme)))).size).toBe(
+      COLOR_THEMES.length,
+    );
   });
 
   test("PDF pages are repainted for every theme but light", () => {

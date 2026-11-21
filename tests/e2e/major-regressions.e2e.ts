@@ -716,44 +716,37 @@ function expectNear(actual: number, expected: number, what: string, tolerance = 
   );
 }
 
-/** The preview, its frame and the SVG drawn in it all span the pane without distorting the page. */
+/** The preview and the bitmap drawn in it span the pane without distorting the page, sharp at the screen's pixel ratio. */
 async function expectPreviewFillsPane(
   page: Page,
   [pageWidth, pageHeight]: readonly [number, number],
 ): Promise<void> {
-  // The iframe is sandboxed; Playwright still reaches its document through the frame locator.
-  const svg = page.frameLocator(".typst-preview iframe").locator("body > svg");
   await expect(async () => {
     const pane = await paneWidth(page);
     const outer = await page.evaluate(() => {
       const width = (selector: string) =>
         document.querySelector(selector)!.getBoundingClientRect().width;
       const body = document.querySelector(".page-body")!;
+      const canvas = document.querySelector<HTMLCanvasElement>(".typst-preview canvas")!;
+      const box = canvas.getBoundingClientRect();
       return {
         translation: width(".translation-body"),
         preview: width(".typst-preview"),
-        frame: document.querySelector(".typst-preview iframe")!.clientWidth,
+        canvas: { width: box.width, height: box.height },
+        backing: { width: canvas.width, height: canvas.height },
+        dpr: window.devicePixelRatio,
         overflow: body.scrollWidth - body.clientWidth,
       };
     });
-    const drawn = await svg.evaluate(
-      (element) => {
-        const box = element.getBoundingClientRect();
-        const [, , width, height] = (element.getAttribute("viewBox") ?? "")
-          .split(/\s+/)
-          .map(Number);
-        return { width: box.width, height: box.height, ratio: width! / height! };
-      },
-      undefined,
-      { timeout: 1_000 },
-    );
+    const ratio = pageWidth / pageHeight;
     expectNear(outer.translation, pane, "translation body vs pane");
     expectNear(outer.preview, pane, "preview vs pane");
-    expectNear(outer.frame, outer.preview - 2, "frame vs preview inside its 1px borders");
-    expectNear(drawn.width, outer.frame, "SVG vs frame");
-    expectNear(drawn.width / drawn.height / drawn.ratio, 1, "drawn SVG ratio vs viewBox", 0.01);
-    // Pins the measurement to this page, not the previous page's frame still on screen.
-    expectNear(drawn.ratio / (pageWidth / pageHeight), 1, "viewBox vs page size", 0.01);
+    expectNear(outer.canvas.width, outer.preview - 2, "canvas vs preview inside its 1px borders");
+    // Pins the measurement to this page, not the previous page's canvas still on screen.
+    expectNear(outer.canvas.width / outer.canvas.height / ratio, 1, "canvas box vs page size", 0.01);
+    // Redrawn for this size: one backing pixel per device pixel, the page undistorted.
+    expectNear(outer.backing.width, outer.canvas.width * outer.dpr, "backing vs device pixels", 2);
+    expectNear(outer.backing.width / outer.backing.height / ratio, 1, "drawn page vs page size", 0.02);
     expect(outer.overflow, "page body scrolls horizontally").toBeLessThanOrEqual(1);
   }).toPass({ timeout: 20_000 });
 }
@@ -796,9 +789,9 @@ test("Typst preview renders glyphs and fills the translation pane", async ({ pag
 
   await page.setViewportSize({ width: 2400, height: 1100 });
   await openTranslatedPage(page, lumo.url, "glyphs.pdf");
-  const preview = page.locator(".typst-preview iframe");
+  const preview = page.locator(".typst-preview canvas");
   await expect(preview).toBeVisible();
-  // A bordered but empty frame is visible too; only drawn glyphs make dark pixels.
+  // A bordered but empty canvas is visible too; only drawn glyphs make dark pixels.
   await expect
     .poll(async () => darkPixels(page, await preview.screenshot()), { timeout: 20_000 })
     .toBeGreaterThan(100);
@@ -855,6 +848,16 @@ self.onmessage = (event) => {
   await page.route("**/typst/worker.js", (route) =>
     route.fulfill({ contentType: "text/javascript", body: worker }),
   );
+  // The preview decodes the sanitized SVG from a blob; keep each one the page hands out.
+  await page.addInitScript(() => {
+    const blobs: Blob[] = [];
+    (window as unknown as { svgBlobs: Blob[] }).svgBlobs = blobs;
+    const create = URL.createObjectURL.bind(URL);
+    URL.createObjectURL = (object: Blob | MediaSource) => {
+      if (object instanceof Blob && object.type === "image/svg+xml") blobs.push(object);
+      return create(object);
+    };
+  });
   const document = await uploadPdf(lumo.api, "sanitize.pdf", 2, "sanitize");
   const seeded = await lumo.api.put(translationPath(document.id, 1, "en"), {
     data: { typst: "= stub", provider: "custom", model: "smoke" },
@@ -862,22 +865,20 @@ self.onmessage = (event) => {
   expect(seeded.ok()).toBe(true);
 
   await openTranslatedPage(page, lumo.url, "sanitize.pdf");
-  const preview = page.locator(".typst-preview iframe");
+  const preview = page.locator(".typst-preview canvas");
   await expect(preview).toBeVisible();
-  await expect(preview).toHaveAttribute("sandbox", "allow-same-origin");
+  // The preview is a bitmap: nothing of the SVG is left in the page to run or click.
+  await expect(page.locator(".typst-preview svg, .typst-preview iframe")).toHaveCount(0);
   await expect
     .poll(async () => darkPixels(page, await preview.screenshot()), { timeout: 20_000 })
     .toBeGreaterThan(100);
 
-  const srcdoc = await preview.getAttribute("srcdoc");
-  expect(srcdoc).toBeTruthy();
-  const sanitized = await page.evaluate((markup) => {
-    const parsed = new DOMParser().parseFromString(markup, "text/html");
+  const sanitized = await page.evaluate(async () => {
+    const blobs = (window as unknown as { svgBlobs: Blob[] }).svgBlobs;
+    if (blobs.length !== 1) throw new Error(`expected one decoded SVG, got ${blobs.length}`);
+    const parsed = new DOMParser().parseFromString(await blobs[0]!.text(), "image/svg+xml");
     const elements = [...parsed.querySelectorAll("*")];
     return {
-      csp: parsed
-        .querySelector('meta[http-equiv="Content-Security-Policy"]')
-        ?.getAttribute("content"),
       tags: elements.map((element) => element.tagName.toLowerCase()),
       attributes: elements.flatMap((element) => element.getAttributeNames()),
       references: [...parsed.querySelectorAll("use")].map((element) => [
@@ -888,10 +889,8 @@ self.onmessage = (event) => {
         element.getAttributeNames().filter((name) => /href|target/.test(name)),
       ),
     };
-  }, srcdoc!);
+  });
 
-  expect(sanitized.csp).toContain("default-src 'none'");
-  expect(sanitized.csp).toContain("script-src 'none'");
   expect(sanitized.tags).toContain("path");
   expect(sanitized.tags).not.toContain("script");
   expect(sanitized.tags).not.toContain("foreignobject");
@@ -946,7 +945,7 @@ test("Typst repairs unclosed delimiters before saving", async ({ page, lumo }) =
   expect(saves).toEqual([fixed]);
   expect(await (await lumo.api.get(path)).json()).toMatchObject({ typst: fixed });
 
-  const preview = page.locator(".typst-preview iframe");
+  const preview = page.locator(".typst-preview canvas");
   await expect(preview).toBeVisible();
   await expect
     .poll(async () => darkPixels(page, await preview.screenshot()), { timeout: 20_000 })
