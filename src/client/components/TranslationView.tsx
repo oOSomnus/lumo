@@ -1,13 +1,12 @@
 import DOMPurify from "dompurify";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import { compileTypst, type TypstAsset } from "../typst";
 import { stripPlaceholderControls } from "../../shared/typst";
-import { watchReaderKeys, type ReaderShortcut } from "../page-keys";
-import { watchPointerActivity } from "../pointer-activity";
 import { translationPreviewWidth, type Size } from "../translation-zoom";
-import type { ColorTheme, TranslationZoom } from "../../shared/contracts";
-import { previewThemeCss } from "../reading-theme";
+import type { TranslationZoom } from "../../shared/contracts";
+import { previewPaint } from "../reading-theme";
+import { drawPreview, loadSvgImage, rasterSize } from "../typst-raster";
 import { useTheme } from "../theme";
 import { TypstSource } from "./TypstSource";
 
@@ -49,12 +48,8 @@ function sanitizedSvg(svg: string): string {
   });
 }
 
-/** The preview document of an already sanitized page, painted with the colour theme. */
-function previewDocument(sanitized: string, theme: ColorTheme): string {
-  const csp =
-    "default-src 'none'; script-src 'none'; connect-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'";
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>html,body{margin:0;padding:0;background:transparent}svg{max-width:100%;height:auto;display:block}body>svg{width:100%}${previewThemeCss(theme)}</style></head><body>${sanitized}</body></html>`;
-}
+/** Redraws after the preview box stops resizing; meanwhile the old bitmap is stretched. */
+const RESIZE_REDRAW_MS = 120;
 
 /** The rendered page's size in Typst points, from the SVG's viewBox. */
 function svgPageSize(svg: string): Size | null {
@@ -87,10 +82,6 @@ interface TranslationViewProps {
   onDiscard?: () => void;
   /** Immersive reading shows only the rendered page, hiding the source/editor tools. */
   immersive?: boolean;
-  /** A reading shortcut pressed inside the preview; true when it did something. */
-  onShortcut?: (shortcut: ReaderShortcut) => boolean;
-  /** The mouse moved over the preview (throttled). */
-  onPointerActivity?: () => void;
   /** The preview or the source body is laid out; reading position may be restored now. */
   onRendered?: () => void;
   /** A preview failed while nothing else could show the error; the reader can leave immersive mode. */
@@ -105,8 +96,8 @@ type PreviewState =
       status: "ready";
       typst: string;
       loadAssets: LoadAssets;
-      /** The sanitized SVG page. */
-      svg: string;
+      /** The sanitized page decoded as an image, drawn into the preview canvas. */
+      image: HTMLImageElement;
       pageSize: Size | null;
     }
   | { status: "failed"; message: string };
@@ -121,8 +112,6 @@ export const TranslationView = memo(function TranslationView({
   onSave,
   onDiscard,
   immersive = false,
-  onShortcut,
-  onPointerActivity,
   onRendered,
   onPreviewError,
   zoom,
@@ -134,38 +123,11 @@ export const TranslationView = memo(function TranslationView({
   const [preview, setPreview] = useState<PreviewState>({ status: "compiling" });
   const [liveOpen, setLiveOpen] = useState(true);
 
-  // The preview document belongs to the model's output: the page only listens there for reader keys
-  // and mouse movement, and stops when the document is replaced or the frame is gone.
-  const shortcutRef = useRef(onShortcut);
-  shortcutRef.current = onShortcut;
-  const pointerRef = useRef(onPointerActivity);
-  pointerRef.current = onPointerActivity;
   const renderedRef = useRef(onRendered);
   renderedRef.current = onRendered;
   const previewErrorRef = useRef(onPreviewError);
   previewErrorRef.current = onPreviewError;
-  const stopFrameRef = useRef<(() => void) | null>(null);
-  const attachKeys = useCallback((frame: HTMLIFrameElement): void => {
-    stopFrameRef.current?.();
-    stopFrameRef.current = null;
-    const doc = frame.contentDocument;
-    if (!doc) return;
-    const stopKeys = watchReaderKeys(
-      doc,
-      (shortcut) => shortcutRef.current?.(shortcut) ?? false,
-    );
-    const stopPointer = watchPointerActivity(doc, () => pointerRef.current?.());
-    stopFrameRef.current = () => {
-      stopKeys();
-      stopPointer();
-    };
-    renderedRef.current?.();
-  }, []);
-  const frameRef = useCallback((frame: HTMLIFrameElement | null): void => {
-    if (frame) return;
-    stopFrameRef.current?.();
-    stopFrameRef.current = null;
-  }, []);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const previewRef = useRef(preview);
   previewRef.current = preview;
@@ -206,15 +168,25 @@ export const TranslationView = memo(function TranslationView({
           controller.signal,
         ),
       )
+      .then(async (svg) => {
+        const sanitized = sanitizedSvg(svg);
+        const image = await loadSvgImage(sanitized);
+        const pageSize =
+          svgPageSize(svg) ??
+          (image.naturalWidth > 0 && image.naturalHeight > 0
+            ? { width: image.naturalWidth, height: image.naturalHeight }
+            : null);
+        return { pageSize, image };
+      })
       .then(
-        (svg) => {
+        ({ pageSize, image }) => {
           if (controller.signal.aborted) return;
           setPreview({
             status: "ready",
             typst: previewSource,
             loadAssets,
-            svg: sanitizedSvg(svg),
-            pageSize: svgPageSize(svg),
+            image,
+            pageSize,
           });
         },
         (error: unknown) => {
@@ -235,7 +207,7 @@ export const TranslationView = memo(function TranslationView({
     }
   }, [immersive, preview.status, streaming]);
 
-  // A source body has no iframe load event; one frame lets it lay out before the reader restores a position.
+  // A source body is not drawn; one frame lets it lay out before the reader restores a position.
   useEffect(() => {
     if (
       streaming ||
@@ -248,10 +220,55 @@ export const TranslationView = memo(function TranslationView({
     return () => cancelAnimationFrame(id);
   }, [immersive, preview.status, streaming, wantPreview, visibleSource, mode, editing]);
   const { theme } = useTheme();
-  const previewHtml = useMemo(
-    () => (preview.status === "ready" ? previewDocument(preview.svg, theme) : ""),
-    [preview, theme],
-  );
+  const paint = useMemo(() => previewPaint(theme), [theme]);
+  const shownImage = !streaming && wantPreview && preview.status === "ready" ? preview.image : null;
+
+  // The page is drawn once per decoded image, theme, size and pixel ratio; scrolling only moves the bitmap.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!shownImage || !canvas) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let frame: number | null = null;
+    let resolution: MediaQueryList | null = null;
+    let drawn = false;
+    let reported = false;
+    const draw = (): void => {
+      const box = canvas.getBoundingClientRect();
+      // A hidden pane has no size; the observer draws once it is shown.
+      if (box.width <= 0 || box.height <= 0) return;
+      const size = rasterSize(box, window.devicePixelRatio || 1);
+      if (drawn && canvas.width === size.width && canvas.height === size.height) return;
+      drawPreview(canvas, shownImage, paint, size);
+      drawn = true;
+      if (!reported) {
+        reported = true;
+        frame = requestAnimationFrame(() => renderedRef.current?.());
+      }
+    };
+    const onResolution = (): void => {
+      watchResolution();
+      drawn = false;
+      draw();
+    };
+    const watchResolution = (): void => {
+      resolution?.removeEventListener("change", onResolution);
+      resolution = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+      resolution.addEventListener("change", onResolution);
+    };
+    draw();
+    watchResolution();
+    const observer = new ResizeObserver(() => {
+      if (timer !== null) clearTimeout(timer);
+      timer = setTimeout(draw, RESIZE_REDRAW_MS);
+    });
+    observer.observe(canvas);
+    return () => {
+      observer.disconnect();
+      resolution?.removeEventListener("change", onResolution);
+      if (timer !== null) clearTimeout(timer);
+      if (frame !== null) cancelAnimationFrame(frame);
+    };
+  }, [shownImage, paint]);
   const zoomedWidth =
     zoom && preview.status === "ready" && preview.pageSize
       ? translationPreviewWidth(zoom.value, preview.pageSize, zoom.viewport)
@@ -355,13 +372,11 @@ export const TranslationView = memo(function TranslationView({
               : undefined
           }
         >
-          <iframe
-            ref={frameRef}
-            title={t.translation.previewLabel}
+          <canvas
+            ref={canvasRef}
+            role="img"
             aria-label={t.translation.previewLabel}
-            sandbox="allow-same-origin"
-            srcDoc={previewHtml}
-            onLoad={(event) => attachKeys(event.currentTarget)}
+            style={paint.filter ? { filter: paint.filter } : undefined}
           />
         </div>
       )}

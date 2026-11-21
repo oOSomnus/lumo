@@ -334,6 +334,54 @@ test("Up and Down scroll the pane under the mouse in immersive reading, wherever
   expect(await pdfTop()).toBe(pdfStart);
 });
 
+test("A long translation scrolls under the mouse wheel without dropping frames", async ({ page, lumo }) => {
+  const words = "The quick brown fox jumps over the lazy dog while the translated text keeps flowing. ";
+  const typst = [
+    "#set page(width: 180mm, height: auto, margin: 12mm)",
+    ...Array.from({ length: 60 }, (_, index) => `== Section ${index + 1}\n${words.repeat(6)}`),
+  ].join("\n\n");
+  const book = await uploadPdf(lumo.api, "long.pdf", 2, "long");
+  const response = await lumo.api.put(translationPath(book.id, 1, "en"), {
+    data: { typst, provider: "custom", model: "smoke" },
+  });
+  expect(response.ok()).toBe(true);
+  await openTranslatedPage(page, lumo.url, "long.pdf");
+  const canvas = page.locator(".typst-preview canvas");
+  await expect(canvas).toBeVisible();
+  // The page is drawn once, at the box's device-pixel size.
+  await expect
+    .poll(() => canvas.evaluate((node: HTMLCanvasElement) => node.width - Math.round(node.clientWidth * devicePixelRatio)))
+    .toBeLessThanOrEqual(2);
+
+  const body = page.locator(".side-pane .page-body");
+  const box = (await body.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.evaluate(() => {
+    const probe = window as unknown as { frameGaps: number[]; probing: boolean };
+    probe.frameGaps = [];
+    probe.probing = true;
+    let last = performance.now();
+    const tick = (now: number): void => {
+      probe.frameGaps.push(now - last);
+      last = now;
+      if (probe.probing) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+  for (let step = 0; step < 40; step += 1) {
+    await page.mouse.wheel(0, 120);
+    await page.waitForTimeout(16);
+  }
+  const gaps = await page.evaluate(() => {
+    const probe = window as unknown as { frameGaps: number[]; probing: boolean };
+    probe.probing = false;
+    return probe.frameGaps.slice(2).sort((a, b) => a - b);
+  });
+  expect(await body.evaluate((node) => node.scrollTop)).toBeGreaterThan(2000);
+  const p95 = gaps[Math.floor(gaps.length * 0.95)]!;
+  expect(p95, `frame gaps ${JSON.stringify(gaps.slice(-5))}`).toBeLessThan(100);
+});
+
 test("A single pane keeps the batch tab it was showing", async ({ page, lumo }) => {
   await uploadPdf(lumo.api, "batch-layout.pdf", 4, "batch-layout");
   await openTranslatedPage(page, lumo.url, "batch-layout.pdf");
@@ -498,14 +546,14 @@ test("ArrowLeft and ArrowRight turn the page from the original, the translation,
   await page.locator(".typst-source").click();
   await turn("ArrowLeft", "1");
 
-  // The preview frame, which is a document of its own: it is replaced on every page, so each press starts with a click.
+  // The preview: it is redrawn on every page, so each press starts with a click.
   await page.getByRole("button", { name: "Preview", exact: true }).click();
-  const preview = page.frameLocator(".typst-preview iframe");
-  await expect(preview.locator("body > svg")).toBeVisible();
-  await preview.locator("body").click();
+  const preview = page.locator(".typst-preview canvas");
+  await expect(preview).toBeVisible();
+  await preview.click();
   await turn("ArrowRight", "2");
-  await expect(preview.locator("body > svg")).toBeVisible();
-  await preview.locator("body").click();
+  await expect(preview).toBeVisible();
+  await preview.click();
   await turn("ArrowLeft", "1");
 
   // The blank of the batch panel.
@@ -659,7 +707,27 @@ test("A page turns with the arrow keys before the book is in the Library, and on
 
 // ── Typst preview and highlighting ─────────────────────────────────────────────────────────────
 
-test("The preview frame takes the arrow keys but runs no script and reaches no network", async ({ page, lumo }) => {
+test("The preview is a picture: it takes the arrow keys, runs no script and reaches no network", async ({
+  page,
+  lumo,
+}) => {
+  // What the sanitizer lets through (styles) may still name the network; an SVG decoded as an image loads nothing.
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80" viewBox="0 0 120 80">
+<style>@import url("http://127.0.0.1:1/pwned/import.css"); rect { fill: url("http://127.0.0.1:1/pwned/fill.svg#p") }</style>
+<script>parent.document.documentElement.dataset.marker = "script ran"</script>
+<image href="http://127.0.0.1:1/pwned/pixel.png" width="10" height="10"/>
+<rect width="120" height="80" style="background-image: url('http://127.0.0.1:1/pwned/style.png')"/>
+<path d="M10 10H110V70H10Z" fill="#000"/>
+</svg>`;
+  const worker = `self.postMessage({ type: "ready" });
+self.onmessage = (event) => {
+  if (event.data?.type === "compile") {
+    self.postMessage({ type: "compiled", id: event.data.id, svg: ${JSON.stringify(svg)} });
+  }
+};`;
+  await page.route("**/typst/worker.js", (route) =>
+    route.fulfill({ contentType: "text/javascript", body: worker }),
+  );
   const stored = await uploadPdf(lumo.api, "isolated.pdf", 3, "isolated");
   await seedTranslations(lumo.api, stored.id, 3);
   const leaked: string[] = [];
@@ -668,39 +736,21 @@ test("The preview frame takes the arrow keys but runs no script and reaches no n
     return route.fulfill({ status: 200, contentType: "image/png", body: "" });
   });
   await openTranslatedPage(page, lumo.url, "isolated.pdf");
-  const frame = page.locator(".typst-preview iframe");
-  const preview = page.frameLocator(".typst-preview iframe");
-  const current = page.frameLocator("iframe.pdf-frame").locator("#pageNumber");
-  await expect(frame).toHaveAttribute("sandbox", "allow-same-origin");
-  await expect(preview.locator("body > svg")).toBeVisible();
-
-  // The app can reach into the frame; whatever is put there cannot run, load or call out.
-  const marker = await page.evaluate(async () => {
-    const root = document.documentElement;
-    root.dataset.marker = "app";
-    const inner = document.querySelector<HTMLIFrameElement>(".typst-preview iframe")!.contentDocument!;
-    const script = inner.createElement("script");
-    script.textContent = 'window.parent.document.documentElement.dataset.marker = "script ran"';
-    inner.body.append(script);
-    inner.body.insertAdjacentHTML(
-      "beforeend",
-      '<img src="http://127.0.0.1:1/pwned/pixel.png" onerror="window.parent.document.documentElement.dataset.marker = \'handler ran\'">' +
-        '<iframe src="http://127.0.0.1:1/pwned/frame.html"></iframe>',
-    );
-    const settled = Promise.withResolvers<void>();
-    setTimeout(settled.resolve, 300);
-    await settled.promise;
-    return root.dataset.marker;
+  await page.evaluate(() => {
+    document.documentElement.dataset.marker = "app";
   });
-  expect(marker).toBe("app");
-  expect(leaked).toEqual([]);
+  const preview = page.locator(".typst-preview canvas");
+  const current = page.frameLocator("iframe.pdf-frame").locator("#pageNumber");
+  await expect(current).toHaveAttribute("max", "3");
+  await expect(preview).toBeVisible();
+  await expect(page.locator(".typst-preview svg, .typst-preview iframe")).toHaveCount(0);
 
   // Page after page, and after a recompile, one press turns one page.
-  await preview.locator("body").click();
+  await preview.click();
   await page.keyboard.press("ArrowRight");
   await expect(current).toHaveValue("2");
-  await expect(preview.locator("body > svg")).toBeVisible();
-  await preview.locator("body").click();
+  await expect(preview).toBeVisible();
+  await preview.click();
   await page.keyboard.press("ArrowRight");
   await expect(current).toHaveValue("3");
 
@@ -708,10 +758,12 @@ test("The preview frame takes the arrow keys but runs no script and reaches no n
   await page.getByRole("textbox", { name: "Typst source" }).fill("= Page 3 recompiled");
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect(page.locator(".page-status")).toHaveText(/Saved/, { timeout: 20_000 });
-  await expect(preview.locator("body > svg")).toBeVisible();
-  await preview.locator("body").click();
+  await expect(preview).toBeVisible();
+  await preview.click();
   await page.keyboard.press("ArrowLeft");
   await expect(current).toHaveValue("2");
+  await page.waitForTimeout(300);
+  expect(await page.evaluate(() => document.documentElement.dataset.marker)).toBe("app");
   expect(leaked).toEqual([]);
 });
 

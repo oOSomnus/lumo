@@ -363,7 +363,7 @@ test("EPUB selection is its own unit, the page keeps its translation and the pos
   expect(pageRequest.xhtml).toContain("Hello world from EPUB.");
   expect(pageRequest.images).toHaveLength(1);
   expect(pageRequest.images![0]!.path).toMatch(/^assets\/[a-f0-9]{64}\.jpg$/);
-  await expect(page.locator(".typst-preview iframe")).toBeVisible();
+  await expect(page.locator(".typst-preview canvas")).toBeVisible();
 
   await book()
     .locator("p")
@@ -1275,7 +1275,7 @@ test("an EPUB translation that finishes while the Library is showing is saved an
 
   await page.getByRole("button", { name: "Return to reading", exact: true }).click();
   await expect(page.locator(".page-status")).toHaveText(/Saved/, SAVED);
-  await expect(page.locator(".typst-preview iframe")).toBeVisible();
+  await expect(page.locator(".typst-preview canvas")).toBeVisible();
   expect(await readPosition(page)).toEqual(before);
   expect(requests).toHaveLength(1);
 });
@@ -1308,12 +1308,12 @@ test("ArrowLeft and ArrowRight turn EPUB pages from the viewer, the chapter fram
   await page.keyboard.press("ArrowRight");
   await at(1, 3);
 
-  // The translation's preview frame.
+  // The translation's preview.
   await page.getByRole("button", { name: "Translate this page" }).click();
   await expect(page.locator(".page-status")).toHaveText(/Saved/, SAVED);
-  const preview = page.frameLocator(".typst-preview iframe");
-  await expect(preview.locator("body > svg")).toBeVisible();
-  await preview.locator("body").click();
+  const preview = page.locator(".typst-preview canvas");
+  await expect(preview).toBeVisible();
+  await preview.click();
   await page.keyboard.press("ArrowRight");
   await at(1, 4);
   await page.keyboard.press("ArrowLeft");

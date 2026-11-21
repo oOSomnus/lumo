@@ -41,15 +41,21 @@ export const PDF_THEME_CSS = [
   `html[${PDF_THEME_ATTRIBUTE}="night"] { --body-bg-color: #0b0a09; --toolbar-bg-color: #151310; --sidebar-toolbar-bg-color: #151310; }`,
 ].join("\n");
 
-/** The stylesheet of a translation preview document: its paper and how the rendered page is painted onto it. */
-export function previewThemeCss(theme: ColorTheme): string {
+/** How a translation preview is painted: its paper, how the glyphs land on it, and a filter over the drawn page. */
+export interface PreviewPaint {
+  paper: string;
+  blend: "source-over" | "multiply";
+  filter: string | null;
+}
+
+export function previewPaint(theme: ColorTheme): PreviewPaint {
   switch (theme) {
     case "light":
-      return "html{background:#fff}";
+      return { paper: "#fff", blend: "source-over", filter: null };
     case "sepia":
-      return `html{background:${PAGE_COLORS.sepia.page}}body>svg{mix-blend-mode:multiply}`;
+      return { paper: PAGE_COLORS.sepia.page, blend: "multiply", filter: null };
     case "dark":
     case "night":
-      return `html{background:${PAGE_COLORS[theme].page}}body{background:#fff;filter:${PAGE_FILTERS[theme]}}`;
+      return { paper: "#fff", blend: "source-over", filter: PAGE_FILTERS[theme] };
   }
 }

@@ -4573,8 +4573,6 @@ export function Reader() {
                             onSave={saveCurrentDraft}
                             onDiscard={discardCurrentDraft}
                             immersive={immersive}
-                            onShortcut={handleReaderShortcut}
-                            onPointerActivity={revealPageNav}
                             onRendered={handleTranslationRendered}
                             onPreviewError={() => void exitImmersive()}
                             zoom={translationZoomFrame}
