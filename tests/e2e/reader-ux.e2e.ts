@@ -13,6 +13,7 @@ import {
   translationPath,
   uploadPdf,
 } from "./fixtures";
+import { rasterSize } from "../../src/client/typst-raster";
 
 /** Saved translations give the right pane a preview and a source on every page of the book. */
 async function seedTranslations(api: APIRequestContext, documentId: string, pages: number): Promise<void> {
@@ -348,9 +349,15 @@ test("A long translation scrolls under the mouse wheel without dropping frames",
   await openTranslatedPage(page, lumo.url, "long.pdf");
   const canvas = page.locator(".typst-preview canvas");
   await expect(canvas).toBeVisible();
-  // The page is drawn once, at the box's device-pixel size.
+  // The page is drawn once, at the box's device-pixel size within the raster caps; an undersized canvas does not pass.
   await expect
-    .poll(() => canvas.evaluate((node: HTMLCanvasElement) => node.width - Math.round(node.clientWidth * devicePixelRatio)))
+    .poll(async () => {
+      const drawn = await canvas.evaluate((node: HTMLCanvasElement) => {
+        const box = node.getBoundingClientRect();
+        return { backing: node.width, box: { width: box.width, height: box.height }, dpr: devicePixelRatio };
+      });
+      return Math.abs(drawn.backing - rasterSize(drawn.box, drawn.dpr).width);
+    })
     .toBeLessThanOrEqual(2);
 
   const body = page.locator(".side-pane .page-body");
